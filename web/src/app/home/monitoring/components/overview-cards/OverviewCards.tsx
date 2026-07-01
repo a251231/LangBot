@@ -36,8 +36,7 @@ export default function OverviewCards({
         ? {
             value: metrics.trends.messages,
             direction: (metrics.trends.messages >= 0 ? 'up' : 'down') as
-              | 'up'
-              | 'down',
+              'up' | 'down',
           }
         : undefined,
     },
@@ -49,8 +48,7 @@ export default function OverviewCards({
         ? {
             value: metrics.trends.llmCalls,
             direction: (metrics.trends.llmCalls >= 0 ? 'up' : 'down') as
-              | 'up'
-              | 'down',
+              'up' | 'down',
           }
         : undefined,
     },
@@ -62,8 +60,7 @@ export default function OverviewCards({
         ? {
             value: metrics.trends.successRate,
             direction: (metrics.trends.successRate >= 0 ? 'up' : 'down') as
-              | 'up'
-              | 'down',
+              'up' | 'down',
           }
         : undefined,
     },
@@ -75,8 +72,7 @@ export default function OverviewCards({
         ? {
             value: metrics.trends.sessions,
             direction: (metrics.trends.sessions >= 0 ? 'up' : 'down') as
-              | 'up'
-              | 'down',
+              'up' | 'down',
           }
         : undefined,
     },

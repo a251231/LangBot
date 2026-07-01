@@ -14,6 +14,13 @@ import { IDynamicFormItemSchema } from '@/app/infra/entities/form/dynamic';
 import DynamicFormItemComponent from '@/app/home/components/dynamic-form/DynamicFormItemComponent';
 import { extractI18nObject } from '@/i18n/I18nProvider';
 
+const toFormString = (value: unknown): string => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return String(value);
+};
+
 /**
  * N8n认证表单组件
  * 根据选择的认证类型动态显示相应的表单项
@@ -97,7 +104,7 @@ export default function N8nAuthFormComponent({
       const value = initialValues?.[item.name] ?? item.default;
       return {
         ...acc,
-        [item.name]: value,
+        [item.name]: toFormString(value),
       };
     }, {} as FormValues),
   });
@@ -129,7 +136,9 @@ export default function N8nAuthFormComponent({
       // 合并默认值和初始值
       const mergedValues = itemConfigList.reduce(
         (acc, item) => {
-          acc[item.name] = initialValues[item.name] ?? item.default;
+          acc[item.name] = toFormString(
+            initialValues[item.name] ?? item.default,
+          );
           return acc;
         },
         {} as Record<string, string>,
@@ -152,7 +161,7 @@ export default function N8nAuthFormComponent({
     const formValues = form.getValues();
     const initialFinalValues = itemConfigList.reduce(
       (acc, item) => {
-        acc[item.name] = formValues[item.name] ?? item.default;
+        acc[item.name] = toFormString(formValues[item.name] ?? item.default);
         return acc;
       },
       {} as Record<string, string>,
@@ -173,7 +182,7 @@ export default function N8nAuthFormComponent({
       const formValues = form.getValues();
       const finalValues = itemConfigList.reduce(
         (acc, item) => {
-          acc[item.name] = formValues[item.name] ?? item.default;
+          acc[item.name] = toFormString(formValues[item.name] ?? item.default);
           return acc;
         },
         {} as Record<string, string>,

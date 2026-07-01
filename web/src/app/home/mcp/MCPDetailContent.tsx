@@ -29,11 +29,7 @@ import { toast } from 'sonner';
 
 type MCPRuntimeState = 'connected' | 'connecting' | 'error';
 type MCPConnectionState =
-  | 'connected'
-  | 'connecting'
-  | 'error'
-  | 'disabled'
-  | 'disconnected';
+  'connected' | 'connecting' | 'error' | 'disabled' | 'disconnected';
 
 export default function MCPDetailContent({ id }: { id: string }) {
   const isCreateMode = id === 'new';

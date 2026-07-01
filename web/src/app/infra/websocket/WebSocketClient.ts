@@ -14,12 +14,7 @@ export interface WebSocketMessage {
 
 export interface WebSocketResponse {
   type:
-    | 'connected'
-    | 'response'
-    | 'user_message'
-    | 'pong'
-    | 'broadcast'
-    | 'error';
+    'connected' | 'response' | 'user_message' | 'pong' | 'broadcast' | 'error';
   connection_id?: string;
   pipeline_uuid?: string;
   session_type?: string;

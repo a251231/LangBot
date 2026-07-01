@@ -1,6 +1,6 @@
 """repair knowledge base plugin architecture columns
 
-Revision ID: 0004_repair_knowledge_base_plugin_columns
+Revision ID: 0004_repair_kb_plugin_cols
 Revises: 0003_add_rerank_models
 Create Date: 2026-04-23
 """
@@ -8,7 +8,7 @@ Create Date: 2026-04-23
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0004_repair_knowledge_base_plugin_columns'
+revision = '0004_repair_kb_plugin_cols'
 down_revision = '0003_add_rerank_models'
 branch_labels = None
 depends_on = None

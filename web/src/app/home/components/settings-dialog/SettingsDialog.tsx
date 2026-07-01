@@ -26,10 +26,7 @@ import StorageAnalysisPanel from '@/app/home/components/storage-analysis-dialog/
 // The set of settings sections shown in the unified dialog. The string values
 // are also reused as the ?action= query param suffix so deep links keep working.
 export type SettingsSection =
-  | 'account'
-  | 'apiIntegration'
-  | 'models'
-  | 'storageAnalysis';
+  'account' | 'apiIntegration' | 'models' | 'storageAnalysis';
 
 // Map between a section id and its ?action= query value, so existing deep links
 // (showAccountSettings, showApiIntegrationSettings, showModelSettings,
