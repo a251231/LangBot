@@ -136,7 +136,9 @@ export default function N8nAuthFormComponent({
       // 合并默认值和初始值
       const mergedValues = itemConfigList.reduce(
         (acc, item) => {
-          acc[item.name] = toFormString(initialValues[item.name] ?? item.default);
+          acc[item.name] = toFormString(
+            initialValues[item.name] ?? item.default,
+          );
           return acc;
         },
         {} as Record<string, string>,

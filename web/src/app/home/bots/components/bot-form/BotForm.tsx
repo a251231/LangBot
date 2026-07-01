@@ -288,8 +288,7 @@ export default function BotForm({
         .then((res) => {
           const bot = res.bot;
           const runtimeValues = bot.adapter_runtime_values as
-            | Record<string, unknown>
-            | undefined;
+            Record<string, unknown> | undefined;
           resolve({
             adapter: bot.adapter,
             description: bot.description,
@@ -299,11 +298,9 @@ export default function BotForm({
             use_pipeline_uuid: bot.use_pipeline_uuid ?? '',
             pipeline_routing_rules: bot.pipeline_routing_rules ?? [],
             webhook_full_url: runtimeValues?.webhook_full_url as
-              | string
-              | undefined,
+              string | undefined,
             extra_webhook_full_url: runtimeValues?.extra_webhook_full_url as
-              | string
-              | undefined,
+              string | undefined,
           });
         })
         .catch((err) => {

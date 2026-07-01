@@ -195,19 +195,11 @@ export interface Bot {
 }
 
 export type RoutingRuleOperator =
-  | 'eq'
-  | 'neq'
-  | 'contains'
-  | 'not_contains'
-  | 'starts_with'
-  | 'regex';
+  'eq' | 'neq' | 'contains' | 'not_contains' | 'starts_with' | 'regex';
 
 export interface PipelineRoutingRule {
   type:
-    | 'launcher_type'
-    | 'launcher_id'
-    | 'message_content'
-    | 'message_has_element';
+    'launcher_type' | 'launcher_id' | 'message_content' | 'message_has_element';
   operator: RoutingRuleOperator;
   value: string;
   pipeline_uuid: string;
