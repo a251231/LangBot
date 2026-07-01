@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import datetime
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 import langbot_plugin.api.entities.builtin.platform.message as platform_message
 
@@ -26,12 +29,19 @@ class DummyPlugin:
 class DummyEvent:
     model_fields = {"reply_message_chain": object()}
 
-    def __init__(self, text: str, launcher_type: str = "group"):
+    def __init__(
+        self,
+        text: str,
+        launcher_type: str = "group",
+        message_event_time: datetime.datetime | None = None,
+    ):
         self.launcher_type = launcher_type
         self.launcher_id = "launcher-id"
         self.query = SimpleNamespace(bot_uuid="bot-uuid")
         self.message_chain = platform_message.MessageChain([platform_message.Plain(text=text)])
         self.reply_message_chain: platform_message.MessageChain | None = None
+        if message_event_time is not None:
+            self.message_event = SimpleNamespace(time=message_event_time)
 
 
 class DummyEventContext:
@@ -168,6 +178,101 @@ class TouchMaterialListenerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plain_texts, ["report-ok"])
         self.assertTrue(self._has_reply_image(ctx.event))
 
+    async def test_scheduled_report_sends_once_when_event_hits_window(self) -> None:
+        listener = self._build_listener()
+        plugin = DummyPlugin(
+            {
+                "keyword_commands": "日报",
+                "scheduled_report_enabled": True,
+                "scheduled_report_time": "08:30",
+                "scheduled_report_target_type": "group",
+                "scheduled_report_target_id": "production-chat",
+                "scheduled_report_window_minutes": "5",
+                "reply_in_group": True,
+                "reply_in_person": True,
+            }
+        )
+        listener.plugin = plugin
+        listener._dispatch_report = AsyncMock(  # type: ignore[method-assign]
+            return_value={"text": "2026.07.01 制程及成品日报\n生产正常", "used_sheets": [], "source": "sheets"}
+        )
+
+        event_time = datetime.datetime(2026, 7, 1, 8, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+        first_ctx = DummyEventContext(DummyEvent("现场消息", message_event_time=event_time))
+        second_ctx = DummyEventContext(DummyEvent("另一条现场消息", message_event_time=event_time))
+
+        await listener._handle_command(first_ctx)
+        await listener._handle_command(second_ctx)
+
+        listener._dispatch_report.assert_awaited_once_with(date_arg=None, command_sheets=[])  # type: ignore[attr-defined]
+        self.assertEqual(len(plugin.sent_messages), 1)
+        self.assertEqual(self._extract_plain_texts(SimpleNamespace(reply_message_chain=plugin.sent_messages[0])), ["2026.07.01 制程及成品日报\n生产正常"])
+        self.assertFalse(first_ctx.default_prevented)
+        self.assertFalse(second_ctx.default_prevented)
+
+    async def test_scheduled_report_can_send_feishu_card(self) -> None:
+        listener = self._build_listener()
+        plugin = DummyPlugin(
+            {
+                "keyword_commands": "日报",
+                "scheduled_report_enabled": True,
+                "scheduled_report_time": "08:30",
+                "scheduled_report_target_type": "open_id",
+                "scheduled_report_target_id": "ou-target",
+                "scheduled_report_window_minutes": "5",
+                "scheduled_report_message_mode": "card",
+                "reply_in_group": True,
+                "reply_in_person": True,
+            }
+        )
+        listener.plugin = plugin
+        listener._dispatch_report = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "text": "2026.07.01 生产日报\n\n一、今日生产概况\n- 当前状态：需关注",
+                "used_sheets": [],
+                "source": "sheets",
+            }
+        )
+        listener._send_feishu_interactive_card = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        event_time = datetime.datetime(2026, 7, 1, 8, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+        ctx = DummyEventContext(DummyEvent("现场消息", message_event_time=event_time))
+
+        await listener._handle_command(ctx)
+
+        listener._dispatch_report.assert_awaited_once_with(date_arg=None, command_sheets=[])  # type: ignore[attr-defined]
+        listener._send_feishu_interactive_card.assert_awaited_once()  # type: ignore[attr-defined]
+        card_call = listener._send_feishu_interactive_card.await_args.kwargs  # type: ignore[attr-defined]
+        self.assertEqual(card_call["target_type"], "open_id")
+        self.assertEqual(card_call["target_id"], "ou-target")
+        self.assertEqual(card_call["card"]["header"]["title"]["content"], "2026.07.01 生产日报")
+        self.assertIn("**一、今日生产概况**", json.dumps(card_call["card"], ensure_ascii=False))
+        self.assertEqual(plugin.sent_messages, [])
+
+    def test_build_report_card_uses_feishu_markdown_sections(self) -> None:
+        listener = self._build_listener()
+        payload = {
+            "text": (
+                "2026.06.30 生产日报\n\n"
+                "一、今日生产概况\n"
+                "- 当前状态：需关注\n\n"
+                "二、各线别生产状态\n"
+                "- S18-C线：涉及批次 DC2606-102~105"
+            ),
+            "source": "sheets",
+        }
+
+        card = listener._build_report_card(payload)
+
+        self.assertEqual(card["config"]["wide_screen_mode"], True)
+        self.assertEqual(card["header"]["template"], "orange")
+        self.assertEqual(card["header"]["title"]["content"], "2026.06.30 生产日报")
+        serialized = json.dumps(card, ensure_ascii=False)
+        self.assertIn("**一、今日生产概况**", serialized)
+        self.assertIn("**需关注**", serialized)
+        self.assertIn("**S18-C线**", serialized)
+        self.assertIn("**DC2606-102~105**", serialized)
+
     async def test_image_command_reply_image(self) -> None:
         listener = self._build_listener()
         listener._run_touch_material_report = AsyncMock(return_value="touch-ok")  # type: ignore[method-assign]
@@ -261,8 +366,31 @@ class TouchMaterialListenerTest(unittest.IsolatedAsyncioTestCase):
             cell_range="A1:ZZ2000",
         )
         mock_build.assert_called_once()
-        self.assertEqual(mock_build.call_args.kwargs["report_output_style"], "concise")
+        self.assertEqual(mock_build.call_args.kwargs["report_output_style"], "production")
         self.assertEqual(payload["used_sheets"], ["S18-A线", "S006-A线", "S006-B线", "S20-C线"])
+
+    async def test_run_sheets_report_allows_legacy_concise_style_config(self) -> None:
+        listener = self._build_listener()
+        listener.plugin = DummyPlugin(
+            {
+                "sheets_spreadsheet_token": "sp_token",
+                "sheets_sheet_names": "S18-A线",
+                "report_output_style": "concise",
+            }
+        )
+        listener._build_auth_headers = AsyncMock(return_value={"Authorization": "Bearer test"})  # type: ignore[method-assign]
+        listener._sheets_source.list_sheet_titles = AsyncMock(return_value=["S18-A线"])  # type: ignore[method-assign]
+        listener._sheets_source.fetch_line_matrices = AsyncMock(  # type: ignore[method-assign]
+            return_value=({"S18-A线": [["批次", "投料日期"], ["DA2603-001", "2026-03-03"]]}, ["S18-A线"], [])
+        )
+
+        with patch(
+            "components.event_listeners.keyword_bitable_report.day_metrics.build_standard_report_from_matrices",
+            return_value={"text": "report-ok", "line_errors": [], "used_sheets": ["S18-A线"]},
+        ) as mock_build:
+            await listener._run_sheets_report(date_arg=None, command_sheets=[])
+
+        self.assertEqual(mock_build.call_args.kwargs["report_output_style"], "concise")
 
     async def test_run_sheets_report_resolves_wiki_token_from_legacy_config(self) -> None:
         listener = self._build_listener()

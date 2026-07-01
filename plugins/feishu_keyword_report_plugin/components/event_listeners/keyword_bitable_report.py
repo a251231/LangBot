@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import re
 import time
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -57,6 +59,7 @@ class KeywordBitableReportListener(EventListener):
 
         self._bitable_source = FeishuBitableSource(self._call_feishu_json_api)
         self._sheets_source = FeishuSheetsSource(self._call_feishu_json_api)
+        self._scheduled_report_sent_keys: set[str] = set()
 
     async def initialize(self) -> None:
         await super().initialize()
@@ -109,6 +112,13 @@ class KeywordBitableReportListener(EventListener):
         except Exception:
             value = default
         return max(min_value, min(max_value, value))
+
+    def _get_time_zone(self) -> ZoneInfo:
+        name = self._get_str_config("time_zone", "Asia/Shanghai") or "Asia/Shanghai"
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            return ZoneInfo("Asia/Shanghai")
 
     def _get_json_config(self, key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
         fallback = dict(default) if isinstance(default, dict) else {}
@@ -165,6 +175,43 @@ class KeywordBitableReportListener(EventListener):
         if mode not in {"auto", "sheets", "bitable"}:
             return "auto"
         return mode
+
+    @staticmethod
+    def _parse_hhmm(value: str) -> tuple[int, int] | None:
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value)
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour, minute
+
+    def _resolve_event_datetime(self, event_ctx: context.EventContext) -> datetime.datetime:
+        raw_time = getattr(getattr(event_ctx.event, "message_event", None), "time", None)
+        tz = self._get_time_zone()
+        if isinstance(raw_time, datetime.datetime):
+            return raw_time.astimezone(tz) if raw_time.tzinfo else raw_time.replace(tzinfo=tz)
+        if isinstance(raw_time, (int, float)):
+            timestamp = float(raw_time)
+            if timestamp > 10_000_000_000:
+                timestamp = timestamp / 1000.0
+            return datetime.datetime.fromtimestamp(timestamp, tz)
+        return datetime.datetime.now(tz)
+
+    def _scheduled_report_due(self, now: datetime.datetime) -> tuple[bool, str]:
+        if not self._get_bool_config("scheduled_report_enabled", False):
+            return False, ""
+        target_time = self._parse_hhmm(self._get_str_config("scheduled_report_time", ""))
+        if target_time is None:
+            return False, ""
+        target_hour, target_minute = target_time
+        target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        window_minutes = self._get_int_config("scheduled_report_window_minutes", 5, 1, 120)
+        delta_seconds = (now - target).total_seconds()
+        if delta_seconds < 0 or delta_seconds > window_minutes * 60:
+            return False, ""
+        return True, f"{now.date().isoformat()} {target_hour:02d}:{target_minute:02d}"
 
     @staticmethod
     def _dedupe_sheet_names(sheet_names: list[str]) -> list[str]:
@@ -374,6 +421,18 @@ class KeywordBitableReportListener(EventListener):
 
         return "\n".join(result).strip()
 
+    def _resolve_scheduled_report_message_mode(self) -> str:
+        mode = self._get_str_config("scheduled_report_message_mode", "text").lower()
+        if mode not in {"text", "card"}:
+            return "text"
+        return mode
+
+    def _resolve_report_command_message_mode(self) -> str:
+        mode = self._get_str_config("report_command_message_mode", "card").lower()
+        if mode not in {"text", "card"}:
+            return "card"
+        return mode
+
     # ===== Message helpers =====
 
     @staticmethod
@@ -451,6 +510,96 @@ class KeywordBitableReportListener(EventListener):
         if not text:
             return
         await self._reply_message_chain(event_ctx, platform_message.MessageChain([platform_message.Plain(text=text)]))
+
+    async def _send_message_chain_to_target(
+        self,
+        *,
+        bot_uuid: str,
+        target_type: str,
+        target_id: str,
+        message_chain: platform_message.MessageChain,
+    ) -> bool:
+        if not bot_uuid or not target_type or not target_id or len(message_chain) <= 0:
+            return False
+        await self.plugin.send_message(
+            bot_uuid=bot_uuid,
+            target_type=target_type,
+            target_id=target_id,
+            message_chain=message_chain,
+        )
+        return True
+
+    # ===== Feishu card helpers =====
+
+    @staticmethod
+    def _split_report_text_sections(text: str) -> tuple[str, list[tuple[str, str]]]:
+        lines = [line.rstrip() for line in str(text or "").strip().splitlines()]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        title = lines[0].strip() if lines else "生产日报"
+        sections: list[tuple[str, str]] = []
+        current_title = ""
+        current_lines: list[str] = []
+        section_title_pattern = re.compile(r"^[一二三四五六七八九十]+、")
+
+        for raw_line in lines[1:]:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if section_title_pattern.match(line):
+                if current_title or current_lines:
+                    sections.append((current_title, "\n".join(current_lines).strip()))
+                current_title = line
+                current_lines = []
+            else:
+                current_lines.append(line)
+        if current_title or current_lines:
+            sections.append((current_title, "\n".join(current_lines).strip()))
+        if not sections and title:
+            sections.append(("", "\n".join(lines[1:]).strip()))
+        return title, sections
+
+    @staticmethod
+    def _format_report_card_markdown(text: str) -> str:
+        formatted = str(text or "").strip()
+        if not formatted:
+            return ""
+        formatted = re.sub(r"(^|\n)- 当前状态：([^，；。\n]+)", r"\1- 当前状态：**\2**", formatted)
+        formatted = re.sub(r"(?<!\*)\b(S(?:18|20|006)-{1,2}[A-E](?:线|产线)?)\b(?!\*)", r"**\1**", formatted)
+        formatted = re.sub(r"(?<!\*)\b(D[A-E]\d{4}-\d{3}(?:~\d{3})?)\b(?!\*)", r"**\1**", formatted)
+        formatted = re.sub(r"(?<!\*)\b(\d+/\d+批次(?:低于下限|高于上限|超规))\b(?!\*)", r"**\1**", formatted)
+        return formatted
+
+    def _build_report_card(self, payload: dict[str, Any]) -> dict[str, Any]:
+        text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else ""
+        title, sections = self._split_report_text_sections(text)
+        template = self._get_str_config("scheduled_report_card_template", "orange") or "orange"
+        card: dict[str, Any] = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": template,
+                "title": {"tag": "plain_text", "content": title or "生产日报"},
+            },
+            "elements": [],
+        }
+        elements: list[dict[str, Any]] = []
+        for idx, (section_title, body) in enumerate(sections):
+            if idx:
+                elements.append({"tag": "hr"})
+            content_parts: list[str] = []
+            if section_title:
+                content_parts.append(f"**{section_title}**")
+            body_md = self._format_report_card_markdown(body)
+            if body_md:
+                content_parts.append(body_md)
+            content = "\n".join(content_parts).strip()
+            if not content:
+                continue
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
+        if not elements:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": title or "暂无日报内容"}})
+        card["elements"] = elements
+        return card
 
     # ===== Feishu API =====
 
@@ -531,6 +680,50 @@ class KeywordBitableReportListener(EventListener):
         if not isinstance(data, dict):
             return {}
         return data
+
+    async def _send_feishu_interactive_card(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        card: dict[str, Any],
+    ) -> bool:
+        target_type_map = {
+            "group": "chat_id",
+            "chat": "chat_id",
+            "chat_id": "chat_id",
+            "person": "open_id",
+            "friend": "open_id",
+            "user": "open_id",
+            "open_id": "open_id",
+            "user_id": "user_id",
+            "union_id": "union_id",
+            "email": "email",
+        }
+        receive_id_type = target_type_map.get(str(target_type).strip().lower())
+        if not receive_id_type or not target_id:
+            return False
+        headers = await self._build_auth_headers()
+        endpoint = f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}"
+        payload = {
+            "receive_id": str(target_id).strip(),
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        }
+        await self._call_feishu_json_api("POST", endpoint, headers=headers, payload=payload)
+        return True
+
+    @staticmethod
+    def _resolve_event_card_target(event_ctx: context.EventContext) -> tuple[str, str] | None:
+        launcher_type = str(getattr(event_ctx.event, "launcher_type", "")).strip().lower()
+        launcher_id = str(getattr(event_ctx.event, "launcher_id", "")).strip()
+        if not launcher_id:
+            return None
+        if launcher_type == "group":
+            return "group", launcher_id
+        if launcher_type == "person":
+            return "person", launcher_id
+        return None
 
     @staticmethod
     def _extract_lark_token(raw: str) -> str:
@@ -687,7 +880,7 @@ class KeywordBitableReportListener(EventListener):
             spec_registry_json=self._resolve_spec_registry_json(),
             metric_aliases_json=self._resolve_report_metric_aliases_json(),
             auto_fix_quality=False,
-            report_output_style=self._get_str_config("report_output_style", "concise"),
+            report_output_style=self._get_str_config("report_output_style", "production"),
         )
         text = str(report.get("text", "")).strip()
         text = self._strip_trend_sections(
@@ -759,8 +952,9 @@ class KeywordBitableReportListener(EventListener):
                 "source": "bitable_fallback",
             }
 
-    async def _build_report_reply_chain(self, payload: dict[str, Any]) -> platform_message.MessageChain:
-        components: list[platform_message.Plain | platform_message.Image] = []
+    async def _build_report_snapshot_components(
+        self, payload: dict[str, Any]
+    ) -> list[platform_message.Plain | platform_message.Image]:
         used_sheets_raw = payload.get("used_sheets", []) if isinstance(payload, dict) else []
         used_sheets = (
             [str(item).strip() for item in used_sheets_raw if str(item).strip()]
@@ -770,14 +964,82 @@ class KeywordBitableReportListener(EventListener):
         source = str(payload.get("source", "")).strip() if isinstance(payload, dict) else ""
         if source == "sheets" and used_sheets:
             try:
-                components.extend(await self._build_sheet_snapshot_components(used_sheets, strict=False))
+                return await self._build_sheet_snapshot_components(used_sheets, strict=False)
             except Exception:
                 pass
+        return []
 
+    async def _build_report_reply_chain(self, payload: dict[str, Any]) -> platform_message.MessageChain:
+        components: list[platform_message.Plain | platform_message.Image] = []
+        components.extend(await self._build_report_snapshot_components(payload))
         text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else ""
         if text:
             components.append(platform_message.Plain(text=text))
         return platform_message.MessageChain(components)
+
+    async def _reply_report_payload(self, event_ctx: context.EventContext, payload: dict[str, Any]) -> None:
+        if self._resolve_report_command_message_mode() != "card":
+            await self._reply_message_chain(event_ctx, await self._build_report_reply_chain(payload))
+            return
+
+        snapshot_components = await self._build_report_snapshot_components(payload)
+        text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else ""
+        if snapshot_components:
+            await self._reply_message_chain(event_ctx, platform_message.MessageChain(snapshot_components))
+
+        card_sent = False
+        target = self._resolve_event_card_target(event_ctx)
+        if target is not None and text:
+            try:
+                card_sent = await self._send_feishu_interactive_card(
+                    target_type=target[0],
+                    target_id=target[1],
+                    card=self._build_report_card(payload),
+                )
+            except Exception:
+                card_sent = False
+
+        if card_sent:
+            return
+
+        fallback_components = list(snapshot_components)
+        if text:
+            fallback_components.append(platform_message.Plain(text=text))
+        await self._reply_message_chain(event_ctx, platform_message.MessageChain(fallback_components))
+
+    async def _maybe_send_scheduled_report(self, event_ctx: context.EventContext) -> None:
+        now = self._resolve_event_datetime(event_ctx)
+        due, slot_key = self._scheduled_report_due(now)
+        if not due or not slot_key:
+            return
+
+        target_type = self._get_str_config("scheduled_report_target_type", "group") or "group"
+        target_id = self._get_str_config("scheduled_report_target_id", "")
+        if not target_id:
+            return
+
+        bot_uuid = await self._resolve_bot_uuid(event_ctx)
+        sent_key = f"{slot_key}|{target_type}|{target_id}|{bot_uuid}"
+        if sent_key in self._scheduled_report_sent_keys:
+            return
+
+        payload = await self._dispatch_report(date_arg=None, command_sheets=[])
+        if self._resolve_scheduled_report_message_mode() == "card":
+            sent = await self._send_feishu_interactive_card(
+                target_type=target_type,
+                target_id=target_id,
+                card=self._build_report_card(payload),
+            )
+        else:
+            message_chain = await self._build_report_reply_chain(payload)
+            sent = await self._send_message_chain_to_target(
+                bot_uuid=bot_uuid,
+                target_type=target_type,
+                target_id=target_id,
+                message_chain=message_chain,
+            )
+        if sent:
+            self._scheduled_report_sent_keys.add(sent_key)
 
     async def _run_sheet_snapshot_reply(self, sheet_name: str) -> platform_message.MessageChain:
         components = await self._build_sheet_snapshot_components([sheet_name], strict=True)
@@ -959,6 +1221,11 @@ class KeywordBitableReportListener(EventListener):
     # ===== Entry =====
 
     async def _handle_command(self, event_ctx: context.EventContext) -> None:
+        try:
+            await self._maybe_send_scheduled_report(event_ctx)
+        except Exception:
+            pass
+
         plain_text = self._extract_plain_text(event_ctx.event.message_chain)
         if not plain_text:
             return
@@ -1033,7 +1300,6 @@ class KeywordBitableReportListener(EventListener):
                 date_arg=command.date_arg,
                 command_sheets=command.sheet_names,
             )
-            reply_chain = await self._build_report_reply_chain(payload)
-            await self._reply_message_chain(event_ctx, reply_chain)
+            await self._reply_report_payload(event_ctx, payload)
         except Exception as exc:
             await self._reply_text(event_ctx, f"日报查询失败：{exc}")

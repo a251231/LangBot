@@ -4,6 +4,8 @@
 
 这个插件是 `EventListener` 方式：收到消息自动处理，不依赖模型工具调用。
 
+现场使用时不需要在插件里维护固定群白名单。机器人被拉进哪个生产群，插件就按该群收到的消息进行 OCR、解析、写表或进入待确认池；历史实测群只作为样本来源，不是长期范围限制。
+
 ## 内置工艺解析
 
 - `particle_size`：图片/OCR 粒度数据（`D10/D50/D90/D99`）
@@ -72,6 +74,27 @@
 - `enable_recall_restore_previous`：撤回时优先恢复上一版本（默认 `true`）
 - `history_table_id` / `history_table_name`：写入历史快照表，用于撤回恢复
 - `auto_create_history_table`：未指定历史表 ID 时自动创建历史表（默认 `true`）
+- `enable_pending_confirmation`：启用现场数据待确认池（默认 `false`）
+- `pending_confirmation_table_id` / `pending_confirmation_table_name`：待确认池表配置
+- `auto_create_pending_confirmation_table`：只允许自动创建待确认池表，不影响业务表自动建表策略（默认 `false`）
+- `pending_default_status`：待确认记录默认状态（默认 `待确认`）
+
+## 现场待确认池
+
+当图片 OCR 有文本但未能自动写入业务表时，可以开启 `enable_pending_confirmation`，把消息沉淀到后台待确认池，供文员或班组长复核。待确认池不会进入生产日报主文，避免把未确认数据当作生产结论。
+
+待确认池默认字段包括：
+
+- `处理状态`
+- `内容分类`：如 `CP成品待确认`、`FS工序图`、`SC工序图`、`F半成品图`、`质量检测待确认`、`无效图片`
+- `失败原因`
+- `消息时间`
+- `来源群ID`
+- `会话ID`
+- `会话类型`
+- `来源消息ID`
+- `OCR文本`
+- `原始文本`
 
 ## table_routing_json 示例
 

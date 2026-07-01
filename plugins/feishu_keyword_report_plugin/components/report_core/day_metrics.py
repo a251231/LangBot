@@ -2274,6 +2274,10 @@ _LEADER_KEY_METRICS: list[tuple[str, str, int, str]] = [
 ]
 
 
+def _line_without_sintering_compaction(line_label: str) -> bool:
+    return bool(re.search(r"[-_](C|D|E)(?:线|产线)?$", str(line_label).strip(), flags=re.IGNORECASE))
+
+
 def _stat_is_abnormal(stat: Any) -> bool:
     if not isinstance(stat, dict):
         return False
@@ -2311,6 +2315,8 @@ def _leader_abnormal_item_text(line_label: str, key: str, stat: Any) -> str:
 def _leader_key_metric_line(line_label: str, metrics: dict[str, Any]) -> str:
     parts: list[str] = []
     for section, key, decimals, unit in _LEADER_KEY_METRICS:
+        if section == "制程" and key == "烧结压实" and _line_without_sintering_compaction(line_label):
+            continue
         st = metrics.get(section, {}).get(key)
         if not isinstance(st, dict):
             continue
@@ -2321,6 +2327,218 @@ def _leader_key_metric_line(line_label: str, metrics: dict[str, Any]) -> str:
     if not parts:
         return f"{line_label} 无有效数据"
     return f"{line_label} " + "，".join(parts)
+
+
+def _production_metric_text(
+    metrics: dict[str, Any],
+    section: str,
+    key: str,
+    decimals: int,
+    unit: str = "",
+) -> str:
+    st = metrics.get(section, {}).get(key) if isinstance(metrics, dict) else None
+    if not isinstance(st, dict) or not _state_has_data(_stat_state(st)):
+        return ""
+    value = _fmt_range(st, decimals)
+    return f"{key}{_with_unit(value, unit)}"
+
+
+def _production_source_batch(metrics: dict[str, Any]) -> str:
+    candidates = [
+        ("成品", "0.1C放电"),
+        ("成品", "成品压实"),
+        ("制程", "粉碎压实"),
+        ("制程", "烧结压实"),
+        ("成品", "残碱(Li+)"),
+    ]
+    for section, key in candidates:
+        st = metrics.get(section, {}).get(key) if isinstance(metrics, dict) else None
+        if not isinstance(st, dict):
+            continue
+        summary = st.get("来源批次摘要")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+    return "批次未知"
+
+
+def _production_status_summary(stat: dict[str, Any]) -> str:
+    batch_judge = stat.get("批次判异") if isinstance(stat, dict) else None
+    if isinstance(batch_judge, dict):
+        total = int(batch_judge.get("总批次", 0))
+        abnormal = int(batch_judge.get("异常批次", 0))
+        if total > 0 and abnormal > 0:
+            low = int(batch_judge.get("低于下限批次", 0))
+            high = int(batch_judge.get("高于上限批次", 0))
+            directions: list[str] = []
+            if low:
+                directions.append("低于下限")
+            if high:
+                directions.append("高于上限")
+            suffix = "、".join(directions) if directions else "超规"
+            return f"{abnormal}/{total}批次{suffix}"
+    status = _fmt_status(stat, force=False, show_spec_attention=False)
+    return status.strip("（）") if status else "异常"
+
+
+def _production_line_status(line_label: str, metrics: dict[str, Any]) -> str:
+    batch_text = _production_source_batch(metrics)
+    parts: list[str] = [f"涉及批次 {batch_text}"]
+    if not _line_without_sintering_compaction(line_label):
+        sinter = _production_metric_text(metrics, "制程", "烧结压实", 3)
+        if sinter:
+            parts.append(sinter)
+    for section, key, decimals, unit in [
+        ("制程", "粉碎压实", 3, ""),
+        ("成品", "成品压实", 3, ""),
+        ("成品", "残碱(Li+)", 0, "ppm"),
+    ]:
+        text = _production_metric_text(metrics, section, key, decimals, unit)
+        if text:
+            parts.append(text)
+    return f"- {line_label}：" + "，".join(parts)
+
+
+def _production_quality_status(line_label: str, metrics: dict[str, Any]) -> str:
+    parts: list[str] = []
+    abnormal_keys: list[str] = []
+    for key in ("0.1C充电", "0.1C放电", "首效", "平台效率"):
+        st = metrics.get("成品", {}).get(key) if isinstance(metrics, dict) else None
+        if isinstance(st, dict) and _stat_is_abnormal(st):
+            abnormal_keys.append(key)
+    if abnormal_keys:
+        parts.append("、".join(abnormal_keys) + "存在超规批次")
+    else:
+        parts.append("关键指标已出" if metrics else "暂无有效质量数据")
+
+    for section, key, decimals, unit in [
+        ("成品", "成品压实", 3, ""),
+        ("成品", "0.1C放电", 1, ""),
+        ("成品", "首效", 2, ""),
+        ("成品", "残碱(Li+)", 0, "ppm"),
+    ]:
+        text = _production_metric_text(metrics, section, key, decimals, unit)
+        if text:
+            parts.append(text)
+    return f"- {line_label}：" + "，".join(parts)
+
+
+def _production_abnormal_line(line_label: str, metrics: dict[str, Any]) -> str | None:
+    items: list[str] = []
+    for section, key in _LEADER_ABNORMAL_KEYS:
+        if section == "制程" and key == "烧结压实" and _line_without_sintering_compaction(line_label):
+            continue
+        st = metrics.get(section, {}).get(key) if isinstance(metrics, dict) else None
+        if isinstance(st, dict) and _stat_is_abnormal(st):
+            items.append(f"{key}{_production_status_summary(st)}")
+    if not items:
+        return None
+    return f"- {line_label} {_production_source_batch(metrics)}：" + "，".join(items) + "。"
+
+
+def _production_pending_line(line_label: str, metrics: dict[str, Any]) -> str | None:
+    batch_text = _production_source_batch(metrics)
+    missing: list[str] = []
+    for section, key in [
+        ("成品", "粉阻(粉末电阻)"),
+        ("成品", "碳含量"),
+    ]:
+        st = metrics.get(section, {}).get(key) if isinstance(metrics, dict) else None
+        if not isinstance(st, dict) or not _state_has_data(_stat_state(st)):
+            missing.append(key)
+    if not _line_without_sintering_compaction(line_label):
+        st = metrics.get("制程", {}).get("烧结压实") if isinstance(metrics, dict) else None
+        if not isinstance(st, dict) or not _state_has_data(_stat_state(st)):
+            missing.insert(0, "烧结压实")
+    if missing:
+        return f"- 补齐 {line_label} {batch_text} " + "、".join(missing) + "数据"
+
+    abnormal_electrochem = []
+    for key in ("0.1C充电", "0.1C放电", "首效", "平台效率"):
+        st = metrics.get("成品", {}).get(key) if isinstance(metrics, dict) else None
+        if isinstance(st, dict) and _stat_is_abnormal(st):
+            abnormal_electrochem.append(key)
+    if abnormal_electrochem:
+        return f"- 对比 {line_label} {batch_text} 同线近3-7批扣电数据，确认是否为单项波动"
+    return None
+
+
+def build_production_daily_text(line_reports: list[dict[str, Any]], show_spec_attention: bool = True) -> str:
+    valid_reports = [
+        r
+        for r in line_reports
+        if isinstance(r, dict) and isinstance(r.get("metrics"), dict) and isinstance(r.get("line_label"), str)
+    ]
+    if not valid_reports:
+        return ""
+
+    report_dates = [r.get("report_date") for r in valid_reports if isinstance(r.get("report_date"), dt.date)]
+    date_set = sorted({d for d in report_dates if isinstance(d, dt.date)})
+    if len(date_set) == 1:
+        date_str = _fmt_report_date(date_set[0])
+    else:
+        date_str = "/".join(_fmt_report_date(d) for d in date_set) if date_set else _fmt_report_date(dt.date.today())
+
+    line_labels = [str(r["line_label"]) for r in valid_reports]
+    abnormal_lines: list[str] = []
+    main_focus: list[str] = []
+    for r in valid_reports:
+        line_label = str(r["line_label"])
+        metrics = r["metrics"]
+        line_items: list[str] = []
+        for section, key in _LEADER_ABNORMAL_KEYS:
+            if section == "制程" and key == "烧结压实" and _line_without_sintering_compaction(line_label):
+                continue
+            st = metrics.get(section, {}).get(key)
+            if isinstance(st, dict) and _stat_is_abnormal(st):
+                line_items.append(key)
+        if line_items:
+            abnormal_lines.append(line_label)
+            main_focus.append(f"{line_label}{'、'.join(line_items[:2])}异常")
+
+    current_status = "需关注" if abnormal_lines else "正常"
+    focus_text = "，".join(main_focus[:3]) if main_focus else "各线关键指标暂无主异常"
+
+    status_lines = [_production_line_status(str(r["line_label"]), r["metrics"]) for r in valid_reports]
+    quality_lines = [_production_quality_status(str(r["line_label"]), r["metrics"]) for r in valid_reports]
+    abnormal_texts = [
+        item
+        for item in (_production_abnormal_line(str(r["line_label"]), r["metrics"]) for r in valid_reports)
+        if item
+    ]
+    pending_texts = list(
+        dict.fromkeys(
+            item
+            for item in (_production_pending_line(str(r["line_label"]), r["metrics"]) for r in valid_reports)
+            if item
+        )
+    )
+
+    if not abnormal_texts:
+        abnormal_texts = ["- 暂未发现主异常。"]
+    if not pending_texts:
+        pending_texts = ["- 暂无待处理生产事项。"]
+
+    lines = [
+        f"{date_str} 生产日报",
+        "",
+        "一、今日生产概况",
+        f"- 纳入统计线别：{'、'.join(line_labels)}",
+        f"- 当前状态：{current_status}",
+        f"- 主要关注：{focus_text}",
+        "",
+        "二、各线别生产状态",
+        *status_lines,
+        "",
+        "三、质量检测情况",
+        *quality_lines,
+        "",
+        "四、异常分析与调整方向",
+        *abnormal_texts,
+        "",
+        "五、待处理事项",
+        *pending_texts,
+    ]
+    return "\n".join(lines).strip()
 
 
 def build_wecom_text_leader(line_reports: list[dict[str, Any]], show_spec_attention: bool = True) -> str:
@@ -2348,6 +2566,8 @@ def build_wecom_text_leader(line_reports: list[dict[str, Any]], show_spec_attent
         metrics = r["metrics"]
         key_metric_lines.append(_leader_key_metric_line(line_label, metrics))
         for section, key in _LEADER_ABNORMAL_KEYS:
+            if section == "制程" and key == "烧结压实" and _line_without_sintering_compaction(line_label):
+                continue
             st = metrics.get(section, {}).get(key)
             if show_spec_attention and _spec_health_is_suspect(st):
                 spec_attention_items.append(f"{line_label} {key}")
@@ -2870,6 +3090,8 @@ def build_standard_report_from_matrices(
         text = detail_text
     elif output_style == "hybrid":
         text = leader_text if not detail_text else (leader_text + "\n\n【工程版】\n" + detail_text)
+    elif output_style == "production":
+        text = build_production_daily_text(line_reports, show_spec_attention=show_spec_attention)
     else:
         text = leader_text
 

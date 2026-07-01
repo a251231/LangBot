@@ -4522,6 +4522,27 @@ class AutoProcessToBitableListener(EventListener):
         return any(key not in base_fields and value not in {None, ""} for key, value in record.fields.items())
 
     @classmethod
+    def _classify_pending_confirmation(cls, plain_text: str, ocr_text: str) -> str:
+        text = cls._normalize_product_ocr_text("\n".join([plain_text, ocr_text]))
+        if re.search(r"S\d+-FS-", text, flags=re.IGNORECASE):
+            return "FS工序图"
+        if re.search(r"S\d+-SC-", text, flags=re.IGNORECASE):
+            return "SC工序图"
+        if re.search(r"S\d+-F-", text, flags=re.IGNORECASE):
+            return "F半成品图"
+        if re.search(r"S\d+-CP-", text, flags=re.IGNORECASE):
+            return "CP成品待确认"
+        metric_aliases = [
+            alias
+            for _field_name, aliases in cls._product_metric_aliases()
+            for alias in aliases
+        ]
+        compact_text = re.sub(r"\s+", "", text).lower()
+        if any(re.sub(r"\s+", "", alias).lower() in compact_text for alias in metric_aliases):
+            return "质量检测待确认"
+        return "无效图片"
+
+    @classmethod
     def _describe_product_ocr_parse_gap(cls, ocr_text: str, records: list[ParsedRecord]) -> str:
         normalized_text = cls._normalize_product_ocr_text(ocr_text)
         line_pattern = cls._production_line_pattern()
@@ -4562,6 +4583,98 @@ class AutoProcessToBitableListener(EventListener):
         if any(re.sub(r"\s+", "", alias).lower() in compact_text for alias in metric_aliases):
             return "识别到成品指标但无法绑定成品批号"
         return "未识别成品批号"
+
+    async def _resolve_or_create_pending_table_id(self) -> str:
+        table_id = self._get_str_config("pending_confirmation_table_id", "")
+        if table_id:
+            return table_id
+        table_name = self._get_str_config("pending_confirmation_table_name", "现场数据待确认池")
+        if not table_name:
+            return ""
+
+        cached = self._table_name_to_id_cache.get(table_name)
+        if cached:
+            return cached
+
+        async with self._table_lock:
+            cached = self._table_name_to_id_cache.get(table_name)
+            if cached:
+                return cached
+
+            tables = await self._list_all_bitable_tables()
+            for table in tables:
+                name = str(table.get("name", "")).strip()
+                tid = str(table.get("table_id", "")).strip()
+                if name and tid:
+                    self._table_name_to_id_cache[name] = tid
+
+            cached = self._table_name_to_id_cache.get(table_name, "")
+            if cached:
+                return cached
+
+            if not self._get_bool_config("auto_create_pending_confirmation_table", False):
+                return ""
+
+            created = await self._create_bitable_table(table_name)
+            if created:
+                self._table_name_to_id_cache[table_name] = created
+                return created
+            return ""
+
+    def _build_pending_confirmation_fields(
+        self,
+        event_ctx: context.EventContext,
+        plain_text: str,
+        ocr_text: str,
+        message_time: str,
+        failure_reason: str,
+    ) -> dict[str, Any]:
+        source_message_id = self._extract_message_source_id(getattr(event_ctx.event, "message_chain", None))
+        launcher_type = str(getattr(event_ctx.event, "launcher_type", ""))
+        launcher_id = str(getattr(event_ctx.event, "launcher_id", ""))
+        fields: dict[str, Any] = {
+            "处理状态": self._get_str_config("pending_default_status", "待确认"),
+            "内容分类": self._classify_pending_confirmation(plain_text, ocr_text),
+            "失败原因": self._truncate_text(failure_reason, 1000),
+            "消息时间": message_time,
+            "来源群ID": launcher_id if launcher_type == "group" else "",
+            "会话ID": launcher_id,
+            "会话类型": launcher_type,
+            "来源消息ID": source_message_id,
+            "OCR文本": self._truncate_text(ocr_text),
+        }
+        if plain_text:
+            fields["原始文本"] = self._truncate_text(plain_text)
+        return fields
+
+    async def _write_pending_confirmation(self, table_id: str, fields: dict[str, Any]) -> tuple[bool, str]:
+        ok_fields, detail_fields, field_types = await self._ensure_table_fields(table_id, fields)
+        if not ok_fields:
+            return False, detail_fields
+        normalized_fields = self._normalize_write_fields(fields, field_types)
+        return await self._write_record_to_bitable(table_id, normalized_fields)
+
+    async def _record_pending_confirmation(
+        self,
+        event_ctx: context.EventContext,
+        plain_text: str,
+        ocr_text: str,
+        message_time: str,
+        failure_reason: str,
+    ) -> tuple[bool, str]:
+        if not self._get_bool_config("enable_pending_confirmation", False):
+            return False, "pending confirmation disabled"
+        table_id = await self._resolve_or_create_pending_table_id()
+        if not table_id:
+            return False, "pending confirmation table not configured and auto-create disabled/failed"
+        fields = self._build_pending_confirmation_fields(
+            event_ctx,
+            plain_text,
+            ocr_text,
+            message_time,
+            failure_reason,
+        )
+        return await self._write_pending_confirmation(table_id, fields)
 
     async def _handle_normal_message(self, event_ctx: context.EventContext) -> None:
         if self._mark_query_processed(event_ctx):
@@ -4610,9 +4723,17 @@ class AutoProcessToBitableListener(EventListener):
             record.scenario == "product" and not self._product_record_has_collected_fields(record)
             for record in records
         ):
+            failure_reason = self._describe_product_ocr_parse_gap(ocr_text, records)
+            await self._record_pending_confirmation(
+                event_ctx,
+                plain_text,
+                ocr_text,
+                message_time,
+                failure_reason,
+            )
             error_text = (
                 "图片消息解析失败，未写入飞书表格。 原因: "
-                f"{self._describe_product_ocr_parse_gap(ocr_text, records)}"
+                f"{failure_reason}"
             )
             event_ctx.prevent_default()
             event_ctx.prevent_postorder()
@@ -4662,6 +4783,13 @@ class AutoProcessToBitableListener(EventListener):
                 error_text = "图片消息解析失败，未写入飞书表格。"
                 if reasons:
                     error_text = f"{error_text} 原因: {'；'.join(reasons)}"
+                await self._record_pending_confirmation(
+                    event_ctx,
+                    plain_text,
+                    ocr_text,
+                    message_time,
+                    "；".join(reasons),
+                )
 
                 # For image messages, block default LLM fallback when parsing failed.
                 event_ctx.prevent_default()

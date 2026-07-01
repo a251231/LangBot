@@ -4,7 +4,7 @@ metadata:
   author: local
   name: feishu_process_bitable_plugin
   repository: 'https://open.feishu.cn/'
-  version: 0.3.36
+  version: 0.3.37
   description:
     en_US: Parse process messages with OCR and write structured records into Feishu Bitable.
     zh_Hans: 解析工艺消息并支持OCR，把结构化结果写入飞书多维表格。
@@ -187,6 +187,50 @@ spec:
       type: boolean
       required: false
       default: false
+    - name: enable_pending_confirmation
+      label:
+        en_US: Enable Pending Confirmation Pool
+        zh_Hans: 启用待确认池
+      description:
+        en_US: Write unparsed image/OCR messages into a pending confirmation table for human review. Disabled by default.
+        zh_Hans: 将未能自动写入业务表的图片/OCR消息写入待确认表，供现场人工复核；默认关闭。
+      type: boolean
+      required: false
+      default: false
+    - name: pending_confirmation_table_id
+      label:
+        en_US: Pending Confirmation Table ID
+        zh_Hans: 待确认表ID
+      description:
+        en_US: Optional table_id for pending confirmation records. If empty, table name will be used.
+        zh_Hans: 可选待确认表 table_id；为空时按待确认表名查找。
+      type: string
+      required: false
+      default: ''
+    - name: pending_confirmation_table_name
+      label:
+        en_US: Pending Confirmation Table Name
+        zh_Hans: 待确认表名
+      type: string
+      required: false
+      default: '现场数据待确认池'
+    - name: auto_create_pending_confirmation_table
+      label:
+        en_US: Auto Create Pending Confirmation Table
+        zh_Hans: 自动创建待确认表
+      description:
+        en_US: Create the pending confirmation table by name when it does not exist. Independent from auto_create_table_by_route.
+        zh_Hans: 待确认表不存在时按表名自动创建；独立于业务表按路由自动建表开关。
+      type: boolean
+      required: false
+      default: false
+    - name: pending_default_status
+      label:
+        en_US: Pending Default Status
+        zh_Hans: 待确认默认状态
+      type: string
+      required: false
+      default: '待确认'
     - name: upsert_by_batch
       label:
         en_US: Upsert By Batch

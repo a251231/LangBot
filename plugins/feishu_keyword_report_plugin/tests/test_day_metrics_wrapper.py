@@ -28,6 +28,15 @@ class DayMetricsWrapperTest(unittest.TestCase):
             [prev_date.strftime("%Y-%m-%d"), "DA2603-000", prev_date.strftime("%Y-%m-%d"), 2.30, 2.35, 2.39, 159.0, 155.0, 97.1, 0.035, 1.25, 82.0, 10.3, 81.5],
         ]
 
+    @staticmethod
+    def _sample_matrix_without_sintering() -> list[list[object]]:
+        return [
+            ["", "批次", "投料日期", "粉碎压实", "成品压实", "扣电", "扣电", "扣电", "Li+含量"],
+            ["", "", "", "", "", "0.1C充", "0.1C放", "0.1C首效", ""],
+            ["", "", "", "", "", ">=155", ">=150", ">=96", ""],
+            ["2026-03-03", "DC2603-001", "2026-03-03", 2.37, 2.40, 160.0, 156.0, 97.5, 0.03],
+        ]
+
     def test_load_sheet_table_from_matrix(self) -> None:
         df = day_metrics.load_sheet_table_from_matrix(self._sample_matrix())
         self.assertIn("投料日期", df.columns)
@@ -102,6 +111,37 @@ class DayMetricsWrapperTest(unittest.TestCase):
         self.assertIn("【工程版】", text)
         self.assertIn("2026.03.04数据表更新", text)
 
+    def test_build_standard_report_production_uses_factory_daily_sections(self) -> None:
+        matrix = self._sample_matrix()
+        matrix[3][7] = 149.0
+        out = day_metrics.build_standard_report_from_matrices(
+            sheet_matrices={"S18-A线": matrix, "S20-C线": self._sample_matrix_without_sintering()},
+            selected_sheets=["S18-A线", "S20-C线"],
+            date_arg="2026-03-03",
+            date_mode="global",
+            lookback_days=7,
+            trend_days=3,
+            stale_threshold_process=2,
+            stale_threshold_product=3,
+            stale_threshold_electrochem=5,
+            report_show_placeholder_sections=False,
+            spec_registry_json="",
+            report_output_style="production",
+        )
+
+        text = out["text"]
+        self.assertTrue(text.startswith("2026.03.04 生产日报"))
+        self.assertIn("一、今日生产概况", text)
+        self.assertIn("二、各线别生产状态", text)
+        self.assertIn("三、质量检测情况", text)
+        self.assertIn("四、异常分析与调整方向", text)
+        self.assertIn("五、待处理事项", text)
+        self.assertIn("当前状态：需关注", text)
+        self.assertIn("S18-A线 DA2603-001", text)
+        self.assertIn("0.1C放电1/1批次低于下限", text)
+        self.assertNotIn("建议质量复核", text)
+        self.assertNotIn("S20-C线 烧结压实", text)
+
     def test_build_standard_report_concise_supports_multiple_lines(self) -> None:
         out = day_metrics.build_standard_report_from_matrices(
             sheet_matrices={"S18-A线": self._sample_matrix(), "S20-C线": self._sample_matrix()},
@@ -118,8 +158,47 @@ class DayMetricsWrapperTest(unittest.TestCase):
         )
         text = out["text"]
         self.assertIn("S18-A线 烧结压实", text)
-        self.assertIn("S20-C线 烧结压实", text)
+        self.assertIn("S20-C线 粉碎压实", text)
+        self.assertNotIn("S20-C线 烧结压实", text)
         self.assertNotIn("成品趋势", text)
+
+    def test_build_standard_report_omits_unavailable_sintering_for_cde_lines(self) -> None:
+        out = day_metrics.build_standard_report_from_matrices(
+            sheet_matrices={"S20-C线": self._sample_matrix_without_sintering()},
+            selected_sheets=["S20-C线"],
+            date_arg="2026-03-03",
+            date_mode="global",
+            lookback_days=7,
+            trend_days=3,
+            stale_threshold_process=2,
+            stale_threshold_product=3,
+            stale_threshold_electrochem=5,
+            report_show_placeholder_sections=False,
+            spec_registry_json="",
+        )
+
+        text = out["text"]
+        self.assertIn("S20-C线 粉碎压实", text)
+        self.assertNotIn("S20-C线 烧结压实数据未出", text)
+        self.assertNotIn("S20-C线 烧结压实", text)
+
+    def test_build_standard_report_omits_cde_sintering_abnormal_items(self) -> None:
+        out = day_metrics.build_standard_report_from_matrices(
+            sheet_matrices={"S20-C线": self._sample_matrix()},
+            selected_sheets=["S20-C线"],
+            date_arg="2026-03-03",
+            date_mode="global",
+            lookback_days=7,
+            trend_days=3,
+            stale_threshold_process=2,
+            stale_threshold_product=3,
+            stale_threshold_electrochem=5,
+            report_show_placeholder_sections=False,
+            spec_registry_json='{"rules":[{"model":"S20","metric":"烧结压实","spec":">=3.00"}]}',
+        )
+
+        text = out["text"]
+        self.assertNotIn("S20-C线 烧结压实", text)
 
     def test_build_standard_report_concise_summarizes_abnormal_items(self) -> None:
         out = day_metrics.build_standard_report_from_matrices(

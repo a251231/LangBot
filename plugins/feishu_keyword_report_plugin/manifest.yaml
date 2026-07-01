@@ -4,7 +4,7 @@ metadata:
   author: local
   name: feishu_keyword_report_plugin
   repository: "https://open.feishu.cn/"
-  version: 0.1.19
+  version: 0.1.20
   description:
     en_US: Reply keyword commands for daily report and touch-material query with Feishu Sheets + Bitable.
     zh_Hans: 通过口令查询日报与摸料信息，联动飞书在线表格和多维表。
@@ -133,11 +133,11 @@ spec:
         en_US: Report Output Style
         zh_Hans: 日报输出模式
       description:
-        en_US: concise for management summary, detailed for engineering details, hybrid for summary plus details.
-        zh_Hans: concise 为管理摘要，detailed 为工程明细，hybrid 为摘要加明细。
+        en_US: production for factory daily report, concise for management summary, detailed for engineering details, hybrid for summary plus details.
+        zh_Hans: production 为生产日报五段式，concise 为管理摘要，detailed 为工程明细，hybrid 为摘要加明细。
       type: string
       required: false
-      default: "concise"
+      default: "production"
     - name: lookback_days
       label:
         en_US: Lookback Days
@@ -233,6 +233,83 @@ spec:
       type: string
       required: false
       default: ""
+    - name: scheduled_report_enabled
+      label:
+        en_US: Enable Scheduled Production Report
+        zh_Hans: 启用定时生产日报
+      description:
+        en_US: Send the production daily report once when a message event arrives within the configured time window. Disabled by default.
+        zh_Hans: 在配置时间窗口内收到消息事件时，每天自动推送一次生产日报；默认关闭。
+      type: boolean
+      required: false
+      default: false
+    - name: scheduled_report_time
+      label:
+        en_US: Scheduled Report Time
+        zh_Hans: 定时日报时间
+      description:
+        en_US: Local HH:mm time, for example 08:30.
+        zh_Hans: 本地 HH:mm 时间，例如 08:30。
+      type: string
+      required: false
+      default: ""
+    - name: scheduled_report_target_type
+      label:
+        en_US: Scheduled Report Target Type
+        zh_Hans: 定时日报目标类型
+      description:
+        en_US: LangBot target type, usually group.
+        zh_Hans: LangBot 发送目标类型，通常为 group。
+      type: string
+      required: false
+      default: "group"
+    - name: scheduled_report_target_id
+      label:
+        en_US: Scheduled Report Target ID
+        zh_Hans: 定时日报目标ID
+      description:
+        en_US: Target conversation ID for the production daily report.
+        zh_Hans: 生产日报推送目标会话 ID。
+      type: string
+      required: false
+      default: ""
+    - name: scheduled_report_window_minutes
+      label:
+        en_US: Scheduled Report Window Minutes
+        zh_Hans: 定时日报触发窗口分钟
+      description:
+        en_US: The report is sent if an event arrives within this many minutes after scheduled_report_time.
+        zh_Hans: 在 scheduled_report_time 之后多少分钟内收到事件即可触发推送。
+      type: string
+      required: false
+      default: "5"
+    - name: scheduled_report_message_mode
+      label:
+        en_US: Scheduled Report Message Mode
+        zh_Hans: 定时日报消息模式
+      description:
+        en_US: text sends the legacy message chain; card sends a Feishu interactive card with bold highlights.
+        zh_Hans: text 使用原普通消息；card 使用飞书交互卡片并支持重点加粗。
+      type: string
+      required: false
+      default: "text"
+    - name: scheduled_report_card_template
+      label:
+        en_US: Scheduled Report Card Template
+        zh_Hans: 定时日报卡片颜色
+      description:
+        en_US: Feishu card header template, e.g. orange/blue/green/red.
+        zh_Hans: 飞书卡片标题颜色，例如 orange/blue/green/red。
+      type: string
+      required: false
+      default: "orange"
+    - name: time_zone
+      label:
+        en_US: Time Zone
+        zh_Hans: 时区
+      type: string
+      required: false
+      default: "Asia/Shanghai"
 
     - name: bitable_app_token
       label:

@@ -7,6 +7,8 @@
 
 默认情况下，`日报` 与 `摸料` 的配方表检索都会自动纳入符合 `S18-*线` / `S006-*线` / `S20-*线` 规则的工作表；后续新增 `S006-A线`、`S18-C线`、`S20-C线` 等无需改代码。
 
+生产日报面向现场生产管理，只汇报生产状态、质量状态、检测完成情况、异常事项和待处理生产事项，不汇报插件开发进展、OCR 成功率、自动采集率或失败样本数量。
+
 ## 口令协议
 
 ### 1. 日报（兼容原行为）
@@ -124,8 +126,9 @@
 - `sheet_snapshot_tail_nonempty_rows`（截图保留尾部有效行数，默认 `20`）
 - `date_mode`
 - `report_show_placeholder_sections`
-- `report_output_style`：日报输出模式，默认 `concise`
-  - `concise`：管理摘要，只输出总体结论、异常项、关键指标、数据质量
+- `report_output_style`：日报输出模式，默认 `production`
+  - `production`：生产日报五段式，输出今日生产概况、各线别生产状态、质量检测情况、异常分析与调整方向、待处理事项
+  - `concise`：管理摘要，只输出总体结论、异常项、关键指标、生产数据完整性
   - `detailed`：工程明细，保留原有完整指标与趋势段
   - `hybrid`：先输出管理摘要，再追加 `【工程版】` 明细
 - `lookback_days` / `trend_days`
@@ -135,6 +138,18 @@
 - `spec_registry_json`
 - `spec_limits_json`：追加规格上下限规则，格式同 `spec_registry_json`
 - `report_metric_aliases_json`：日报指标列别名，可按 `default`、`products`、`lines` 配置
+- `scheduled_report_enabled`：启用定时生产日报（默认 `false`）
+- `scheduled_report_time`：定时推送时间，格式 `HH:mm`，例如 `08:30`
+- `scheduled_report_target_type`：推送目标类型，通常为 `group`
+- `scheduled_report_target_id`：推送目标会话 ID
+- `scheduled_report_window_minutes`：触发窗口分钟数，默认 `5`
+- `scheduled_report_message_mode`：定时日报消息模式，`text` 为普通消息，`card` 为飞书交互卡片
+- `scheduled_report_card_template`：卡片标题颜色，默认 `orange`
+- `time_zone`：时区，默认 `Asia/Shanghai`
+
+定时日报当前采用事件触发方式：到达配置时间后，如果窗口内有消息事件进入插件，就自动生成并向目标推送一次当天生产日报；同一天同一时间窗口、同一目标只发送一次。口令 `日报` 查询能力仍保留。
+
+现场口令 `日报` 默认使用 `report_output_style=production`，并保留 Sheet 快照图片。定时卡片日报推荐配置为 `report_output_style=production` + `scheduled_report_message_mode=card`。卡片模式会将日报主文按段落拆成飞书交互卡片，支持标题、分割线和重点加粗。群推送通常使用 `scheduled_report_target_type=group` + 群 `chat_id`；个人推送使用 `scheduled_report_target_type=open_id` + 用户 `ou_...`。
 
 ### 摸料配置（新增）
 

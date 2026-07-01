@@ -1429,6 +1429,66 @@ class AutoProcessToBitableListenerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.default_prevented)
         self.assertTrue(ctx.postorder_prevented)
 
+    async def test_image_ocr_failure_writes_pending_confirmation_when_enabled(self) -> None:
+        listener = self._build_listener(
+            {
+                "enable_ocr_for_images": True,
+                "reply_on_error": True,
+                "enable_pending_confirmation": True,
+            }
+        )
+        source_time = datetime.datetime(2026, 6, 28, 14, 42, tzinfo=ZoneInfo("Asia/Shanghai"))
+        image_path = Path(__file__)
+        ctx = DummyEventContext(
+            DummyEvent(
+                "",
+                message_id="msg-pending-image",
+                source_time=source_time,
+                launcher_type="group",
+                images=[platform_message.Image(path=str(image_path))],
+            )
+        )
+
+        listener._extract_recall_meta = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        listener._recognize_image_bytes = AsyncMock(  # type: ignore[method-assign]
+            return_value="样品批号\n粉末电阻\n13.66\nS18-FS-DC2606-C1-60H2-098-60min"
+        )
+        listener._send_feedback = AsyncMock()  # type: ignore[method-assign]
+        listener._resolve_or_create_pending_table_id = AsyncMock(return_value="tbl-pending")  # type: ignore[method-assign]
+        listener._write_pending_confirmation = AsyncMock(return_value=(True, "rec-pending"))  # type: ignore[method-assign]
+
+        await listener._handle_normal_message(ctx)
+
+        listener._write_pending_confirmation.assert_awaited_once()  # type: ignore[attr-defined]
+        args = listener._write_pending_confirmation.await_args.args  # type: ignore[attr-defined]
+        self.assertEqual(args[0], "tbl-pending")
+        fields = args[1]
+        self.assertEqual(fields["处理状态"], "待确认")
+        self.assertEqual(fields["内容分类"], "FS工序图")
+        self.assertIn("识别到成品指标但无法绑定成品批号", fields["失败原因"])
+        self.assertEqual(fields["来源群ID"], "launcher-id")
+        self.assertEqual(fields["来源消息ID"], "msg-pending-image")
+        self.assertIn("S18-FS", fields["OCR文本"])
+        self.assertTrue(ctx.default_prevented)
+        self.assertTrue(ctx.postorder_prevented)
+
+    async def test_pending_confirmation_table_can_be_created_independently(self) -> None:
+        listener = self._build_listener(
+            {
+                "enable_pending_confirmation": True,
+                "pending_confirmation_table_name": "现场数据待确认池",
+                "auto_create_table_by_route": False,
+                "auto_create_pending_confirmation_table": True,
+            }
+        )
+        listener._list_all_bitable_tables = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        listener._create_bitable_table = AsyncMock(return_value="tbl-pending")  # type: ignore[method-assign]
+
+        table_id = await listener._resolve_or_create_pending_table_id()
+
+        self.assertEqual(table_id, "tbl-pending")
+        listener._create_bitable_table.assert_awaited_once_with("现场数据待确认池")  # type: ignore[attr-defined]
+
     async def test_default_auto_create_fields_is_strict(self) -> None:
         listener = self._build_listener()
         listener._list_all_table_fields = AsyncMock(return_value={"批次号": 1})  # type: ignore[method-assign]
