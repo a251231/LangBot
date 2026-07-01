@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import text
 
 from langbot.pkg.entity.persistence.base import Base
 from langbot.pkg.persistence.alembic_runner import (
@@ -148,6 +149,26 @@ class TestSQLiteMigrationUpgrade:
 
         rev2 = await get_alembic_current(sqlite_engine)
         assert rev2 == rev1, f'Expected {rev1}, got {rev2}'
+
+    @pytest.mark.asyncio
+    async def test_upgrade_normalizes_renamed_revision_id(self, sqlite_engine):
+        """
+        Upgrade succeeds when a database was stamped by an older image that
+        used the long RAG repair revision id.
+        """
+        async with sqlite_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        await run_alembic_stamp(sqlite_engine, '0001_baseline')
+        async with sqlite_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE alembic_version SET version_num = '0004_repair_knowledge_base_plugin_columns'")
+            )
+
+        await run_alembic_upgrade(sqlite_engine, 'head')
+
+        rev = await get_alembic_current(sqlite_engine)
+        assert rev == _get_script_head(), f'Expected head {_get_script_head()}, got {rev}'
 
 
 class TestSQLiteMigrationFreshDatabase:
