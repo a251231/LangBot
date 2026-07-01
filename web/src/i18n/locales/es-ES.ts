@@ -1267,6 +1267,35 @@ const esES = {
     viewUpdateGuide: 'Ver guía de actualización',
     noReleaseNotes: 'No hay notas de la versión disponibles',
   },
+  systemSettings: {
+    title: 'System Settings',
+    description:
+      'Configure automatic cleanup for logs, monitoring records, and runtime sessions.',
+    loadFailed: 'Failed to load system settings',
+    saveFailed: 'Failed to save system settings',
+    saved: 'System settings saved',
+    autoCleanupEnabled: 'Enable auto cleanup',
+    autoCleanupEnabledDescription:
+      'Clean old logs, monitoring records, and long-idle runtime sessions on a schedule.',
+    intervalHours: 'Run interval (hours)',
+    intervalHoursDescription:
+      'The background task checks and runs cleanup on this interval.',
+    logRetentionDays: 'Log retention (days)',
+    monitoringRetentionDays: 'Monitoring retention (days)',
+    monitoringRetentionDaysDescription:
+      'This clears monitoring messages, sessions, model calls, and error records.',
+    runtimeSessionIdleHours: 'Runtime session idle time (hours)',
+    runtimeSessionIdleHoursDescription:
+      'Idle in-memory sessions beyond this threshold will be released, which may reset multi-turn context.',
+    zeroDisables: 'Set to 0 to disable cleanup for this item.',
+    notice:
+      'Automatic cleanup affects historical debugging data and long-running conversation context. Start with conservative retention values.',
+    validation: {
+      intervalHours: 'Run interval must be an integer greater than 0',
+      nonNegativeInteger:
+        'All cleanup settings must be integers greater than or equal to 0',
+    },
+  },
   account: {
     settings: 'Configuración de la cuenta',
     settingsDescription: 'Gestiona tu contraseña y las cuentas vinculadas',
