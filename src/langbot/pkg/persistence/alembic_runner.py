@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from alembic.config import Config
 from alembic import command
 from alembic.runtime.migration import MigrationContext
+import sqlalchemy as sa
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -25,6 +26,11 @@ if TYPE_CHECKING:
 
 
 _ALEMBIC_DIR = os.path.join(os.path.dirname(__file__), 'alembic')
+
+_LEGACY_REVISION_ALIASES = {
+    '0004_repair_knowledge_base_plugin_columns': '0004_repair_kb_plugin_cols',
+    '0009_merge_rag_repair_and_mcp_resources': '0009_merge_rag_mcp_heads',
+}
 
 
 def _build_config(connection: Connection) -> Config:
@@ -37,8 +43,34 @@ def _build_config(connection: Connection) -> Config:
 
 def _do_upgrade(connection: Connection, revision: str = 'head') -> None:
     """Synchronous upgrade — runs inside run_sync."""
+    _normalize_legacy_revisions(connection)
     cfg = _build_config(connection)
     command.upgrade(cfg, revision)
+
+
+def _normalize_legacy_revisions(connection: Connection) -> None:
+    """Map renamed migration ids to their current ids before Alembic resolves the graph."""
+    if not sa.inspect(connection).has_table('alembic_version'):
+        return
+
+    revisions = {row[0] for row in connection.execute(sa.text('SELECT version_num FROM alembic_version')).fetchall()}
+    for legacy_revision, current_revision in _LEGACY_REVISION_ALIASES.items():
+        if legacy_revision not in revisions:
+            continue
+
+        if current_revision in revisions:
+            connection.execute(
+                sa.text('DELETE FROM alembic_version WHERE version_num = :revision'),
+                {'revision': legacy_revision},
+            )
+        else:
+            connection.execute(
+                sa.text('UPDATE alembic_version SET version_num = :current WHERE version_num = :legacy'),
+                {'current': current_revision, 'legacy': legacy_revision},
+            )
+
+        revisions.discard(legacy_revision)
+        revisions.add(current_revision)
 
 
 def _do_stamp(connection: Connection, revision: str = 'head') -> None:
