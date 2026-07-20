@@ -18,6 +18,10 @@ class InsufficientPointsError(ValueError):
     pass
 
 
+class PointLedgerCorruptionError(ValueError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class PointChange:
     identity_hash: str
@@ -40,7 +44,7 @@ class PointService:
         self._store = store
 
     async def balance(self, bot_uuid: str, identity: str) -> int:
-        account = await self._get_account(bot_uuid, identity)
+        account = await self._get_or_rebuild_account(bot_uuid, identity)
         return account.balance if account is not None else 0
 
     async def credit(
@@ -239,13 +243,13 @@ class PointService:
         if change.step_id in applied_steps:
             if existing is None:
                 raise ValueError('已应用的积分步骤缺少流水。')
-            await self._save_account_from_entry(existing, timestamp)
+            await self._reconcile_account_from_entry(existing, timestamp)
             return existing
         if existing is not None:
-            await self._save_account_from_entry(existing, timestamp)
+            await self._reconcile_account_from_entry(existing, timestamp)
             return existing
 
-        current = await self._get_account(bot_uuid, change.identity_hash)
+        current = await self._get_or_rebuild_account(bot_uuid, change.identity_hash)
         current_balance = current.balance if current is not None else 0
         new_balance = current_balance + change.amount
         if new_balance < 0:
@@ -263,7 +267,7 @@ class PointService:
         )
         entry_key = growth_storage_key(POINT_ENTRY_PREFIX, bot_uuid, entry.entry_id)
         await self._store.save(entry_key, entry)
-        await self._save_account_from_entry(entry, timestamp)
+        await self._reconcile_account_from_entry(entry, timestamp)
         return entry
 
     async def _load_entries(
@@ -278,7 +282,7 @@ class PointService:
             entry = await self._get_entry(bot_uuid, operation_id, change)
             if entry is None:
                 raise ValueError('已提交的积分操作缺少流水。')
-            await self._save_account_from_entry(entry, updated_at)
+            await self._reconcile_account_from_entry(entry, updated_at)
             entries.append(entry)
         return tuple(entries)
 
@@ -290,6 +294,68 @@ class PointService:
         key = growth_storage_key(POINT_ACCOUNT_PREFIX, bot_uuid, identity)
         return await self._store.get(key, PointAccount)
 
+    async def _get_or_rebuild_account(
+        self,
+        bot_uuid: str,
+        identity: str,
+    ) -> PointAccount | None:
+        account = await self._get_account(bot_uuid, identity)
+        if account is not None:
+            return account
+        return await self._rebuild_account(bot_uuid, identity)
+
+    async def _rebuild_account(
+        self,
+        bot_uuid: str,
+        identity: str,
+    ) -> PointAccount | None:
+        listed = await self._store.list_prefix(
+            f'{POINT_ENTRY_PREFIX}{bot_uuid}:',
+            PointEntry,
+        )
+        entries = tuple(
+            entry for entry in listed.records if entry.identity_hash == identity
+        )
+        if not entries:
+            return None
+
+        by_id = {entry.entry_id: entry for entry in entries}
+        referenced_ids = {
+            entry.previous_entry_id
+            for entry in entries
+            if entry.previous_entry_id
+        }
+        tails = tuple(entry for entry in entries if entry.entry_id not in referenced_ids)
+        if len(tails) != 1:
+            raise PointLedgerCorruptionError('积分流水链存在多个尾节点或循环。')
+
+        tail = tails[0]
+        visited: set[str] = set()
+        cursor = tail
+        while True:
+            if cursor.entry_id in visited:
+                raise PointLedgerCorruptionError('积分流水链存在循环。')
+            visited.add(cursor.entry_id)
+            if not cursor.previous_entry_id:
+                break
+            previous = by_id.get(cursor.previous_entry_id)
+            if previous is None:
+                raise PointLedgerCorruptionError('积分流水链缺少前序记录。')
+            cursor = previous
+        if len(visited) != len(entries):
+            raise PointLedgerCorruptionError('积分流水链存在分支或孤立记录。')
+
+        account = PointAccount(
+            bot_uuid=bot_uuid,
+            identity_hash=identity,
+            balance=tail.balance_after,
+            last_entry_id=tail.entry_id,
+            updated_at=tail.created_at,
+        )
+        key = growth_storage_key(POINT_ACCOUNT_PREFIX, bot_uuid, identity)
+        await self._store.save(key, account)
+        return account
+
     async def _get_entry(
         self,
         bot_uuid: str,
@@ -300,11 +366,20 @@ class PointService:
         key = growth_storage_key(POINT_ENTRY_PREFIX, bot_uuid, entry_id)
         return await self._store.get(key, PointEntry)
 
-    async def _save_account_from_entry(
+    async def _reconcile_account_from_entry(
         self,
         entry: PointEntry,
         updated_at: str,
     ) -> None:
+        current = await self._get_account(entry.bot_uuid, entry.identity_hash)
+        if current is None:
+            await self._rebuild_account(entry.bot_uuid, entry.identity_hash)
+            return
+        if current.last_entry_id == entry.entry_id:
+            if current.balance == entry.balance_after:
+                return
+        elif current.last_entry_id != entry.previous_entry_id:
+            return
         account = PointAccount(
             bot_uuid=entry.bot_uuid,
             identity_hash=entry.identity_hash,

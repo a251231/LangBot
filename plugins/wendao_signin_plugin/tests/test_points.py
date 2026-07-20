@@ -98,6 +98,82 @@ def test_committed_replay_rebuilds_missing_account_snapshot() -> None:
     asyncio.run(scenario())
 
 
+def test_replaying_older_operation_does_not_downgrade_latest_balance() -> None:
+    async def scenario() -> None:
+        store = GrowthStore(FakeStorage())
+        points = PointService(store)
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'first-credit',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            50,
+            'second-credit',
+            'operation-2',
+            at='2026-07-20T00:01:00+08:00',
+        )
+
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'first-credit',
+            'operation-1',
+            at='2026-07-20T00:02:00+08:00',
+        )
+
+        assert await points.balance('bot-a', 'identity-a') == 150
+
+    asyncio.run(scenario())
+
+
+def test_missing_account_snapshot_rebuilds_from_latest_ledger_entry() -> None:
+    async def scenario() -> None:
+        store = GrowthStore(FakeStorage())
+        points = PointService(store)
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'first-credit',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            50,
+            'second-credit',
+            'operation-2',
+            at='2026-07-20T00:01:00+08:00',
+        )
+        await store.delete(f'{POINT_ACCOUNT_PREFIX}bot-a:identity-a')
+
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'first-credit',
+            'operation-1',
+            at='2026-07-20T00:02:00+08:00',
+        )
+
+        account = await store.get(
+            f'{POINT_ACCOUNT_PREFIX}bot-a:identity-a',
+            PointAccount,
+        )
+        assert account is not None
+        assert account.balance == 150
+
+    asyncio.run(scenario())
+
+
 def test_point_operation_applies_two_users_once() -> None:
     async def scenario() -> None:
         store = GrowthStore(FakeStorage())
