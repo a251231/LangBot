@@ -35,6 +35,16 @@ class FakeStorage:
         del self.values[key]
 
 
+class TrackingGrowthStore(GrowthStore):
+    def __init__(self, storage: FakeStorage) -> None:
+        super().__init__(storage)
+        self.list_prefix_calls = 0
+
+    async def list_prefix(self, prefix: str, record_type: type):  # type: ignore[override]
+        self.list_prefix_calls += 1
+        return await super().list_prefix(prefix, record_type)
+
+
 def test_credit_replay_creates_one_entry() -> None:
     async def scenario() -> None:
         store = GrowthStore(FakeStorage())
@@ -64,6 +74,26 @@ def test_credit_replay_creates_one_entry() -> None:
         assert first == replay
         assert await points.balance('bot-a', 'identity-a') == 100
         assert len(entries.records) == 1
+
+    asyncio.run(scenario())
+
+
+def test_first_credit_does_not_scan_ledger_to_build_snapshot() -> None:
+    async def scenario() -> None:
+        store = TrackingGrowthStore(FakeStorage())
+        points = PointService(store)
+
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'referral',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+
+        assert store.list_prefix_calls == 0
+        assert await points.balance('bot-a', 'identity-a') == 100
 
     asyncio.run(scenario())
 

@@ -44,7 +44,7 @@ class PointService:
         self._store = store
 
     async def balance(self, bot_uuid: str, identity: str) -> int:
-        account = await self._get_or_rebuild_account(bot_uuid, identity)
+        account = await self._get_account(bot_uuid, identity)
         return account.balance if account is not None else 0
 
     async def credit(
@@ -249,7 +249,7 @@ class PointService:
             await self._reconcile_account_from_entry(existing, timestamp)
             return existing
 
-        current = await self._get_or_rebuild_account(bot_uuid, change.identity_hash)
+        current = await self._get_account(bot_uuid, change.identity_hash)
         current_balance = current.balance if current is not None else 0
         new_balance = current_balance + change.amount
         if new_balance < 0:
@@ -267,7 +267,7 @@ class PointService:
         )
         entry_key = growth_storage_key(POINT_ENTRY_PREFIX, bot_uuid, entry.entry_id)
         await self._store.save(entry_key, entry)
-        await self._reconcile_account_from_entry(entry, timestamp)
+        await self._write_account_from_entry(entry, timestamp)
         return entry
 
     async def _load_entries(
@@ -293,16 +293,6 @@ class PointService:
     ) -> PointAccount | None:
         key = growth_storage_key(POINT_ACCOUNT_PREFIX, bot_uuid, identity)
         return await self._store.get(key, PointAccount)
-
-    async def _get_or_rebuild_account(
-        self,
-        bot_uuid: str,
-        identity: str,
-    ) -> PointAccount | None:
-        account = await self._get_account(bot_uuid, identity)
-        if account is not None:
-            return account
-        return await self._rebuild_account(bot_uuid, identity)
 
     async def _rebuild_account(
         self,
@@ -380,6 +370,13 @@ class PointService:
                 return
         elif current.last_entry_id != entry.previous_entry_id:
             return
+        await self._write_account_from_entry(entry, updated_at)
+
+    async def _write_account_from_entry(
+        self,
+        entry: PointEntry,
+        updated_at: str,
+    ) -> None:
         account = PointAccount(
             bot_uuid=entry.bot_uuid,
             identity_hash=entry.identity_hash,
