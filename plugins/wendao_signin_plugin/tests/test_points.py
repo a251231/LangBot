@@ -18,6 +18,7 @@ class FakeStorage:
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
         self.fail_prefix_once = ''
+        self.get_keys_calls = 0
 
     async def set_plugin_storage(self, key: str, value: bytes) -> None:
         if self.fail_prefix_once and key.startswith(self.fail_prefix_once):
@@ -29,6 +30,7 @@ class FakeStorage:
         return self.values[key]
 
     async def get_plugin_storage_keys(self) -> list[str]:
+        self.get_keys_calls += 1
         return list(self.values)
 
     async def delete_plugin_storage(self, key: str) -> None:
@@ -54,7 +56,7 @@ def test_credit_replay_creates_one_entry() -> None:
             'bot-a',
             'identity-a',
             100,
-            'referral',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:00:00+08:00',
         )
@@ -62,7 +64,7 @@ def test_credit_replay_creates_one_entry() -> None:
             'bot-a',
             'identity-a',
             100,
-            'referral',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:00:01+08:00',
         )
@@ -87,7 +89,7 @@ def test_first_credit_does_not_scan_ledger_to_build_snapshot() -> None:
             'bot-a',
             'identity-a',
             100,
-            'referral',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:00:00+08:00',
         )
@@ -106,7 +108,7 @@ def test_committed_replay_rebuilds_missing_account_snapshot() -> None:
             'bot-a',
             'identity-a',
             100,
-            'referral',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:00:00+08:00',
         )
@@ -117,7 +119,7 @@ def test_committed_replay_rebuilds_missing_account_snapshot() -> None:
             'bot-a',
             'identity-a',
             100,
-            'referral',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:00:01+08:00',
         )
@@ -136,7 +138,7 @@ def test_replaying_older_operation_does_not_downgrade_latest_balance() -> None:
             'bot-a',
             'identity-a',
             100,
-            'first-credit',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:00:00+08:00',
         )
@@ -144,7 +146,7 @@ def test_replaying_older_operation_does_not_downgrade_latest_balance() -> None:
             'bot-a',
             'identity-a',
             50,
-            'second-credit',
+            'referral_reward_promoter',
             'operation-2',
             at='2026-07-20T00:01:00+08:00',
         )
@@ -153,7 +155,7 @@ def test_replaying_older_operation_does_not_downgrade_latest_balance() -> None:
             'bot-a',
             'identity-a',
             100,
-            'first-credit',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:02:00+08:00',
         )
@@ -171,7 +173,7 @@ def test_missing_account_snapshot_rebuilds_from_latest_ledger_entry() -> None:
             'bot-a',
             'identity-a',
             100,
-            'first-credit',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:00:00+08:00',
         )
@@ -179,7 +181,7 @@ def test_missing_account_snapshot_rebuilds_from_latest_ledger_entry() -> None:
             'bot-a',
             'identity-a',
             50,
-            'second-credit',
+            'referral_reward_promoter',
             'operation-2',
             at='2026-07-20T00:01:00+08:00',
         )
@@ -189,7 +191,7 @@ def test_missing_account_snapshot_rebuilds_from_latest_ledger_entry() -> None:
             'bot-a',
             'identity-a',
             100,
-            'first-credit',
+            'referral_reward_promoter',
             'operation-1',
             at='2026-07-20T00:02:00+08:00',
         )
@@ -204,13 +206,165 @@ def test_missing_account_snapshot_rebuilds_from_latest_ledger_entry() -> None:
     asyncio.run(scenario())
 
 
+def test_missing_account_snapshot_is_rebuilt_before_new_credit() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        points = PointService(store)
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'referral_reward_promoter',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+        await store.delete(f'{POINT_ACCOUNT_PREFIX}bot-a:identity-a')
+        store = GrowthStore(storage)
+        points = PointService(store)
+
+        assert await points.balance('bot-a', 'identity-a') == 100
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            50,
+            'referral_reward_promoter',
+            'operation-2',
+            at='2026-07-20T00:01:00+08:00',
+        )
+
+        assert await points.balance('bot-a', 'identity-a') == 150
+        entries = await store.list_prefix(
+            f'{POINT_ENTRY_PREFIX}bot-a:',
+            PointEntry,
+        )
+        assert len(entries.records) == 2
+        assert sum(not entry.previous_entry_id for entry in entries.records) == 1
+
+    asyncio.run(scenario())
+
+
+def test_inconsistent_account_snapshot_is_rebuilt_from_latest_entry() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        points = PointService(store)
+        first = await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'referral_reward_promoter',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+        await points.credit(
+            'bot-a',
+            'identity-a',
+            50,
+            'referral_reward_promoter',
+            'operation-2',
+            at='2026-07-20T00:01:00+08:00',
+        )
+        account_key = f'{POINT_ACCOUNT_PREFIX}bot-a:identity-a'
+        await store.save(
+            account_key,
+            PointAccount(
+                bot_uuid='bot-a',
+                identity_hash='identity-a',
+                balance=100,
+                last_entry_id=first.entry_id,
+                updated_at='2026-07-20T00:02:00+08:00',
+            ),
+        )
+
+        restarted = PointService(GrowthStore(storage))
+
+        assert await restarted.balance('bot-a', 'identity-a') == 150
+
+    asyncio.run(scenario())
+
+
+def test_unknown_point_entry_type_is_rejected_before_operation_write() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        points = PointService(GrowthStore(storage))
+
+        with pytest.raises(ValueError, match='流水类型'):
+            await points.credit(
+                'bot-a',
+                'identity-a',
+                100,
+                'UNDEFINED_TYPE',
+                'operation-1',
+                at='2026-07-20T00:00:00+08:00',
+            )
+
+        assert storage.values == {}
+
+    asyncio.run(scenario())
+
+
+def test_boolean_point_amount_is_rejected_without_pending_operation() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        points = PointService(store)
+
+        with pytest.raises(ValueError, match='数量'):
+            await points.adjust(
+                'bot-a',
+                'identity-a',
+                True,  # type: ignore[arg-type]
+                'manual correction',
+                'operation-1',
+                at='2026-07-20T00:00:00+08:00',
+            )
+
+        assert (await store.list_pending_operations('bot-a')).records == ()
+        assert not any(key.startswith(GROWTH_OPERATION_PREFIX) for key in storage.values)
+
+    asyncio.run(scenario())
+
+
+def test_normal_point_writes_enumerate_storage_keys_once() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        points = PointService(GrowthStore(storage))
+
+        for index in range(25):
+            await points.credit(
+                'bot-a',
+                'identity-a',
+                1,
+                'referral_reward_promoter',
+                f'operation-{index}',
+                at=f'2026-07-20T00:{index:02d}:00+08:00',
+            )
+
+        assert storage.get_keys_calls <= 1
+
+    asyncio.run(scenario())
+
+
 def test_point_operation_applies_two_users_once() -> None:
     async def scenario() -> None:
         store = GrowthStore(FakeStorage())
         points = PointService(store)
         changes = (
-            PointChange('promoter-a', 100, 'promoter-reward', 'promoter-credit'),
-            PointChange('invitee-a', 20, 'invitee-reward', 'invitee-credit'),
+            PointChange(
+                'promoter-a',
+                100,
+                'referral_reward_promoter',
+                'promoter-credit',
+                'referral-1',
+            ),
+            PointChange(
+                'invitee-a',
+                20,
+                'referral_reward_invitee',
+                'invitee-credit',
+                'referral-1',
+            ),
         )
 
         first = await points.apply_operation(
@@ -266,7 +420,13 @@ def test_pending_operation_recovers_after_entry_write_interruption() -> None:
         store = GrowthStore(storage)
         points = PointService(store)
         changes = (
-            PointChange('identity-a', 80, 'admin-adjust', 'adjust:identity-a'),
+            PointChange(
+                'identity-a',
+                80,
+                'admin_adjustment',
+                'adjust:identity-a',
+                'manual correction',
+            ),
         )
         storage.fail_prefix_once = f'{POINT_ACCOUNT_PREFIX}bot-a:'
 

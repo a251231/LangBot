@@ -13,6 +13,7 @@ from components.growth_models import (
     EntitlementRecord,
     GrowthOperation,
     GrowthRecord,
+    POINT_ENTRY_TYPES,
     PointAccount,
     PointEntry,
     ProductRecord,
@@ -173,6 +174,8 @@ def _validate_record_payload(
             type(step) is str for step in applied_steps
         ):
             raise ValueError('增长操作步骤格式错误。')
+    if record_type is PointEntry and payload['entry_type'] not in POINT_ENTRY_TYPES:
+        raise ValueError('积分流水类型错误。')
 
 
 def _record_storage_keys(record: object) -> tuple[str, ...]:
@@ -260,6 +263,7 @@ class GrowthStore:
     def __init__(self, storage: PluginStorage) -> None:
         self._storage = storage
         self._bot_locks: dict[str, asyncio.Lock] = {}
+        self._storage_keys: set[str] | None = None
         self._shard_append_caches: dict[str, _ShardAppendCache] = {}
         self._shard_ids_by_base: dict[str, set[int]] | None = None
 
@@ -274,11 +278,19 @@ class GrowthStore:
         raw = serialize_record(record)
         if key not in _record_storage_keys(record):
             raise ValueError('增长记录 bot_uuid 或主键与存储键不一致。')
+        if isinstance(record, PointEntry):
+            keys = await self._keys()
+            if key in keys:
+                if await self._storage.get_plugin_storage(key) != raw:
+                    raise ValueError('积分流水不可变。')
+                return
         await self._storage.set_plugin_storage(key, raw)
+        if self._storage_keys is not None:
+            self._storage_keys.add(key)
 
     async def get(self, key: str, record_type: type[RecordT]) -> RecordT | None:
         _validate_record_type(record_type)
-        keys = await self._storage.get_plugin_storage_keys()
+        keys = await self._keys()
         if key not in keys:
             return None
         raw = await self._storage.get_plugin_storage(key)
@@ -288,10 +300,11 @@ class GrowthStore:
         return record
 
     async def delete(self, key: str) -> bool:
-        keys = await self._storage.get_plugin_storage_keys()
+        keys = await self._keys()
         if key not in keys:
             return False
         await self._storage.delete_plugin_storage(key)
+        keys.discard(key)
         base_key, separator, suffix = key.rpartition(':')
         if separator and len(suffix) == 6 and suffix.isdigit():
             self._shard_append_caches.pop(base_key, None)
@@ -311,7 +324,7 @@ class GrowthStore:
         _validate_record_type(record_type)
         records: list[RecordT] = []
         skipped_count = 0
-        keys = await self._storage.get_plugin_storage_keys()
+        keys = await self._keys()
         for key in sorted(key for key in keys if key.startswith(prefix)):
             raw = await self._storage.get_plugin_storage(key)
             try:
@@ -322,6 +335,9 @@ class GrowthStore:
             except (ValueError, UnicodeDecodeError):
                 skipped_count += 1
         return RecordListResult(tuple(records), skipped_count)
+
+    async def has_prefix(self, prefix: str) -> bool:
+        return any(key.startswith(prefix) for key in await self._keys())
 
     async def get_operation(
         self,
@@ -430,10 +446,13 @@ class GrowthStore:
             shard_id += 1
             shard_items = []
         updated_items = [*shard_items, item]
+        shard_key = _shard_key(base_key, shard_id)
         await self._storage.set_plugin_storage(
-            _shard_key(base_key, shard_id),
+            shard_key,
             _encode_shard(updated_items),
         )
+        if self._storage_keys is not None:
+            self._storage_keys.add(shard_key)
         if self._shard_ids_by_base is not None:
             self._shard_ids_by_base.setdefault(base_key, set()).add(shard_id)
         cache.item_shards[item] = shard_id
@@ -507,7 +526,7 @@ class GrowthStore:
     async def _shard_ids(self, base_key: str) -> list[int]:
         if self._shard_ids_by_base is None:
             self._shard_ids_by_base = {}
-            keys = await self._storage.get_plugin_storage_keys()
+            keys = await self._keys()
             for key in keys:
                 stored_base_key, separator, suffix = key.rpartition(':')
                 if separator and len(suffix) == 6 and suffix.isdigit():
@@ -516,3 +535,8 @@ class GrowthStore:
                         set(),
                     ).add(int(suffix))
         return sorted(self._shard_ids_by_base.get(base_key, set()))
+
+    async def _keys(self) -> set[str]:
+        if self._storage_keys is None:
+            self._storage_keys = set(await self._storage.get_plugin_storage_keys())
+        return self._storage_keys

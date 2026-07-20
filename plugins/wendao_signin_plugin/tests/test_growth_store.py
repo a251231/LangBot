@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterable
+from dataclasses import replace
 
 import pytest
 
@@ -90,6 +91,7 @@ def _model_samples() -> Iterable[object]:
         entry_id='entry-1',
         identity_hash='identity-a',
         amount=120,
+        entry_type='referral_reward_promoter',
         reason='referral',
         operation_id='operation-1',
         balance_after=120,
@@ -482,6 +484,36 @@ def test_growth_store_validates_field_types_before_write() -> None:
             await store.save(key, record)
 
         assert storage.values == {}
+
+    asyncio.run(scenario())
+
+
+def test_point_entries_are_append_only() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        entry = PointEntry(
+            bot_uuid='bot-a',
+            entry_id='entry-1',
+            identity_hash='identity-a',
+            amount=100,
+            entry_type='referral_reward_promoter',
+            reason='referral',
+            operation_id='operation-1',
+            balance_after=100,
+            created_at='2026-07-20T00:00:00+08:00',
+        )
+        key = growth_storage_key(POINT_ENTRY_PREFIX, 'bot-a', entry.entry_id)
+
+        await store.save(key, entry)
+        await store.save(key, entry)
+        with pytest.raises(ValueError, match='不可变'):
+            await store.save(
+                key,
+                replace(entry, amount=999, balance_after=999),
+            )
+
+        assert await store.get(key, PointEntry) == entry
 
     asyncio.run(scenario())
 

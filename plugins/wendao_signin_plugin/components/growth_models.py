@@ -3,6 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+POINT_ENTRY_TYPES = frozenset(
+    {
+        'referral_reward_promoter',
+        'referral_reward_invitee',
+        'redeem_debit',
+        'admin_adjustment',
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class PromoterRecord:
     schema_version: int = field(default=1, init=False)
@@ -43,6 +53,7 @@ class PointEntry:
     entry_id: str
     identity_hash: str
     amount: int
+    entry_type: str
     reason: str
     operation_id: str
     balance_after: int
