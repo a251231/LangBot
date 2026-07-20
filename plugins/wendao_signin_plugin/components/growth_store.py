@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import unicodedata
 from dataclasses import asdict, dataclass, fields, replace
-from typing import Generic, TypeVar, cast, get_type_hints
+from typing import Any, Generic, TypeVar, cast, get_type_hints
 
 from components.account_store import PluginStorage
 from components.growth_models import (
@@ -37,6 +38,7 @@ GROWTH_CONFIG_PREFIX = 'growth-config:v1:'
 GROWTH_SECRET_PREFIX = 'growth-secret:v1:'
 
 SHARD_CAPACITY = 500
+MAX_SHARD_ID = 999999
 
 _GROWTH_PREFIXES = (
     PROMOTER_PREFIX,
@@ -65,6 +67,17 @@ _RECORD_TYPES = (
     EntitlementRecord,
     GrowthOperation,
 )
+_RECORD_KEY_SPECS: dict[type[object], tuple[str, str]] = {
+    PromoterRecord: (PROMOTER_PREFIX, 'identity_hash'),
+    ReferralRecord: (REFERRAL_PREFIX, 'invitee_hash'),
+    PointAccount: (POINT_ACCOUNT_PREFIX, 'identity_hash'),
+    PointEntry: (POINT_ENTRY_PREFIX, 'entry_id'),
+    ProductRecord: (PRODUCT_PREFIX, 'product_id'),
+    CardRecord: (CARD_PREFIX, 'card_hash'),
+    RedemptionRecord: (REDEMPTION_PREFIX, 'redemption_id'),
+    EntitlementRecord: (ENTITLEMENT_PREFIX, 'identity_hash'),
+    GrowthOperation: (GROWTH_OPERATION_PREFIX, 'operation_id'),
+}
 
 RecordT = TypeVar('RecordT', bound=GrowthRecord)
 
@@ -82,6 +95,15 @@ class ShardedIndexResult:
     skipped_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ShardAppendCache:
+    item_shards: dict[str, int]
+    tail_shard_id: int
+    tail_items: tuple[str, ...]
+    tail_exists: bool
+    tail_corrupt: bool
+
+
 def identity_hash(bot_uuid: str, sender_id: str) -> str:
     identity = f'{bot_uuid}\0{sender_id}'.encode('utf-8')
     return hashlib.sha256(identity).hexdigest()
@@ -90,20 +112,84 @@ def identity_hash(bot_uuid: str, sender_id: str) -> str:
 def growth_storage_key(prefix: str, bot_uuid: str, *parts: str) -> str:
     if prefix not in _GROWTH_PREFIXES:
         raise ValueError('未知的增长存储键前缀。')
-    values = (bot_uuid, *parts)
+    if (
+        type(bot_uuid) is not str
+        or not bot_uuid
+        or ':' in bot_uuid
+        or _has_control_characters(bot_uuid)
+    ):
+        raise ValueError('增长存储键 bot_uuid 格式错误。')
     if any(
-        not value or '\0' in value or '\r' in value or '\n' in value
-        for value in values
+        type(value) is not str
+        or not value
+        or _has_control_characters(value)
+        for value in parts
     ):
         raise ValueError('增长存储键片段格式错误。')
-    return prefix + ':'.join(values)
+    return prefix + ':'.join((bot_uuid, *parts))
+
+
+def _has_control_characters(value: str) -> bool:
+    return any(unicodedata.category(character).startswith('C') for character in value)
+
+
+def _validate_record_type(record_type: type[Any]) -> None:
+    if record_type not in _RECORD_TYPES:
+        raise TypeError('不支持的增长记录类型。')
+
+
+def _validate_record_payload(
+    payload: dict[str, Any],
+    record_type: type[Any],
+    *,
+    json_form: bool,
+) -> None:
+    expected_fields = {item.name for item in fields(record_type)}
+    if set(payload) != expected_fields:
+        raise ValueError('增长记录格式错误。')
+    if (
+        type(payload.get('schema_version')) is not int
+        or payload['schema_version'] != 1
+    ):
+        raise ValueError('不支持的增长存储版本。')
+
+    type_hints = get_type_hints(record_type)
+    for name, expected_type in type_hints.items():
+        if expected_type in (str, int, bool) and type(payload[name]) is not expected_type:
+            raise ValueError('增长记录字段类型错误。')
+
+    if record_type is GrowthOperation:
+        operation_payload = payload['payload']
+        applied_steps = payload['applied_steps']
+        if type(operation_payload) is not dict or not all(
+            type(key) is str for key in operation_payload
+        ):
+            raise ValueError('增长操作记录格式错误。')
+        expected_steps_type = list if json_form else tuple
+        if type(applied_steps) is not expected_steps_type or not all(
+            type(step) is str for step in applied_steps
+        ):
+            raise ValueError('增长操作步骤格式错误。')
+
+
+def _record_storage_key(record: object) -> str:
+    record_type = type(record)
+    _validate_record_type(record_type)
+    prefix, primary_key_field = _RECORD_KEY_SPECS[record_type]
+    return growth_storage_key(
+        prefix,
+        cast(str, getattr(record, 'bot_uuid')),
+        cast(str, getattr(record, primary_key_field)),
+    )
 
 
 def serialize_record(record: object) -> bytes:
-    if not isinstance(record, _RECORD_TYPES):
-        raise TypeError('不支持的增长记录类型。')
+    record_type = type(record)
+    _validate_record_type(record_type)
+    payload = cast(dict[str, Any], asdict(cast(Any, record)))
+    _validate_record_payload(payload, record_type, json_form=False)
     return json.dumps(
-        asdict(record),
+        payload,
         ensure_ascii=False,
         separators=(',', ':'),
         sort_keys=True,
@@ -111,40 +197,28 @@ def serialize_record(record: object) -> bytes:
 
 
 def deserialize_record(raw: bytes, record_type: type[RecordT]) -> RecordT:
-    if record_type not in _RECORD_TYPES:
-        raise TypeError('不支持的增长记录类型。')
-    payload = json.loads(raw.decode('utf-8'))
-    if (
-        not isinstance(payload, dict)
-        or type(payload.get('schema_version')) is not int
-        or payload['schema_version'] != 1
-    ):
-        raise ValueError('不支持的增长存储版本。')
+    _validate_record_type(record_type)
+    decoded = json.loads(raw.decode('utf-8'))
+    if not isinstance(decoded, dict):
+        raise ValueError('增长记录格式错误。')
+    payload = cast(dict[str, Any], decoded)
+    _validate_record_payload(payload, record_type, json_form=True)
 
     init_fields = {item.name for item in fields(record_type) if item.init}
-    kwargs = {name: payload[name] for name in init_fields if name in payload}
-    type_hints = get_type_hints(record_type)
-    for name, value in kwargs.items():
-        expected_type = type_hints[name]
-        if expected_type in (str, int, bool) and type(value) is not expected_type:
-            raise ValueError('增长记录字段类型错误。')
+    kwargs = {name: payload[name] for name in init_fields}
     if record_type is GrowthOperation:
-        operation_payload = kwargs.get('payload')
-        applied_steps = kwargs.get('applied_steps')
-        if not isinstance(operation_payload, dict) or not isinstance(applied_steps, list):
-            raise ValueError('增长操作记录格式错误。')
-        if not all(isinstance(step, str) for step in applied_steps):
-            raise ValueError('增长操作步骤格式错误。')
-        kwargs['applied_steps'] = tuple(applied_steps)
+        kwargs['applied_steps'] = tuple(cast(list[str], kwargs['applied_steps']))
     try:
         return cast(RecordT, record_type(**kwargs))
-    except (KeyError, TypeError) as exc:
+    except TypeError as exc:
         raise ValueError('增长记录格式错误。') from exc
 
 
 def _shard_key(base_key: str, shard_id: int) -> str:
     if not base_key or shard_id < 0:
         raise ValueError('分片键参数错误。')
+    if shard_id > MAX_SHARD_ID:
+        raise OverflowError('索引分片 ID 超出六位范围。')
     return f'{base_key}:{shard_id:06d}'
 
 
@@ -152,6 +226,7 @@ def _decode_shard(raw: bytes) -> list[str]:
     payload = json.loads(raw.decode('utf-8'))
     if (
         not isinstance(payload, dict)
+        or set(payload) != {'schema_version', 'items'}
         or type(payload.get('schema_version')) is not int
         or payload['schema_version'] != 1
     ):
@@ -160,7 +235,7 @@ def _decode_shard(raw: bytes) -> list[str]:
     if (
         not isinstance(items, list)
         or len(items) > SHARD_CAPACITY
-        or not all(isinstance(item, str) for item in items)
+        or not all(type(item) is str for item in items)
     ):
         raise ValueError('索引分片格式错误。')
     return items
@@ -178,6 +253,7 @@ class GrowthStore:
     def __init__(self, storage: PluginStorage) -> None:
         self._storage = storage
         self._bot_locks: dict[str, asyncio.Lock] = {}
+        self._shard_append_caches: dict[str, _ShardAppendCache] = {}
 
     def bot_lock(self, bot_uuid: str) -> asyncio.Lock:
         lock = self._bot_locks.get(bot_uuid)
@@ -187,26 +263,30 @@ class GrowthStore:
         return lock
 
     async def save(self, key: str, record: GrowthRecord) -> None:
-        bot_key_matches = any(
-            key == prefix + record.bot_uuid
-            or key.startswith(prefix + record.bot_uuid + ':')
-            for prefix in _GROWTH_PREFIXES
-        )
-        if not bot_key_matches:
-            raise ValueError('增长记录 bot_uuid 与存储键不一致。')
-        await self._storage.set_plugin_storage(key, serialize_record(record))
+        raw = serialize_record(record)
+        if key != _record_storage_key(record):
+            raise ValueError('增长记录 bot_uuid 或主键与存储键不一致。')
+        await self._storage.set_plugin_storage(key, raw)
 
     async def get(self, key: str, record_type: type[RecordT]) -> RecordT | None:
+        _validate_record_type(record_type)
         keys = await self._storage.get_plugin_storage_keys()
         if key not in keys:
             return None
-        return deserialize_record(await self._storage.get_plugin_storage(key), record_type)
+        raw = await self._storage.get_plugin_storage(key)
+        record = deserialize_record(raw, record_type)
+        if key != _record_storage_key(record):
+            raise ValueError('增长记录 bot_uuid 或主键与存储键不一致。')
+        return record
 
     async def delete(self, key: str) -> bool:
         keys = await self._storage.get_plugin_storage_keys()
         if key not in keys:
             return False
         await self._storage.delete_plugin_storage(key)
+        base_key, separator, suffix = key.rpartition(':')
+        if separator and len(suffix) == 6 and suffix.isdigit():
+            self._shard_append_caches.pop(base_key, None)
         return True
 
     async def list_prefix(
@@ -214,17 +294,18 @@ class GrowthStore:
         prefix: str,
         record_type: type[RecordT],
     ) -> RecordListResult[RecordT]:
+        _validate_record_type(record_type)
         records: list[RecordT] = []
         skipped_count = 0
         keys = await self._storage.get_plugin_storage_keys()
         for key in sorted(key for key in keys if key.startswith(prefix)):
+            raw = await self._storage.get_plugin_storage(key)
             try:
-                record = deserialize_record(
-                    await self._storage.get_plugin_storage(key),
-                    record_type,
-                )
+                record = deserialize_record(raw, record_type)
+                if key != _record_storage_key(record):
+                    raise ValueError('增长记录存储键不一致。')
                 records.append(record)
-            except (TypeError, ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError):
                 skipped_count += 1
         return RecordListResult(tuple(records), skipped_count)
 
@@ -320,27 +401,32 @@ class GrowthStore:
     async def append_sharded_index(self, base_key: str, item: str) -> int:
         if not item:
             raise ValueError('索引项不能为空。')
-        shard_ids = await self._shard_ids(base_key)
-        shard_id = shard_ids[-1] if shard_ids else 0
-        shard_items: list[str] = []
-        if shard_ids:
-            try:
-                shard_items = _decode_shard(
-                    await self._storage.get_plugin_storage(_shard_key(base_key, shard_id))
-                )
-            except (TypeError, ValueError, UnicodeDecodeError):
-                shard_id += 1
-                shard_items = []
+        cache = await self._get_shard_append_cache(base_key)
+        existing_shard_id = cache.item_shards.get(item)
+        if existing_shard_id is not None:
+            return existing_shard_id
 
-        if item in shard_items:
-            return shard_id
-        if len(shard_items) >= SHARD_CAPACITY:
+        shard_id = cache.tail_shard_id
+        shard_items = list(cache.tail_items)
+        if cache.tail_exists and (
+            cache.tail_corrupt or len(shard_items) >= SHARD_CAPACITY
+        ):
+            if shard_id >= MAX_SHARD_ID:
+                raise OverflowError('索引分片 ID 已达到六位上限。')
             shard_id += 1
             shard_items = []
-        shard_items.append(item)
+        updated_items = [*shard_items, item]
         await self._storage.set_plugin_storage(
             _shard_key(base_key, shard_id),
-            _encode_shard(shard_items),
+            _encode_shard(updated_items),
+        )
+        cache.item_shards[item] = shard_id
+        self._shard_append_caches[base_key] = _ShardAppendCache(
+            item_shards=cache.item_shards,
+            tail_shard_id=shard_id,
+            tail_items=tuple(updated_items),
+            tail_exists=True,
+            tail_corrupt=False,
         )
         return shard_id
 
@@ -349,17 +435,45 @@ class GrowthStore:
         skipped_count = 0
         shard_ids = await self._shard_ids(base_key)
         for shard_id in shard_ids:
+            raw = await self._storage.get_plugin_storage(_shard_key(base_key, shard_id))
             try:
-                items.extend(
-                    _decode_shard(
-                        await self._storage.get_plugin_storage(
-                            _shard_key(base_key, shard_id)
-                        )
-                    )
-                )
-            except (TypeError, ValueError, UnicodeDecodeError):
+                items.extend(_decode_shard(raw))
+            except (ValueError, UnicodeDecodeError):
                 skipped_count += 1
         return ShardedIndexResult(tuple(items), len(shard_ids), skipped_count)
+
+    async def _get_shard_append_cache(self, base_key: str) -> _ShardAppendCache:
+        cached = self._shard_append_caches.get(base_key)
+        if cached is not None:
+            return cached
+
+        shard_ids = await self._shard_ids(base_key)
+        item_shards: dict[str, int] = {}
+        tail_shard_id = shard_ids[-1] if shard_ids else 0
+        tail_items: tuple[str, ...] = ()
+        tail_corrupt = False
+        for shard_id in shard_ids:
+            raw = await self._storage.get_plugin_storage(_shard_key(base_key, shard_id))
+            try:
+                shard_items = _decode_shard(raw)
+            except (ValueError, UnicodeDecodeError):
+                if shard_id == tail_shard_id:
+                    tail_corrupt = True
+                continue
+            for shard_item in shard_items:
+                item_shards.setdefault(shard_item, shard_id)
+            if shard_id == tail_shard_id:
+                tail_items = tuple(shard_items)
+
+        cache = _ShardAppendCache(
+            item_shards=item_shards,
+            tail_shard_id=tail_shard_id,
+            tail_items=tail_items,
+            tail_exists=bool(shard_ids),
+            tail_corrupt=tail_corrupt,
+        )
+        self._shard_append_caches[base_key] = cache
+        return cache
 
     async def _shard_ids(self, base_key: str) -> list[int]:
         prefix = base_key + ':'
