@@ -1,0 +1,130 @@
+apiVersion: v1
+kind: Plugin
+metadata:
+  author: local
+  name: wendao_signin_plugin
+  repository: "https://github.com/langbot-app/LangBot"
+  version: 0.4.3
+  description:
+    en_US: Phone login, scheduled sign-in, and weekly report assistant for Wendao Community.
+    zh_Hans: 支持手机号登录、每日签到、补签、里程碑领取和心动周报的问道社区助手。
+  label:
+    en_US: Wendao Sign-in Assistant
+    zh_Hans: 问道签到助手
+  icon: assets/icon.svg
+spec:
+  config:
+    - name: timezone
+      label:
+        en_US: Timezone
+        zh_Hans: 时区
+      type: string
+      required: false
+      default: "Asia/Shanghai"
+    - name: default_schedule_time
+      label:
+        en_US: Default Schedule Time
+        zh_Hans: 默认执行时间
+      description:
+        en_US: Default daily execution time in HH:MM format.
+        zh_Hans: 新绑定账号默认每日执行时间，格式为 HH:MM。
+      type: string
+      required: false
+      default: "08:00"
+    - name: request_timeout_seconds
+      label:
+        en_US: Request Timeout Seconds
+        zh_Hans: 请求超时秒数
+      type: integer
+      required: false
+      default: 15
+    - name: scheduler_poll_seconds
+      label:
+        en_US: Scheduler Poll Seconds
+        zh_Hans: 调度轮询秒数
+      type: integer
+      required: false
+      default: 30
+    - name: max_concurrency
+      label:
+        en_US: Max Concurrency
+        zh_Hans: 最大并发账号数
+      type: integer
+      required: false
+      default: 3
+    - name: login_session_ttl_seconds
+      label:
+        en_US: Login Session TTL Seconds
+        zh_Hans: 登录会话有效秒数
+      description:
+        en_US: In-memory lifetime for phone, captcha ticket, and SMS login flow.
+        zh_Hans: 手机号、人机验证票据和短信登录流程的内存会话有效期。
+      type: integer
+      required: false
+      default: 600
+    - name: captcha_public_base_url
+      label:
+        en_US: Captcha Public Base URL
+        zh_Hans: 验证码公开访问地址
+      description:
+        en_US: Browser-accessible server origin, for example http://192.168.1.10:8788.
+        zh_Hans: 手机浏览器可访问的服务器地址，例如 http://192.168.1.10:8788；留空时不启动验证码网页服务。
+      type: string
+      required: false
+      default: ""
+    - name: captcha_bind_host
+      label:
+        en_US: Captcha Bind Host
+        zh_Hans: 验证码监听地址
+      type: string
+      required: false
+      default: "0.0.0.0"
+    - name: captcha_bind_port
+      label:
+        en_US: Captcha Bind Port
+        zh_Hans: 验证码监听端口
+      description:
+        en_US: Port exposed by the plugin process for the captcha page and callback.
+        zh_Hans: 插件进程用于验证码页面和回调的监听端口。
+      type: integer
+      required: false
+      default: 8788
+    - name: default_auto_signin
+      label:
+        en_US: Enable Auto Sign-in by Default
+        zh_Hans: 默认开启自动签到
+      type: boolean
+      required: false
+      default: true
+    - name: default_auto_resign
+      label:
+        en_US: Enable Auto Re-sign by Default
+        zh_Hans: 默认开启自动补签
+      type: boolean
+      required: false
+      default: true
+    - name: default_auto_milestone
+      label:
+        en_US: Enable Auto Milestone by Default
+        zh_Hans: 默认开启自动里程碑
+      type: boolean
+      required: false
+      default: true
+    - name: default_auto_weekly_report
+      label:
+        en_US: Enable Automatic Weekly Report by Default
+        zh_Hans: 默认开启自动周报
+      description:
+        en_US: Push the previous weekly report at 09:00 every Monday.
+        zh_Hans: 每周一 09:00 自动私聊推送上一周期周报。
+      type: boolean
+      required: false
+      default: true
+  components:
+    EventListener:
+      fromDirs:
+        - path: components/event_listeners/
+execution:
+  python:
+    path: main.py
+    attr: WendaoSigninPlugin
