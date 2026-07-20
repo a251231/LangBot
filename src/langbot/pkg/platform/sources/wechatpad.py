@@ -5,6 +5,10 @@ import time
 import httpx
 
 from langbot.libs.wechatpad_api.client import WeChatPadClient
+from langbot.pkg.platform.sources.wechatpad_message_guard import (
+    WeChatPadMessageDeduplicator,
+    is_wechatpad_message,
+)
 
 import typing
 import asyncio
@@ -15,6 +19,7 @@ import copy
 import threading
 
 import quart
+import pydantic
 
 from langbot.pkg.platform.logger import EventLogger
 import xml.etree.ElementTree as ET
@@ -522,6 +527,10 @@ class WeChatPadEventConverter(abstract_platform_adapter.AbstractEventConverter):
 class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
     name: str = 'WeChatPad'  # 定义适配器名称
 
+    _message_deduplicator: WeChatPadMessageDeduplicator = pydantic.PrivateAttr(
+        default_factory=WeChatPadMessageDeduplicator
+    )
+
     bot: WeChatPadClient
     quart_app: quart.Quart
 
@@ -560,12 +569,18 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
     async def ws_message(self, data):
         """处理接收到的消息"""
 
+        if not is_wechatpad_message(data):
+            return 'ok'
+        if self._message_deduplicator.is_duplicate(data):
+            return 'ok'
+
         try:
             event = await self.event_converter.target2yiri(data.copy(), self.bot_account_id)
         except Exception:
             await self.logger.error(f'Error in wechatpad callback: {traceback.format_exc()}')
+            return 'ok'
 
-        if event.__class__ in self.listeners:
+        if event is not None and event.__class__ in self.listeners:
             await self.listeners[event.__class__](event, self)
 
         return 'ok'
