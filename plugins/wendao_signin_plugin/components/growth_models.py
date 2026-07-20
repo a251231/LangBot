@@ -69,6 +69,7 @@ class CardRecord:
     bot_uuid: str
     card_hash: str
     product_id: str
+    product_name: str
     duration_days: int
     status: str
     encrypted_code: str

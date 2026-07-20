@@ -89,6 +89,7 @@ def _model_samples() -> Iterable[object]:
         bot_uuid='bot-a',
         card_hash='card-a',
         product_id='P000001',
+        product_name='30 天使用期限',
         duration_days=30,
         status='AVAILABLE',
         encrypted_code='ciphertext',
@@ -131,6 +132,20 @@ def test_growth_models_round_trip_json(record: object) -> None:
 
     assert restored == record
     assert getattr(restored, 'schema_version') == 1
+
+
+def test_card_record_deserializes_product_name_snapshot() -> None:
+    raw = (
+        b'{"bot_uuid":"bot-a","card_hash":"card-a",'
+        b'"created_at":"2026-07-20T00:00:00+08:00",'
+        b'"duration_days":30,"encrypted_code":"ciphertext",'
+        b'"product_id":"P000001","product_name":"30 days access",'
+        b'"schema_version":1,"status":"AVAILABLE"}'
+    )
+
+    restored = deserialize_record(raw, CardRecord)
+
+    assert restored.product_name == '30 days access'
 
 
 def test_identity_hash_hides_raw_identity_and_isolates_bots() -> None:
@@ -183,6 +198,25 @@ def test_growth_store_skips_records_with_invalid_field_types() -> None:
             b'{"bot_uuid":"bot-a","created_at":"2026-07-20",'
             b'"identity_hash":"identity-a","invite_code":123,'
             b'"schema_version":1}'
+        )
+
+        result = await store.list_prefix(f'{PROMOTER_PREFIX}bot-a:', PromoterRecord)
+
+        assert result.records == ()
+        assert result.skipped_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_growth_store_skips_records_with_boolean_schema_version() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        key = growth_storage_key(PROMOTER_PREFIX, 'bot-a', 'boolean-version')
+        storage.values[key] = (
+            b'{"bot_uuid":"bot-a","created_at":"2026-07-20",'
+            b'"identity_hash":"identity-a","invite_code":"ABCD2345",'
+            b'"schema_version":true}'
         )
 
         result = await store.list_prefix(f'{PROMOTER_PREFIX}bot-a:', PromoterRecord)
@@ -259,6 +293,24 @@ def test_sharded_index_skips_corrupt_shards_with_diagnostics() -> None:
 
         assert result.items == ('card-a', 'card-b')
         assert result.shard_count == 2
+        assert result.skipped_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_sharded_index_skips_shards_with_boolean_schema_version() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        base_key = 'card-pool:v1:bot-a:P000001'
+        storage.values[f'{base_key}:000000'] = (
+            b'{"schema_version":true,"items":["card-a"]}'
+        )
+
+        result = await store.read_sharded_index(base_key)
+
+        assert result.items == ()
+        assert result.shard_count == 1
         assert result.skipped_count == 1
 
     asyncio.run(scenario())

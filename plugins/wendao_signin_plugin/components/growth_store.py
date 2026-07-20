@@ -114,7 +114,11 @@ def deserialize_record(raw: bytes, record_type: type[RecordT]) -> RecordT:
     if record_type not in _RECORD_TYPES:
         raise TypeError('不支持的增长记录类型。')
     payload = json.loads(raw.decode('utf-8'))
-    if not isinstance(payload, dict) or payload.get('schema_version') != 1:
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get('schema_version')) is not int
+        or payload['schema_version'] != 1
+    ):
         raise ValueError('不支持的增长存储版本。')
 
     init_fields = {item.name for item in fields(record_type) if item.init}
@@ -146,7 +150,11 @@ def _shard_key(base_key: str, shard_id: int) -> str:
 
 def _decode_shard(raw: bytes) -> list[str]:
     payload = json.loads(raw.decode('utf-8'))
-    if not isinstance(payload, dict) or payload.get('schema_version') != 1:
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get('schema_version')) is not int
+        or payload['schema_version'] != 1
+    ):
         raise ValueError('不支持的索引分片版本。')
     items = payload.get('items')
     if (
