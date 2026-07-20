@@ -262,3 +262,51 @@ def test_sharded_index_skips_corrupt_shards_with_diagnostics() -> None:
         assert result.skipped_count == 1
 
     asyncio.run(scenario())
+
+
+def test_growth_operation_lifecycle_is_idempotent() -> None:
+    async def scenario() -> None:
+        store = GrowthStore(FakeStorage())
+        payload = {'changes': [{'identity_hash': 'identity-a', 'amount': 100}]}
+
+        operation = await store.begin_operation(
+            'bot-a',
+            'referral-effective:referral-1',
+            'points',
+            payload,
+            '2026-07-20T00:00:00+08:00',
+        )
+        replay = await store.begin_operation(
+            'bot-a',
+            'referral-effective:referral-1',
+            'points',
+            payload,
+            '2026-07-20T00:00:01+08:00',
+        )
+        stepped = await store.mark_step_applied(
+            'bot-a',
+            operation.operation_id,
+            'credit:identity-a',
+            '2026-07-20T00:00:02+08:00',
+        )
+        stepped_again = await store.mark_step_applied(
+            'bot-a',
+            operation.operation_id,
+            'credit:identity-a',
+            '2026-07-20T00:00:03+08:00',
+        )
+        pending = await store.list_pending_operations('bot-a')
+        committed = await store.commit_operation(
+            'bot-a',
+            operation.operation_id,
+            '2026-07-20T00:00:04+08:00',
+        )
+
+        assert replay == operation
+        assert stepped.applied_steps == ('credit:identity-a',)
+        assert stepped_again == stepped
+        assert pending.records == (stepped,)
+        assert committed.status == 'COMMITTED'
+        assert (await store.list_pending_operations('bot-a')).records == ()
+
+    asyncio.run(scenario())

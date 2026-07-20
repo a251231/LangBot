@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Generic, TypeVar, cast, get_type_hints
 
 from components.account_store import PluginStorage
@@ -91,7 +91,10 @@ def growth_storage_key(prefix: str, bot_uuid: str, *parts: str) -> str:
     if prefix not in _GROWTH_PREFIXES:
         raise ValueError('未知的增长存储键前缀。')
     values = (bot_uuid, *parts)
-    if any(not value or ':' in value for value in values):
+    if any(
+        not value or '\0' in value or '\r' in value or '\n' in value
+        for value in values
+    ):
         raise ValueError('增长存储键片段格式错误。')
     return prefix + ':'.join(values)
 
@@ -216,6 +219,95 @@ class GrowthStore:
             except (TypeError, ValueError, UnicodeDecodeError):
                 skipped_count += 1
         return RecordListResult(tuple(records), skipped_count)
+
+    async def get_operation(
+        self,
+        bot_uuid: str,
+        operation_id: str,
+    ) -> GrowthOperation | None:
+        key = growth_storage_key(GROWTH_OPERATION_PREFIX, bot_uuid, operation_id)
+        return await self.get(key, GrowthOperation)
+
+    async def begin_operation(
+        self,
+        bot_uuid: str,
+        operation_id: str,
+        kind: str,
+        payload: dict[str, object],
+        created_at: str,
+    ) -> GrowthOperation:
+        existing = await self.get_operation(bot_uuid, operation_id)
+        if existing is not None:
+            if existing.kind != kind or existing.payload != payload:
+                raise ValueError('操作 ID 已用于其他增长请求。')
+            return existing
+        operation = GrowthOperation(
+            bot_uuid=bot_uuid,
+            operation_id=operation_id,
+            kind=kind,
+            status='PENDING',
+            payload=payload,
+            applied_steps=(),
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        key = growth_storage_key(GROWTH_OPERATION_PREFIX, bot_uuid, operation_id)
+        await self.save(key, operation)
+        return operation
+
+    async def mark_step_applied(
+        self,
+        bot_uuid: str,
+        operation_id: str,
+        step: str,
+        updated_at: str,
+    ) -> GrowthOperation:
+        operation = await self.get_operation(bot_uuid, operation_id)
+        if operation is None:
+            raise ValueError('增长操作不存在。')
+        if step in operation.applied_steps:
+            return operation
+        if operation.status != 'PENDING':
+            raise ValueError('已提交的增长操作不能增加步骤。')
+        updated = replace(
+            operation,
+            applied_steps=(*operation.applied_steps, step),
+            updated_at=updated_at,
+        )
+        key = growth_storage_key(GROWTH_OPERATION_PREFIX, bot_uuid, operation_id)
+        await self.save(key, updated)
+        return updated
+
+    async def commit_operation(
+        self,
+        bot_uuid: str,
+        operation_id: str,
+        updated_at: str,
+    ) -> GrowthOperation:
+        operation = await self.get_operation(bot_uuid, operation_id)
+        if operation is None:
+            raise ValueError('增长操作不存在。')
+        if operation.status == 'COMMITTED':
+            return operation
+        if operation.status != 'PENDING':
+            raise ValueError('增长操作状态错误。')
+        committed = replace(operation, status='COMMITTED', updated_at=updated_at)
+        key = growth_storage_key(GROWTH_OPERATION_PREFIX, bot_uuid, operation_id)
+        await self.save(key, committed)
+        return committed
+
+    async def list_pending_operations(
+        self,
+        bot_uuid: str,
+    ) -> RecordListResult[GrowthOperation]:
+        listed = await self.list_prefix(
+            f'{GROWTH_OPERATION_PREFIX}{bot_uuid}:',
+            GrowthOperation,
+        )
+        return RecordListResult(
+            tuple(record for record in listed.records if record.status == 'PENDING'),
+            listed.skipped_count,
+        )
 
     async def append_sharded_index(self, base_key: str, item: str) -> int:
         if not item:

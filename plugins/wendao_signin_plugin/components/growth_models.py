@@ -47,6 +47,7 @@ class PointEntry:
     operation_id: str
     balance_after: int
     created_at: str
+    previous_entry_id: str = ''
 
 
 @dataclass(frozen=True, slots=True)
