@@ -21,6 +21,7 @@ from components.growth_store import (
     CARD_PREFIX,
     ENTITLEMENT_PREFIX,
     GROWTH_OPERATION_PREFIX,
+    INVITE_CODE_PREFIX,
     POINT_ACCOUNT_PREFIX,
     POINT_ENTRY_PREFIX,
     PRODUCT_PREFIX,
@@ -417,6 +418,50 @@ def test_growth_store_save_requires_canonical_record_key(
     asyncio.run(scenario())
 
 
+def test_promoter_record_supports_identity_and_invite_code_keys() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        record = PromoterRecord(
+            bot_uuid='bot-a',
+            identity_hash='identity-a',
+            invite_code='ABCD2345',
+            created_at='2026-07-20T00:00:00+08:00',
+        )
+        identity_key = growth_storage_key(
+            PROMOTER_PREFIX,
+            record.bot_uuid,
+            record.identity_hash,
+        )
+        invite_code_key = growth_storage_key(
+            INVITE_CODE_PREFIX,
+            record.bot_uuid,
+            record.invite_code,
+        )
+
+        await store.save(identity_key, record)
+        await store.save(invite_code_key, record)
+
+        assert await store.get(identity_key, PromoterRecord) == record
+        assert await store.get(invite_code_key, PromoterRecord) == record
+        listed = await store.list_prefix(
+            f'{INVITE_CODE_PREFIX}{record.bot_uuid}:',
+            PromoterRecord,
+        )
+        assert listed.records == (record,)
+        with pytest.raises(ValueError, match='存储键不一致'):
+            await store.save(
+                growth_storage_key(
+                    INVITE_CODE_PREFIX,
+                    record.bot_uuid,
+                    'WRONG234',
+                ),
+                record,
+            )
+
+    asyncio.run(scenario())
+
+
 def test_growth_store_validates_field_types_before_write() -> None:
     async def scenario() -> None:
         storage = FakeStorage()
@@ -519,6 +564,20 @@ def test_sharded_index_scans_storage_keys_once_per_base_key() -> None:
     asyncio.run(scenario())
 
 
+def test_sharded_index_scans_storage_keys_once_across_base_keys() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+
+        for index in range(1000):
+            base_key = f'redemption-index:v1:bot-a:identity-{index:04d}'
+            await store.append_sharded_index(base_key, f'redemption-{index:04d}')
+
+        assert storage.get_keys_calls <= 1
+
+    asyncio.run(scenario())
+
+
 def test_sharded_index_cache_updates_only_after_successful_write() -> None:
     async def scenario() -> None:
         storage = FakeStorage()
@@ -552,6 +611,30 @@ def test_sharded_index_skips_corrupt_shards_with_diagnostics() -> None:
         assert result.items == ('card-a', 'card-b')
         assert result.shard_count == 2
         assert result.skipped_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_sharded_index_rejects_empty_and_duplicate_items_with_diagnostics() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        base_key = 'card-pool:v1:bot-a:P000001'
+        storage.values[f'{base_key}:000000'] = (
+            b'{"schema_version":1,"items":["card-a","card-a",""]}'
+        )
+        storage.values[f'{base_key}:000001'] = (
+            b'{"schema_version":1,"items":["card-b","card-c"]}'
+        )
+        storage.values[f'{base_key}:000002'] = (
+            b'{"schema_version":1,"items":["card-c","card-d"]}'
+        )
+
+        result = await store.read_sharded_index(base_key)
+
+        assert result.items == ('card-b', 'card-c', 'card-d')
+        assert result.shard_count == 3
+        assert result.skipped_count == 2
 
     asyncio.run(scenario())
 

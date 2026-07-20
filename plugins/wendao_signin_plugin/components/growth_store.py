@@ -67,16 +67,19 @@ _RECORD_TYPES = (
     EntitlementRecord,
     GrowthOperation,
 )
-_RECORD_KEY_SPECS: dict[type[object], tuple[str, str]] = {
-    PromoterRecord: (PROMOTER_PREFIX, 'identity_hash'),
-    ReferralRecord: (REFERRAL_PREFIX, 'invitee_hash'),
-    PointAccount: (POINT_ACCOUNT_PREFIX, 'identity_hash'),
-    PointEntry: (POINT_ENTRY_PREFIX, 'entry_id'),
-    ProductRecord: (PRODUCT_PREFIX, 'product_id'),
-    CardRecord: (CARD_PREFIX, 'card_hash'),
-    RedemptionRecord: (REDEMPTION_PREFIX, 'redemption_id'),
-    EntitlementRecord: (ENTITLEMENT_PREFIX, 'identity_hash'),
-    GrowthOperation: (GROWTH_OPERATION_PREFIX, 'operation_id'),
+_RECORD_KEY_SPECS: dict[type[object], tuple[tuple[str, str], ...]] = {
+    PromoterRecord: (
+        (PROMOTER_PREFIX, 'identity_hash'),
+        (INVITE_CODE_PREFIX, 'invite_code'),
+    ),
+    ReferralRecord: ((REFERRAL_PREFIX, 'invitee_hash'),),
+    PointAccount: ((POINT_ACCOUNT_PREFIX, 'identity_hash'),),
+    PointEntry: ((POINT_ENTRY_PREFIX, 'entry_id'),),
+    ProductRecord: ((PRODUCT_PREFIX, 'product_id'),),
+    CardRecord: ((CARD_PREFIX, 'card_hash'),),
+    RedemptionRecord: ((REDEMPTION_PREFIX, 'redemption_id'),),
+    EntitlementRecord: ((ENTITLEMENT_PREFIX, 'identity_hash'),),
+    GrowthOperation: ((GROWTH_OPERATION_PREFIX, 'operation_id'),),
 }
 
 RecordT = TypeVar('RecordT', bound=GrowthRecord)
@@ -172,14 +175,16 @@ def _validate_record_payload(
             raise ValueError('增长操作步骤格式错误。')
 
 
-def _record_storage_key(record: object) -> str:
+def _record_storage_keys(record: object) -> tuple[str, ...]:
     record_type = type(record)
     _validate_record_type(record_type)
-    prefix, primary_key_field = _RECORD_KEY_SPECS[record_type]
-    return growth_storage_key(
-        prefix,
-        cast(str, getattr(record, 'bot_uuid')),
-        cast(str, getattr(record, primary_key_field)),
+    return tuple(
+        growth_storage_key(
+            prefix,
+            cast(str, getattr(record, 'bot_uuid')),
+            cast(str, getattr(record, key_field)),
+        )
+        for prefix, key_field in _RECORD_KEY_SPECS[record_type]
     )
 
 
@@ -236,6 +241,8 @@ def _decode_shard(raw: bytes) -> list[str]:
         not isinstance(items, list)
         or len(items) > SHARD_CAPACITY
         or not all(type(item) is str for item in items)
+        or any(not item for item in items)
+        or len(set(items)) != len(items)
     ):
         raise ValueError('索引分片格式错误。')
     return items
@@ -254,6 +261,7 @@ class GrowthStore:
         self._storage = storage
         self._bot_locks: dict[str, asyncio.Lock] = {}
         self._shard_append_caches: dict[str, _ShardAppendCache] = {}
+        self._shard_ids_by_base: dict[str, set[int]] | None = None
 
     def bot_lock(self, bot_uuid: str) -> asyncio.Lock:
         lock = self._bot_locks.get(bot_uuid)
@@ -264,7 +272,7 @@ class GrowthStore:
 
     async def save(self, key: str, record: GrowthRecord) -> None:
         raw = serialize_record(record)
-        if key != _record_storage_key(record):
+        if key not in _record_storage_keys(record):
             raise ValueError('增长记录 bot_uuid 或主键与存储键不一致。')
         await self._storage.set_plugin_storage(key, raw)
 
@@ -275,7 +283,7 @@ class GrowthStore:
             return None
         raw = await self._storage.get_plugin_storage(key)
         record = deserialize_record(raw, record_type)
-        if key != _record_storage_key(record):
+        if key not in _record_storage_keys(record):
             raise ValueError('增长记录 bot_uuid 或主键与存储键不一致。')
         return record
 
@@ -287,6 +295,12 @@ class GrowthStore:
         base_key, separator, suffix = key.rpartition(':')
         if separator and len(suffix) == 6 and suffix.isdigit():
             self._shard_append_caches.pop(base_key, None)
+            if self._shard_ids_by_base is not None:
+                shard_ids = self._shard_ids_by_base.get(base_key)
+                if shard_ids is not None:
+                    shard_ids.discard(int(suffix))
+                    if not shard_ids:
+                        self._shard_ids_by_base.pop(base_key, None)
         return True
 
     async def list_prefix(
@@ -302,7 +316,7 @@ class GrowthStore:
             raw = await self._storage.get_plugin_storage(key)
             try:
                 record = deserialize_record(raw, record_type)
-                if key != _record_storage_key(record):
+                if key not in _record_storage_keys(record):
                     raise ValueError('增长记录存储键不一致。')
                 records.append(record)
             except (ValueError, UnicodeDecodeError):
@@ -420,6 +434,8 @@ class GrowthStore:
             _shard_key(base_key, shard_id),
             _encode_shard(updated_items),
         )
+        if self._shard_ids_by_base is not None:
+            self._shard_ids_by_base.setdefault(base_key, set()).add(shard_id)
         cache.item_shards[item] = shard_id
         self._shard_append_caches[base_key] = _ShardAppendCache(
             item_shards=cache.item_shards,
@@ -432,14 +448,22 @@ class GrowthStore:
 
     async def read_sharded_index(self, base_key: str) -> ShardedIndexResult:
         items: list[str] = []
+        seen_items: set[str] = set()
         skipped_count = 0
         shard_ids = await self._shard_ids(base_key)
         for shard_id in shard_ids:
             raw = await self._storage.get_plugin_storage(_shard_key(base_key, shard_id))
             try:
-                items.extend(_decode_shard(raw))
+                shard_items = _decode_shard(raw)
             except (ValueError, UnicodeDecodeError):
                 skipped_count += 1
+                continue
+            if any(item in seen_items for item in shard_items):
+                skipped_count += 1
+            for item in shard_items:
+                if item not in seen_items:
+                    items.append(item)
+                    seen_items.add(item)
         return ShardedIndexResult(tuple(items), len(shard_ids), skipped_count)
 
     async def _get_shard_append_cache(self, base_key: str) -> _ShardAppendCache:
@@ -460,10 +484,15 @@ class GrowthStore:
                 if shard_id == tail_shard_id:
                     tail_corrupt = True
                 continue
+            has_cross_shard_duplicate = any(
+                shard_item in item_shards for shard_item in shard_items
+            )
             for shard_item in shard_items:
                 item_shards.setdefault(shard_item, shard_id)
             if shard_id == tail_shard_id:
-                tail_items = tuple(shard_items)
+                tail_corrupt = has_cross_shard_duplicate
+                if not tail_corrupt:
+                    tail_items = tuple(shard_items)
 
         cache = _ShardAppendCache(
             item_shards=item_shards,
@@ -476,13 +505,14 @@ class GrowthStore:
         return cache
 
     async def _shard_ids(self, base_key: str) -> list[int]:
-        prefix = base_key + ':'
-        keys = await self._storage.get_plugin_storage_keys()
-        shard_ids: list[int] = []
-        for key in keys:
-            if not key.startswith(prefix):
-                continue
-            suffix = key[len(prefix) :]
-            if len(suffix) == 6 and suffix.isdigit():
-                shard_ids.append(int(suffix))
-        return sorted(set(shard_ids))
+        if self._shard_ids_by_base is None:
+            self._shard_ids_by_base = {}
+            keys = await self._storage.get_plugin_storage_keys()
+            for key in keys:
+                stored_base_key, separator, suffix = key.rpartition(':')
+                if separator and len(suffix) == 6 and suffix.isdigit():
+                    self._shard_ids_by_base.setdefault(
+                        stored_base_key,
+                        set(),
+                    ).add(int(suffix))
+        return sorted(self._shard_ids_by_base.get(base_key, set()))
