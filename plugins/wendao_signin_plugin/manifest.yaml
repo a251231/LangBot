@@ -120,6 +120,46 @@ spec:
       type: boolean
       required: false
       default: true
+    - name: admin_user_ids
+      label:
+        en_US: Administrator User IDs
+        zh_Hans: 管理员用户 ID
+      description:
+        en_US: Comma-separated chat user IDs allowed to run private administrator commands.
+        zh_Hans: 可在私聊中执行管理命令的聊天用户 ID，多个 ID 使用英文逗号分隔。
+      type: string
+      required: false
+      default: ""
+    - name: growth_trial_days
+      label:
+        en_US: Growth Trial Days
+        zh_Hans: 新用户试用天数
+      description:
+        en_US: Initial usage period granted to existing and newly bound accounts.
+        zh_Hans: 为存量账号和新绑定账号授予的初始使用期限。
+      type: integer
+      required: false
+      default: 30
+    - name: promoter_reward_points
+      label:
+        en_US: Promoter Reward Points
+        zh_Hans: 推广人奖励积分
+      description:
+        en_US: Points granted to the promoter after a referral becomes effective.
+        zh_Hans: 邀请关系生效后向推广人发放的积分。
+      type: integer
+      required: false
+      default: 100
+    - name: invitee_reward_points
+      label:
+        en_US: Invitee Reward Points
+        zh_Hans: 受邀人奖励积分
+      description:
+        en_US: Points granted to the invitee after a referral becomes effective.
+        zh_Hans: 邀请关系生效后向受邀人发放的积分。
+      type: integer
+      required: false
+      default: 20
   components:
     EventListener:
       fromDirs:

@@ -137,6 +137,15 @@ def test_parse_binding_input_rejects_incomplete_login_response_without_echoing_t
         ('问道自动周报 关', 'auto_weekly_report', '关'),
         ('问道周报', 'weekly_report', ''),
         ('问道设置', 'settings', ''),
+        ('问道推广', 'promotion', ''),
+        ('问道邀请 ABCD2345', 'referral_bind', 'ABCD2345'),
+        ('问道积分', 'points', ''),
+        ('问道商城', 'shop', ''),
+        ('问道兑换 P000001', 'redeem', 'P000001'),
+        ('问道兑换记录', 'redemptions', ''),
+        ('问道激活 WD-TEST', 'activate', 'WD-TEST'),
+        ('问道权益', 'entitlement', ''),
+        ('问道管理 商品列表', 'admin', '商品列表'),
         ('问道解绑', 'unbind', ''),
         ('问道帮助', 'help', ''),
     ],
@@ -161,6 +170,14 @@ def test_parse_keyword_does_not_treat_auto_weekly_report_as_auto_signin() -> Non
 
     assert command is not None
     assert command.kind == 'auto_weekly_report'
+
+
+def test_parse_keyword_uses_longest_redeem_command_match() -> None:
+    command = parse_keyword('问道兑换记录')
+
+    assert command is not None
+    assert command.kind == 'redemptions'
+    assert command.argument == ''
 
 
 def test_parse_keyword_preserves_multiline_curl_after_bind_prefix() -> None:

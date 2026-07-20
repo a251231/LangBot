@@ -26,7 +26,8 @@ def test_manifest_declares_langbot_plugin_and_expected_defaults() -> None:
         {"path": "components/event_listeners/"}
     ]
 
-    config = {item["name"]: item["default"] for item in manifest["spec"]["config"]}
+    config_items = {item["name"]: item for item in manifest["spec"]["config"]}
+    config = {name: item["default"] for name, item in config_items.items()}
     assert config == {
         "timezone": "Asia/Shanghai",
         "default_schedule_time": "08:00",
@@ -41,7 +42,26 @@ def test_manifest_declares_langbot_plugin_and_expected_defaults() -> None:
         "default_auto_resign": True,
         "default_auto_milestone": True,
         "default_auto_weekly_report": True,
+        "admin_user_ids": "",
+        "growth_trial_days": 30,
+        "promoter_reward_points": 100,
+        "invitee_reward_points": 20,
     }
+
+    growth_config_types = {
+        "admin_user_ids": "string",
+        "growth_trial_days": "integer",
+        "promoter_reward_points": "integer",
+        "invitee_reward_points": "integer",
+    }
+    for name, expected_type in growth_config_types.items():
+        item = config_items[name]
+        assert item["type"] == expected_type
+        assert item["required"] is False
+        assert set(item["label"]) == {"en_US", "zh_Hans"}
+        assert set(item["description"]) == {"en_US", "zh_Hans"}
+        assert all(value.strip() for value in item["label"].values())
+        assert all(value.strip() for value in item["description"].values())
 
 
 def test_event_listener_component_points_to_real_python_class() -> None:
