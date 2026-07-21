@@ -146,6 +146,7 @@ class PointService:
         changes: Sequence[PointChange],
         *,
         at: str | None = None,
+        commit: bool = True,
     ) -> tuple[PointEntry, ...]:
         if type(operation_id) is not str or not operation_id:
             raise ValueError('积分操作 ID 不能为空。')
@@ -206,7 +207,8 @@ class PointService:
                     change.step_id,
                     timestamp,
                 )
-            await self._store.commit_operation(bot_uuid, operation_id, timestamp)
+            if commit:
+                await self._store.commit_operation(bot_uuid, operation_id, timestamp)
             return tuple(entries)
 
     @staticmethod
