@@ -44,9 +44,14 @@ class PointService:
     def __init__(self, store: GrowthStore) -> None:
         self._store = store
         self._indexed_bots: set[str] = set()
+        self._indexed_revisions: dict[str, int] = {}
         self._ledger_tails: dict[tuple[str, str], PointEntry] = {}
 
     async def balance(self, bot_uuid: str, identity: str) -> int:
+        async with self._store.bot_lock(bot_uuid):
+            return await self._balance_unlocked(bot_uuid, identity)
+
+    async def _balance_unlocked(self, bot_uuid: str, identity: str) -> int:
         account = await self._get_or_rebuild_account(bot_uuid, identity)
         return account.balance if account is not None else 0
 
@@ -243,10 +248,11 @@ class PointService:
         balances: dict[str, int] = {}
         for change in changes:
             if change.identity_hash not in balances:
-                balances[change.identity_hash] = await self.balance(
+                account = await self._get_or_rebuild_account(
                     bot_uuid,
                     change.identity_hash,
                 )
+                balances[change.identity_hash] = account.balance if account else 0
             balances[change.identity_hash] += change.amount
             if balances[change.identity_hash] < 0:
                 raise InsufficientPointsError('积分余额不足。')
@@ -267,10 +273,11 @@ class PointService:
                 balances[change.identity_hash] = entry.balance_after
                 continue
             if change.identity_hash not in balances:
-                balances[change.identity_hash] = await self.balance(
+                account = await self._get_or_rebuild_account(
                     bot_uuid,
                     change.identity_hash,
                 )
+                balances[change.identity_hash] = account.balance if account else 0
             balances[change.identity_hash] += change.amount
             if balances[change.identity_hash] < 0:
                 raise InsufficientPointsError('积分余额不足。')
@@ -363,11 +370,19 @@ class PointService:
         return await self._write_account_from_entry(tail, tail.created_at)
 
     async def _ensure_ledger_index(self, bot_uuid: str) -> None:
-        if bot_uuid in self._indexed_bots:
+        revision = self._store.point_entry_revision(bot_uuid)
+        if (
+            bot_uuid in self._indexed_bots
+            and self._indexed_revisions.get(bot_uuid) == revision
+        ):
             return
+        for key in tuple(self._ledger_tails):
+            if key[0] == bot_uuid:
+                del self._ledger_tails[key]
         prefix = f'{POINT_ENTRY_PREFIX}{bot_uuid}:'
         if not await self._store.has_prefix(prefix):
             self._indexed_bots.add(bot_uuid)
+            self._indexed_revisions[bot_uuid] = revision
             return
         listed = await self._store.list_prefix(prefix, PointEntry)
         if listed.skipped_count:
@@ -378,6 +393,7 @@ class PointService:
         for identity, entries in entries_by_identity.items():
             self._ledger_tails[(bot_uuid, identity)] = self._find_ledger_tail(entries)
         self._indexed_bots.add(bot_uuid)
+        self._indexed_revisions[bot_uuid] = revision
 
     @staticmethod
     def _find_ledger_tail(entries: Sequence[PointEntry]) -> PointEntry:
@@ -442,7 +458,6 @@ class PointService:
         entry: PointEntry,
         updated_at: str,
     ) -> PointAccount:
-        self._ledger_tails[(entry.bot_uuid, entry.identity_hash)] = entry
         account = PointAccount(
             bot_uuid=entry.bot_uuid,
             identity_hash=entry.identity_hash,
@@ -456,4 +471,9 @@ class PointService:
             entry.identity_hash,
         )
         await self._store.save(key, account)
+        self._ledger_tails[(entry.bot_uuid, entry.identity_hash)] = entry
+        self._indexed_bots.add(entry.bot_uuid)
+        self._indexed_revisions[entry.bot_uuid] = self._store.point_entry_revision(
+            entry.bot_uuid
+        )
         return account

@@ -35,6 +35,7 @@ from components.growth_store import (
     identity_hash,
     serialize_record,
 )
+from components.points import PointService
 
 
 class FakeStorage:
@@ -224,6 +225,61 @@ def test_growth_store_crud_and_corrupt_record_diagnostics() -> None:
         assert await store.delete(key) is True
         assert await store.delete(key) is False
         assert await store.get(key, PromoterRecord) is None
+
+    asyncio.run(scenario())
+
+
+def test_growth_store_serializes_first_key_cache_initialization_across_bots() -> None:
+    async def scenario() -> None:
+        class SnapshotBarrierStorage(FakeStorage):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def get_plugin_storage_keys(self) -> list[str]:
+                self.get_keys_calls += 1
+                snapshot = list(self.values)
+                self.started.set()
+                await self.release.wait()
+                return snapshot
+
+        storage = SnapshotBarrierStorage()
+        store = GrowthStore(storage)
+
+        async def save(bot_uuid: str, entry_id: str) -> None:
+            entry = PointEntry(
+                bot_uuid=bot_uuid,
+                entry_id=entry_id,
+                identity_hash=f'identity-{bot_uuid}',
+                amount=1,
+                entry_type='admin_adjustment',
+                reason='test',
+                operation_id=f'operation-{bot_uuid}',
+                balance_after=1,
+                created_at='2026-07-20T00:00:00+08:00',
+            )
+            await store.save(
+                growth_storage_key(POINT_ENTRY_PREFIX, bot_uuid, entry_id),
+                entry,
+            )
+
+        first = asyncio.create_task(save('bot-a', 'entry-a'))
+        await storage.started.wait()
+        second = asyncio.create_task(save('bot-b', 'entry-b'))
+        await asyncio.sleep(0)
+        storage.release.set()
+        await asyncio.gather(first, second)
+
+        assert await store.get(
+            growth_storage_key(POINT_ENTRY_PREFIX, 'bot-a', 'entry-a'),
+            PointEntry,
+        ) is not None
+        assert await store.get(
+            growth_storage_key(POINT_ENTRY_PREFIX, 'bot-b', 'entry-b'),
+            PointEntry,
+        ) is not None
+        assert storage.get_keys_calls == 1
 
     asyncio.run(scenario())
 
@@ -514,6 +570,70 @@ def test_point_entries_are_append_only() -> None:
             )
 
         assert await store.get(key, PointEntry) == entry
+
+    asyncio.run(scenario())
+
+
+def test_pending_operations_reject_ambiguous_bot_uuid() -> None:
+    async def scenario() -> None:
+        store = GrowthStore(FakeStorage())
+        await store.begin_operation(
+            'bot-a',
+            'scope:operation-1',
+            'points',
+            {'changes': []},
+            '2026-07-20T00:00:00+08:00',
+        )
+
+        with pytest.raises(ValueError, match='bot_uuid'):
+            await store.list_pending_operations('bot-a:scope')
+
+    asyncio.run(scenario())
+
+
+def test_sharded_index_rejects_non_string_item_without_writing() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        base_key = 'card-pool:v1:bot-a:P000001'
+
+        with pytest.raises(ValueError, match='索引项'):
+            await store.append_sharded_index(base_key, 123)  # type: ignore[arg-type]
+
+        assert storage.values == {}
+
+    asyncio.run(scenario())
+
+
+def test_point_entry_delete_is_rejected_and_committed_replay_survives() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        points = PointService(store)
+        entry = await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'referral_reward_promoter',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+        entry_key = growth_storage_key(POINT_ENTRY_PREFIX, 'bot-a', entry.entry_id)
+        before = dict(storage.values)
+
+        with pytest.raises(ValueError, match='不可删除'):
+            await store.delete(entry_key)
+
+        assert storage.values == before
+        replay = await points.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'referral_reward_promoter',
+            'operation-1',
+            at='2026-07-20T00:01:00+08:00',
+        )
+        assert replay == entry
 
     asyncio.run(scenario())
 

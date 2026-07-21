@@ -263,7 +263,9 @@ class GrowthStore:
     def __init__(self, storage: PluginStorage) -> None:
         self._storage = storage
         self._bot_locks: dict[str, asyncio.Lock] = {}
+        self._keys_init_lock = asyncio.Lock()
         self._storage_keys: set[str] | None = None
+        self._point_entry_revisions: dict[str, int] = {}
         self._shard_append_caches: dict[str, _ShardAppendCache] = {}
         self._shard_ids_by_base: dict[str, set[int]] | None = None
 
@@ -287,6 +289,10 @@ class GrowthStore:
         await self._storage.set_plugin_storage(key, raw)
         if self._storage_keys is not None:
             self._storage_keys.add(key)
+        if isinstance(record, PointEntry):
+            self._point_entry_revisions[record.bot_uuid] = (
+                self._point_entry_revisions.get(record.bot_uuid, 0) + 1
+            )
 
     async def get(self, key: str, record_type: type[RecordT]) -> RecordT | None:
         _validate_record_type(record_type)
@@ -300,6 +306,8 @@ class GrowthStore:
         return record
 
     async def delete(self, key: str) -> bool:
+        if key.startswith(POINT_ENTRY_PREFIX):
+            raise ValueError('积分流水不可删除。')
         keys = await self._keys()
         if key not in keys:
             return False
@@ -419,8 +427,14 @@ class GrowthStore:
         self,
         bot_uuid: str,
     ) -> RecordListResult[GrowthOperation]:
+        marker = '_list'
+        operation_prefix = growth_storage_key(
+            GROWTH_OPERATION_PREFIX,
+            bot_uuid,
+            marker,
+        )[:-len(marker)]
         listed = await self.list_prefix(
-            f'{GROWTH_OPERATION_PREFIX}{bot_uuid}:',
+            operation_prefix,
             GrowthOperation,
         )
         return RecordListResult(
@@ -429,7 +443,7 @@ class GrowthStore:
         )
 
     async def append_sharded_index(self, base_key: str, item: str) -> int:
-        if not item:
+        if type(item) is not str or not item:
             raise ValueError('索引项不能为空。')
         cache = await self._get_shard_append_cache(base_key)
         existing_shard_id = cache.item_shards.get(item)
@@ -538,5 +552,12 @@ class GrowthStore:
 
     async def _keys(self) -> set[str]:
         if self._storage_keys is None:
-            self._storage_keys = set(await self._storage.get_plugin_storage_keys())
+            async with self._keys_init_lock:
+                if self._storage_keys is None:
+                    self._storage_keys = set(
+                        await self._storage.get_plugin_storage_keys()
+                    )
         return self._storage_keys
+
+    def point_entry_revision(self, bot_uuid: str) -> int:
+        return self._point_entry_revisions.get(bot_uuid, 0)

@@ -284,6 +284,81 @@ def test_inconsistent_account_snapshot_is_rebuilt_from_latest_entry() -> None:
     asyncio.run(scenario())
 
 
+def test_shared_store_refreshes_stale_balance_across_point_services() -> None:
+    async def scenario() -> None:
+        store = GrowthStore(FakeStorage())
+        first = PointService(store)
+        second = PointService(store)
+
+        await first.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'referral_reward_promoter',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+        assert await second.balance('bot-a', 'identity-a') == 100
+        await first.credit(
+            'bot-a',
+            'identity-a',
+            50,
+            'referral_reward_promoter',
+            'operation-2',
+            at='2026-07-20T00:01:00+08:00',
+        )
+
+        assert await second.balance('bot-a', 'identity-a') == 150
+
+    asyncio.run(scenario())
+
+
+def test_shared_store_keeps_one_ledger_chain_when_stale_service_writes() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        first = PointService(store)
+        second = PointService(store)
+
+        await first.credit(
+            'bot-a',
+            'identity-a',
+            100,
+            'referral_reward_promoter',
+            'operation-1',
+            at='2026-07-20T00:00:00+08:00',
+        )
+        assert await second.balance('bot-a', 'identity-a') == 100
+        second_entry = await first.credit(
+            'bot-a',
+            'identity-a',
+            50,
+            'referral_reward_promoter',
+            'operation-2',
+            at='2026-07-20T00:01:00+08:00',
+        )
+        third_entry = await second.credit(
+            'bot-a',
+            'identity-a',
+            25,
+            'referral_reward_promoter',
+            'operation-3',
+            at='2026-07-20T00:02:00+08:00',
+        )
+
+        assert third_entry.previous_entry_id == second_entry.entry_id
+        restarted = PointService(GrowthStore(storage))
+        assert await restarted.balance('bot-a', 'identity-a') == 175
+        entries = await store.list_prefix(
+            f'{POINT_ENTRY_PREFIX}bot-a:',
+            PointEntry,
+        )
+        assert len(entries.records) == 3
+        assert sum(not entry.previous_entry_id for entry in entries.records) == 1
+
+    asyncio.run(scenario())
+
+
 def test_unknown_point_entry_type_is_rejected_before_operation_write() -> None:
     async def scenario() -> None:
         storage = FakeStorage()
@@ -342,6 +417,26 @@ def test_normal_point_writes_enumerate_storage_keys_once() -> None:
             )
 
         assert storage.get_keys_calls <= 1
+
+    asyncio.run(scenario())
+
+
+def test_normal_point_writes_do_not_rescan_ledger_each_time() -> None:
+    async def scenario() -> None:
+        store = TrackingGrowthStore(FakeStorage())
+        points = PointService(store)
+
+        for index in range(25):
+            await points.credit(
+                'bot-a',
+                'identity-a',
+                1,
+                'referral_reward_promoter',
+                f'operation-{index}',
+                at=f'2026-07-20T00:{index:02d}:00+08:00',
+            )
+
+        assert store.list_prefix_calls <= 1
 
     asyncio.run(scenario())
 
