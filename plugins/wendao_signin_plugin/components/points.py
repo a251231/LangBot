@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from components.growth_models import POINT_ENTRY_TYPES, PointAccount, PointEntry
+from components.growth_models import (
+    POINT_ENTRY_TYPES,
+    GrowthOperation,
+    PointAccount,
+    PointEntry,
+)
 from components.growth_store import (
     POINT_ACCOUNT_PREFIX,
     POINT_ENTRY_PREFIX,
@@ -139,6 +145,31 @@ class PointService:
         )
         return entries[0]
 
+    async def recover_operation(self, operation: GrowthOperation) -> None:
+        if (
+            type(operation.bot_uuid) is not str
+            or not operation.bot_uuid
+            or type(operation.operation_id) is not str
+            or not operation.operation_id
+            or operation.operation_id.startswith('referral-effective:')
+            or operation.kind != 'points'
+            or operation.status != 'PENDING'
+        ):
+            raise ValueError('操作不属于普通积分恢复范围。')
+        current = await self._store.get_operation(
+            operation.bot_uuid,
+            operation.operation_id,
+        )
+        if current != operation:
+            raise ValueError('积分恢复操作与存储记录不一致。')
+        changes = self._changes_from_operation(operation)
+        await self.apply_operation(
+            operation.bot_uuid,
+            operation.operation_id,
+            changes,
+            at=operation.created_at,
+        )
+
     async def apply_operation(
         self,
         bot_uuid: str,
@@ -266,6 +297,52 @@ class PointService:
             if change.step_id in step_ids:
                 raise ValueError('积分操作步骤不能重复。')
             step_ids.add(change.step_id)
+
+    @classmethod
+    def _changes_from_operation(
+        cls,
+        operation: GrowthOperation,
+    ) -> tuple[PointChange, ...]:
+        if set(operation.payload) != {'changes'}:
+            raise ValueError('积分恢复操作格式错误。')
+        raw_changes = operation.payload.get('changes')
+        if type(raw_changes) is not list:
+            raise ValueError('积分恢复操作格式错误。')
+        expected_fields = {
+            'identity_hash',
+            'amount',
+            'entry_type',
+            'reason',
+            'step_id',
+        }
+        changes: list[PointChange] = []
+        for raw in raw_changes:
+            if type(raw) is not dict or set(raw) != expected_fields:
+                raise ValueError('积分恢复操作格式错误。')
+            if (
+                type(raw['identity_hash']) is not str
+                or re.fullmatch(r'[0-9a-f]{64}', raw['identity_hash']) is None
+                or type(raw['amount']) is not int
+                or type(raw['entry_type']) is not str
+                or type(raw['reason']) is not str
+                or type(raw['step_id']) is not str
+            ):
+                raise ValueError('积分恢复操作格式错误。')
+            changes.append(
+                PointChange(
+                    identity_hash=raw['identity_hash'],
+                    amount=raw['amount'],
+                    entry_type=raw['entry_type'],
+                    reason=raw['reason'],
+                    step_id=raw['step_id'],
+                )
+            )
+        normalized = tuple(changes)
+        cls._validate_changes(normalized)
+        allowed_steps = {change.step_id for change in normalized}
+        if not set(operation.applied_steps) <= allowed_steps:
+            raise ValueError('积分恢复操作步骤不一致。')
+        return normalized
 
     async def _preflight_new(
         self,

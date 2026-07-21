@@ -17,7 +17,7 @@ from components.commerce import (
     ProductUnavailableError,
 )
 from components.entitlement import EntitlementService, EntitlementStorageError
-from components.growth_models import CardRecord, ProductRecord
+from components.growth_models import CardRecord, GrowthOperation, ProductRecord
 from components.growth_store import (
     CARD_PREFIX,
     ENTITLEMENT_PREFIX,
@@ -35,11 +35,19 @@ class FakeStorage:
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
         self.fail_prefix_once = ''
+        self.fail_prefix_after_matches: tuple[str, int] | None = None
 
     async def set_plugin_storage(self, key: str, value: bytes) -> None:
         if self.fail_prefix_once and key.startswith(self.fail_prefix_once):
             self.fail_prefix_once = ''
             raise RuntimeError('simulated commerce write interruption')
+        if self.fail_prefix_after_matches is not None:
+            prefix, remaining = self.fail_prefix_after_matches
+            if key.startswith(prefix):
+                if remaining == 0:
+                    self.fail_prefix_after_matches = None
+                    raise RuntimeError('simulated commerce write interruption')
+                self.fail_prefix_after_matches = (prefix, remaining - 1)
         self.values[key] = value
 
     async def get_plugin_storage(self, key: str) -> bytes:
@@ -108,6 +116,7 @@ async def create_enabled_product(
         'bot-a',
         product.product_id,
         True,
+        request_id='enable-product',
         at='2026-07-20T00:01:00+08:00',
     )
 
@@ -134,6 +143,7 @@ def test_product_creation_listing_toggle_and_input_bounds() -> None:
             'bot-a',
             first.product_id,
             True,
+            request_id='enable-first',
             at='2026-07-20T00:02:00+08:00',
         )
         listed = await commerce.list_products('bot-a')
@@ -160,7 +170,414 @@ def test_product_creation_listing_toggle_and_input_bounds() -> None:
         with pytest.raises(ValueError):
             await commerce.create_product('bot-a', 'test', 500, 3651)
         with pytest.raises(ProductNotFoundError):
-            await commerce.set_enabled('bot-a', 'P999999', True)
+            await commerce.set_enabled(
+                'bot-a',
+                'P999999',
+                True,
+                request_id='missing-product',
+            )
+
+    asyncio.run(scenario())
+
+
+def test_product_creation_request_recovers_without_duplicate_after_interruption() -> None:
+    async def scenario() -> None:
+        storage, store, _, _, commerce = build_services()
+        storage.fail_prefix_once = f'{PRODUCT_PREFIX}bot-a:'
+
+        with pytest.raises(RuntimeError, match='interruption'):
+            await commerce.create_product(
+                'bot-a',
+                '30 天使用期限',
+                500,
+                30,
+                request_id='product-create-1',
+                at='2026-07-20T00:00:00+08:00',
+            )
+
+        pending = await store.list_pending_operations('bot-a')
+        assert len(pending.records) == 1
+        assert pending.records[0].kind == 'product-create'
+
+        _, _, _, restarted = restart_services(storage)
+        await restarted.recover_operation(pending.records[0])
+        replay = await restarted.create_product(
+            'bot-a',
+            '30 天使用期限',
+            500,
+            30,
+            request_id='product-create-1',
+            at='2026-07-21T00:00:00+08:00',
+        )
+        listed = await restarted.list_products('bot-a')
+
+        assert replay.product_id == 'P000001'
+        assert [item.product.product_id for item in listed] == ['P000001']
+        assert (await store.list_pending_operations('bot-a')).records == ()
+
+    asyncio.run(scenario())
+
+
+def test_product_id_allocation_reserves_pending_product_creation() -> None:
+    async def scenario() -> None:
+        storage, store, _, _, commerce = build_services()
+        storage.fail_prefix_once = f'{PRODUCT_PREFIX}bot-a:'
+
+        with pytest.raises(RuntimeError, match='interruption'):
+            await commerce.create_product(
+                'bot-a',
+                'interrupted product',
+                500,
+                30,
+                request_id='product-create-a',
+                at='2026-07-20T00:00:00+08:00',
+            )
+
+        second = await commerce.create_product(
+            'bot-a',
+            'later product',
+            800,
+            60,
+            request_id='product-create-b',
+            at='2026-07-20T00:01:00+08:00',
+        )
+        [pending] = (await store.list_pending_operations('bot-a')).records
+
+        assert pending.payload['product_id'] == 'P000001'
+        assert second.product_id == 'P000002'
+
+        _, _, _, restarted = restart_services(storage)
+        await restarted.recover_operation(pending)
+
+        assert [
+            item.product.product_id
+            for item in await restarted.list_products('bot-a')
+        ] == ['P000001', 'P000002']
+
+    asyncio.run(scenario())
+
+
+def test_product_id_allocation_rejects_pending_reservation_collision() -> None:
+    async def scenario() -> None:
+        _, store, _, _, commerce = build_services()
+        existing = await commerce.create_product(
+            'bot-a',
+            'existing product',
+            500,
+            30,
+            at='2026-07-20T00:00:00+08:00',
+        )
+        operation_id = 'product-create:bot-a:' + hashlib.sha256(
+            b'corrupt-reservation'
+        ).hexdigest()
+        await store.begin_operation(
+            'bot-a',
+            operation_id,
+            'product-create',
+            {
+                'product_id': existing.product_id,
+                'name': 'different product',
+                'points_cost': 800,
+                'duration_days': 60,
+                'created_at': '2026-07-20T00:01:00+08:00',
+            },
+            '2026-07-20T00:01:00+08:00',
+        )
+
+        with pytest.raises(CommerceStorageError, match='预留'):
+            await commerce.create_product(
+                'bot-a',
+                'later product',
+                1000,
+                90,
+                request_id='later-product',
+                at='2026-07-20T00:02:00+08:00',
+            )
+
+        products = await commerce.list_products('bot-a')
+        assert [item.product.name for item in products] == ['existing product']
+
+    asyncio.run(scenario())
+
+
+def test_product_status_request_recovers_older_pending_before_new_change() -> None:
+    async def scenario() -> None:
+        storage, store, _, _, commerce = build_services()
+        product = await commerce.create_product(
+            'bot-a',
+            '30 day product',
+            500,
+            30,
+            at='2026-07-20T00:00:00+08:00',
+        )
+        storage.fail_prefix_after_matches = (
+            f'{GROWTH_OPERATION_PREFIX}bot-a:',
+            1,
+        )
+
+        with pytest.raises(RuntimeError, match='interruption'):
+            await commerce.set_enabled(
+                'bot-a',
+                product.product_id,
+                True,
+                request_id='state-old',
+                at='2026-07-20T00:01:00+08:00',
+            )
+
+        changed = await commerce.set_enabled(
+            'bot-a',
+            product.product_id,
+            False,
+            request_id='state-new',
+            at='2026-07-20T00:02:00+08:00',
+        )
+        replay = await commerce.set_enabled(
+            'bot-a',
+            product.product_id,
+            True,
+            request_id='state-old',
+            at='2026-07-20T00:03:00+08:00',
+        )
+
+        assert changed.enabled is False
+        assert replay.enabled is True
+        assert (await store.list_pending_operations('bot-a')).records == ()
+        assert (await commerce.list_products('bot-a'))[0].product.enabled is False
+
+    asyncio.run(scenario())
+
+
+def test_recover_old_pending_product_state_does_not_overwrite_newer_fact() -> None:
+    async def scenario() -> None:
+        storage, store, _, _, commerce = build_services()
+        product = await commerce.create_product(
+            'bot-a',
+            '30 day product',
+            500,
+            30,
+            at='2026-07-20T00:00:00+08:00',
+        )
+        old_id = 'admin-product-enabled:' + hashlib.sha256(
+            b'state-old'
+        ).hexdigest()
+        newer_id = 'admin-product-enabled:' + hashlib.sha256(
+            b'state-new'
+        ).hexdigest()
+        old = await store.begin_operation(
+            'bot-a',
+            old_id,
+            'admin-product-enabled',
+            {'product_id': product.product_id, 'enabled': True},
+            '2026-07-20T00:01:00+08:00',
+        )
+        await store.save(
+            growth_storage_key(PRODUCT_PREFIX, 'bot-a', product.product_id),
+            replace(
+                product,
+                enabled=True,
+                updated_at='2026-07-20T00:01:00+08:00',
+            ),
+        )
+        await store.begin_operation(
+            'bot-a',
+            newer_id,
+            'admin-product-enabled',
+            {'product_id': product.product_id, 'enabled': False},
+            '2026-07-20T00:02:00+08:00',
+        )
+        await store.save(
+            growth_storage_key(PRODUCT_PREFIX, 'bot-a', product.product_id),
+            replace(
+                product,
+                enabled=False,
+                updated_at='2026-07-20T00:02:00+08:00',
+            ),
+        )
+        await store.mark_step_applied(
+            'bot-a',
+            newer_id,
+            'target-saved',
+            '2026-07-20T00:02:00+08:00',
+        )
+        await store.commit_operation(
+            'bot-a',
+            newer_id,
+            '2026-07-20T00:02:00+08:00',
+        )
+
+        _, _, _, restarted = restart_services(storage)
+        await restarted.recover_operation(old)
+
+        assert (await restarted.list_products('bot-a'))[0].product.enabled is False
+        recovered = await store.get_operation('bot-a', old_id)
+        assert recovered is not None
+        assert recovered.status == 'COMMITTED'
+        assert recovered.applied_steps == ('target-saved',)
+
+    asyncio.run(scenario())
+
+
+def test_product_status_equal_time_conflict_fails_and_new_times_are_monotonic() -> None:
+    async def scenario() -> None:
+        storage, store, _, _, commerce = build_services()
+        timestamp = '2026-07-20T00:00:00+08:00'
+        product = await commerce.create_product(
+            'bot-a',
+            'equal-time product',
+            500,
+            30,
+            at=timestamp,
+        )
+        conflict_id = 'admin-product-enabled:' + hashlib.sha256(
+            b'equal-time-conflict'
+        ).hexdigest()
+        conflict = await store.begin_operation(
+            'bot-a',
+            conflict_id,
+            'admin-product-enabled',
+            {'product_id': product.product_id, 'enabled': True},
+            timestamp,
+        )
+        product_key = growth_storage_key(PRODUCT_PREFIX, 'bot-a', product.product_id)
+        before_product = storage.values[product_key]
+
+        with pytest.raises(CommerceStorageError, match='时间冲突'):
+            await commerce.recover_operation(conflict)
+
+        assert storage.values[product_key] == before_product
+        assert await store.get_operation('bot-a', conflict_id) == conflict
+
+        _, monotonic_store, _, _, monotonic = build_services()
+        monotonic_product = await monotonic.create_product(
+            'bot-a',
+            'monotonic product',
+            500,
+            30,
+            at=timestamp,
+        )
+        first = await monotonic.set_enabled(
+            'bot-a',
+            monotonic_product.product_id,
+            True,
+            request_id='monotonic-first',
+            at=timestamp,
+        )
+        first_id = 'admin-product-enabled:' + hashlib.sha256(
+            b'monotonic-first'
+        ).hexdigest()
+        first_operation = await monotonic_store.get_operation('bot-a', first_id)
+        assert first_operation is not None
+        assert datetime.fromisoformat(first_operation.created_at) > (
+            datetime.fromisoformat(timestamp)
+        )
+        assert first.updated_at == first_operation.created_at
+
+        second = await monotonic.set_enabled(
+            'bot-a',
+            monotonic_product.product_id,
+            False,
+            request_id='monotonic-second',
+            at='2026-07-19T23:59:59+08:00',
+        )
+        second_id = 'admin-product-enabled:' + hashlib.sha256(
+            b'monotonic-second'
+        ).hexdigest()
+        second_operation = await monotonic_store.get_operation('bot-a', second_id)
+        assert second_operation is not None
+        assert datetime.fromisoformat(second_operation.created_at) > (
+            datetime.fromisoformat(first_operation.created_at)
+        )
+        assert second.enabled is False
+
+        replay = await monotonic.set_enabled(
+            'bot-a',
+            monotonic_product.product_id,
+            True,
+            request_id='monotonic-first',
+            at='2026-07-21T00:00:00+08:00',
+        )
+        replayed_operation = await monotonic_store.get_operation('bot-a', first_id)
+        assert replay.enabled is True
+        assert replayed_operation == first_operation
+        assert (await monotonic.list_products('bot-a'))[0].product.enabled is False
+
+    asyncio.run(scenario())
+
+
+def test_product_create_recovery_rejects_operation_payload_time_mismatch() -> None:
+    async def scenario() -> None:
+        _, store, _, _, commerce = build_services()
+        operation_id = 'product-create:bot-a:' + hashlib.sha256(
+            b'product-time-mismatch'
+        ).hexdigest()
+        operation = await store.begin_operation(
+            'bot-a',
+            operation_id,
+            'product-create',
+            {
+                'product_id': 'P000001',
+                'name': 'mismatched time product',
+                'points_cost': 500,
+                'duration_days': 30,
+                'created_at': '2026-07-20T00:00:00+08:00',
+            },
+            '2026-07-20T00:00:01+08:00',
+        )
+        product_key = growth_storage_key(PRODUCT_PREFIX, 'bot-a', 'P000001')
+
+        with pytest.raises(ValueError):
+            await commerce.recover_operation(operation)
+
+        assert await store.get(product_key, ProductRecord) is None
+        assert await store.get_operation('bot-a', operation_id) == operation
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ('operation_id', 'applied_steps'),
+    (
+        ('admin-product-enabled:not-a-canonical-hash', ()),
+        ('admin-product-enabled:' + 'f' * 64, ('unexpected-step',)),
+    ),
+)
+def test_product_status_recovery_rejects_invalid_audit_fields_without_fact_change(
+    operation_id: str,
+    applied_steps: tuple[str, ...],
+) -> None:
+    async def scenario() -> None:
+        storage, store, _, _, commerce = build_services()
+        product = await commerce.create_product(
+            'bot-a',
+            '30 day product',
+            500,
+            30,
+            at='2026-07-20T00:00:00+08:00',
+        )
+        product_key = growth_storage_key(PRODUCT_PREFIX, 'bot-a', product.product_id)
+        before_product = storage.values[product_key]
+        operation = GrowthOperation(
+            bot_uuid='bot-a',
+            operation_id=operation_id,
+            kind='admin-product-enabled',
+            status='PENDING',
+            payload={'product_id': product.product_id, 'enabled': True},
+            applied_steps=applied_steps,
+            created_at='2026-07-20T00:01:00+08:00',
+            updated_at='2026-07-20T00:01:00+08:00',
+        )
+        await store.save(
+            growth_storage_key(GROWTH_OPERATION_PREFIX, 'bot-a', operation_id),
+            operation,
+        )
+
+        with pytest.raises(CommerceStorageError, match='商品状态操作'):
+            await commerce.recover_operation(operation)
+
+        current = (await commerce.list_products('bot-a'))[0].product
+        assert current.enabled is False
+        assert (await store.list_pending_operations('bot-a')).records == (operation,)
+        assert storage.values[product_key] == before_product
 
     asyncio.run(scenario())
 
@@ -354,7 +771,12 @@ def test_failed_redeem_keeps_points_and_inventory_unchanged() -> None:
         assert await points.balance('bot-a', identity) == 400
         assert (await commerce.list_products('bot-a'))[0].available_stock == 1
 
-        await commerce.set_enabled('bot-a', product.product_id, False)
+        await commerce.set_enabled(
+            'bot-a',
+            product.product_id,
+            False,
+            request_id='disable-product',
+        )
         with pytest.raises(ProductUnavailableError):
             await commerce.redeem(
                 'bot-a',
@@ -364,9 +786,19 @@ def test_failed_redeem_keeps_points_and_inventory_unchanged() -> None:
             )
         assert await points.balance('bot-a', identity) == 400
 
-        await commerce.set_enabled('bot-a', product.product_id, True)
+        await commerce.set_enabled(
+            'bot-a',
+            product.product_id,
+            True,
+            request_id='reenable-product',
+        )
         other = await commerce.create_product('bot-a', 'empty', 1, 1)
-        await commerce.set_enabled('bot-a', other.product_id, True)
+        await commerce.set_enabled(
+            'bot-a',
+            other.product_id,
+            True,
+            request_id='enable-other',
+        )
         with pytest.raises(InventoryEmptyError):
             await commerce.redeem(
                 'bot-a',

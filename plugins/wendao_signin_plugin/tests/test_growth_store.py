@@ -10,6 +10,7 @@ import pytest
 from components.growth_models import (
     CardRecord,
     EntitlementRecord,
+    GrowthConfigRecord,
     GrowthOperation,
     PointAccount,
     PointEntry,
@@ -23,6 +24,7 @@ from components.growth_store import (
     CARD_PREFIX,
     ENTITLEMENT_PREFIX,
     GROWTH_OPERATION_PREFIX,
+    GROWTH_CONFIG_PREFIX,
     INVITE_CODE_PREFIX,
     POINT_ACCOUNT_PREFIX,
     POINT_ENTRY_PREFIX,
@@ -150,6 +152,14 @@ def _model_samples() -> Iterable[object]:
         created_at='2026-07-20T00:00:00+08:00',
         updated_at='2026-07-20T00:00:00+08:00',
     )
+    yield GrowthConfigRecord(
+        bot_uuid='bot-a',
+        config_id='runtime',
+        trial_days=30,
+        promoter_reward_points=100,
+        invitee_reward_points=20,
+        updated_at='2026-07-20T00:00:00+08:00',
+    )
     yield GrowthOperation(
         bot_uuid='bot-a',
         operation_id='operation-1',
@@ -170,6 +180,45 @@ def test_growth_models_round_trip_json(record: object) -> None:
 
     assert restored == record
     assert getattr(restored, 'schema_version') == 1
+
+
+@pytest.mark.parametrize(
+    'updated_at',
+    (
+        '',
+        'not-a-time',
+        '2026-07-20T00:00:00',
+    ),
+)
+def test_growth_config_rejects_invalid_updated_at_on_write_and_read(
+    updated_at: str,
+) -> None:
+    record = GrowthConfigRecord(
+        bot_uuid='bot-a',
+        config_id='runtime',
+        trial_days=30,
+        promoter_reward_points=100,
+        invitee_reward_points=20,
+        updated_at=updated_at,
+    )
+
+    with pytest.raises(ValueError, match='配置时间'):
+        serialize_record(record)
+
+    raw = json.dumps(
+        {
+            'schema_version': 1,
+            'bot_uuid': 'bot-a',
+            'config_id': 'runtime',
+            'trial_days': 30,
+            'promoter_reward_points': 100,
+            'invitee_reward_points': 20,
+            'updated_at': updated_at,
+        },
+        separators=(',', ':'),
+    ).encode()
+    with pytest.raises(ValueError, match='配置时间'):
+        deserialize_record(raw, GrowthConfigRecord)
 
 
 def test_card_record_deserializes_product_name_snapshot() -> None:
@@ -491,6 +540,7 @@ def test_growth_store_rejects_stored_record_whose_payload_does_not_match_key() -
                 CARD_PREFIX,
                 REDEMPTION_PREFIX,
                 ENTITLEMENT_PREFIX,
+                GROWTH_CONFIG_PREFIX,
                 GROWTH_OPERATION_PREFIX,
             ),
             (
@@ -502,6 +552,7 @@ def test_growth_store_rejects_stored_record_whose_payload_does_not_match_key() -
                 'card-a',
                 'redemption-1',
                 'identity-a',
+                'runtime',
                 'operation-1',
             ),
             strict=True,
@@ -671,6 +722,36 @@ def test_pending_operations_reject_ambiguous_bot_uuid() -> None:
 
         with pytest.raises(ValueError, match='bot_uuid'):
             await store.list_pending_operations('bot-a:scope')
+
+    asyncio.run(scenario())
+
+
+def test_growth_store_discovers_bots_from_all_growth_keys() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        storage.values.update(
+            {
+                'account:v1:not-growth': b'{}',
+                'growth-op:v1:orphan-bot:operation-1': b'{}',
+                'point-account:v1:bot-a:' + 'a' * 64: b'{}',
+                'redemption-index:v1:orphan-bot:' + 'b' * 64 + ':000000': b'{}',
+            }
+        )
+        store = GrowthStore(storage)
+
+        assert await store.list_bot_uuids() == ('bot-a', 'orphan-bot')
+
+    asyncio.run(scenario())
+
+
+def test_growth_store_rejects_malformed_known_growth_key_during_bot_discovery() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        storage.values['growth-op:v1::operation-1'] = b'{}'
+        store = GrowthStore(storage)
+
+        with pytest.raises(ValueError, match='存储键'):
+            await store.list_bot_uuids()
 
     asyncio.run(scenario())
 
@@ -979,5 +1060,64 @@ def test_growth_operation_lifecycle_is_idempotent() -> None:
         assert pending.records == (stepped,)
         assert committed.status == 'COMMITTED'
         assert (await store.list_pending_operations('bot-a')).records == ()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "created_at", "updated_at"),
+    (
+        (
+            "BROKEN",
+            "2026-07-20T00:00:00+08:00",
+            "2026-07-20T00:00:00+08:00",
+        ),
+        (
+            "COMMITTED",
+            "2026-07-20T00:00:01+08:00",
+            "2026-07-20T00:00:00+08:00",
+        ),
+        (
+            "COMMITTED",
+            "2026-07-20T00:00:00+08:00",
+            "2026-07-20T00:00:00+08:00",
+        ),
+    ),
+)
+def test_pending_scan_reports_invalid_operation_state_as_corrupt(
+    status: str,
+    created_at: str,
+    updated_at: str,
+) -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        operation_id = "admin-reward-rules:" + "a" * 64
+        key = growth_storage_key(
+            GROWTH_OPERATION_PREFIX,
+            "bot-a",
+            operation_id,
+        )
+        storage.values[key] = json.dumps(
+            {
+                "schema_version": 1,
+                "bot_uuid": "bot-a",
+                "operation_id": operation_id,
+                "kind": "admin-reward-rules",
+                "status": status,
+                "payload": {
+                    "promoter_reward_points": 150,
+                    "invitee_reward_points": 30,
+                },
+                "applied_steps": [],
+                "created_at": created_at,
+                "updated_at": updated_at,
+            },
+            separators=(",", ":"),
+        ).encode()
+
+        listed = await GrowthStore(storage).list_pending_operations("bot-a")
+
+        assert listed.records == ()
+        assert listed.skipped_count == 1
 
     asyncio.run(scenario())

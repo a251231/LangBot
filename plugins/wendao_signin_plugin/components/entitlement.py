@@ -26,6 +26,10 @@ class EntitlementStorageError(EntitlementError):
     pass
 
 
+class EntitlementNotFoundError(EntitlementStorageError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class EntitlementStatus:
     identity_hash: str
@@ -153,7 +157,7 @@ class EntitlementService:
         current_time = _parse_time(now or _now_iso())
         record = await self._load_record(bot_uuid, identity)
         if record is None:
-            raise EntitlementStorageError('权益记录不存在。')
+            raise EntitlementNotFoundError('权益记录不存在。')
         expires_at = self._record_expiry(record)
         return EntitlementStatus(
             identity_hash=identity,
@@ -190,7 +194,7 @@ class EntitlementService:
         async with self._store.bot_lock(bot_uuid):
             record = await self._load_record(bot_uuid, identity)
             if record is None:
-                raise EntitlementStorageError('权益记录不存在。')
+                raise EntitlementNotFoundError('权益记录不存在。')
             expires_at = self._record_expiry(record)
             base = max(current_time, expires_at)
             updated = replace(
@@ -213,7 +217,7 @@ class EntitlementService:
         _parse_time(updated_at)
         record = await self._load_record(bot_uuid, identity)
         if record is None:
-            raise EntitlementStorageError('权益记录不存在。')
+            raise EntitlementNotFoundError('权益记录不存在。')
         current_expiry = self._record_expiry(record)
         if current_expiry >= target_expiry:
             return record

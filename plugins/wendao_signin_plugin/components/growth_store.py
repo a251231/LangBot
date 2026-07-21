@@ -5,12 +5,14 @@ import hashlib
 import json
 import unicodedata
 from dataclasses import asdict, dataclass, fields, replace
+from datetime import datetime, timedelta
 from typing import Any, Generic, TypeVar, cast, get_type_hints
 
 from components.account_store import PluginStorage
 from components.growth_models import (
     CardRecord,
     EntitlementRecord,
+    GrowthConfigRecord,
     GrowthOperation,
     GrowthRecord,
     POINT_ENTRY_TYPES,
@@ -66,6 +68,7 @@ _RECORD_TYPES = (
     CardRecord,
     RedemptionRecord,
     EntitlementRecord,
+    GrowthConfigRecord,
     GrowthOperation,
 )
 _RECORD_KEY_SPECS: dict[type[object], tuple[tuple[str, str], ...]] = {
@@ -80,6 +83,7 @@ _RECORD_KEY_SPECS: dict[type[object], tuple[tuple[str, str], ...]] = {
     CardRecord: ((CARD_PREFIX, 'card_hash'),),
     RedemptionRecord: ((REDEMPTION_PREFIX, 'redemption_id'),),
     EntitlementRecord: ((ENTITLEMENT_PREFIX, 'identity_hash'),),
+    GrowthConfigRecord: ((GROWTH_CONFIG_PREFIX, 'config_id'),),
     GrowthOperation: ((GROWTH_OPERATION_PREFIX, 'operation_id'),),
 }
 
@@ -138,6 +142,24 @@ def _has_control_characters(value: str) -> bool:
     return any(unicodedata.category(character).startswith('C') for character in value)
 
 
+def _aware_datetime(value: str, error_message: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(error_message) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(error_message)
+    return parsed
+
+
+def strictly_later_timestamp(candidate_at: str, current_at: str) -> str:
+    candidate = _aware_datetime(candidate_at, '增长操作时间格式错误。')
+    current = _aware_datetime(current_at, '增长操作时间格式错误。')
+    if candidate > current:
+        return candidate_at
+    return (current + timedelta(microseconds=1)).isoformat()
+
+
 def _validate_record_type(record_type: type[Any]) -> None:
     if record_type not in _RECORD_TYPES:
         raise TypeError('不支持的增长记录类型。')
@@ -175,6 +197,32 @@ def _validate_record_payload(
             type(step) is str for step in applied_steps
         ):
             raise ValueError('增长操作步骤格式错误。')
+        if (
+            payload['status'] not in {'PENDING', 'COMMITTED'}
+            or any(not step for step in applied_steps)
+            or len(set(applied_steps)) != len(applied_steps)
+            or (
+                payload['status'] == 'COMMITTED'
+                and not applied_steps
+                and payload['kind'] != 'entitlement-rollout'
+            )
+        ):
+            raise ValueError('增长操作状态错误。')
+        created_at = _aware_datetime(
+            payload['created_at'],
+            '增长操作时间格式错误。',
+        )
+        updated_at = _aware_datetime(
+            payload['updated_at'],
+            '增长操作时间格式错误。',
+        )
+        if updated_at < created_at:
+            raise ValueError('增长操作时间状态错误。')
+    if record_type is GrowthConfigRecord:
+        _aware_datetime(
+            payload['updated_at'],
+            '增长配置时间格式错误。',
+        )
     if record_type is PointEntry and payload['entry_type'] not in POINT_ENTRY_TYPES:
         raise ValueError('积分流水类型错误。')
 
@@ -347,6 +395,27 @@ class GrowthStore:
 
     async def has_prefix(self, prefix: str) -> bool:
         return any(key.startswith(prefix) for key in await self._keys())
+
+    async def list_bot_uuids(self) -> tuple[str, ...]:
+        bot_uuids: set[str] = set()
+        for key in await self._keys():
+            matched_prefix = next(
+                (prefix for prefix in _GROWTH_PREFIXES if key.startswith(prefix)),
+                None,
+            )
+            if matched_prefix is None:
+                continue
+            remainder = key[len(matched_prefix) :]
+            bot_uuid, separator, record_part = remainder.partition(':')
+            if (
+                not separator
+                or not bot_uuid
+                or not record_part
+                or _has_control_characters(bot_uuid)
+            ):
+                raise ValueError('增长存储键格式错误。')
+            bot_uuids.add(bot_uuid)
+        return tuple(sorted(bot_uuids))
 
     async def get_secret(self, bot_uuid: str, name: str) -> bytes | None:
         key = growth_storage_key(GROWTH_SECRET_PREFIX, bot_uuid, name)

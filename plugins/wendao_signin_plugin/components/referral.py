@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -286,6 +287,78 @@ class ReferralService:
             recent_effective_count=recent,
         )
 
+    async def recover_operation(self, operation: GrowthOperation) -> None:
+        prefix = 'referral-effective:'
+        if (
+            type(operation.bot_uuid) is not str
+            or not operation.bot_uuid
+            or not operation.operation_id.startswith(prefix)
+            or operation.status != 'PENDING'
+            or operation.kind not in {'points', 'referral-reward-zero'}
+        ):
+            raise ReferralError('操作不属于推广恢复范围。')
+        invitee_hash = operation.operation_id[len(prefix) :]
+        if re.fullmatch(r'[0-9a-f]{64}', invitee_hash) is None:
+            raise ReferralError('推广恢复操作格式错误。')
+
+        async with self._store.bot_lock(operation.bot_uuid):
+            stored = await self._store.get_operation(
+                operation.bot_uuid,
+                operation.operation_id,
+            )
+            if stored != operation:
+                raise ReferralError('推广恢复操作与存储记录不一致。')
+            current = await self._store.get(
+                growth_storage_key(
+                    REFERRAL_PREFIX,
+                    operation.bot_uuid,
+                    invitee_hash,
+                ),
+                ReferralRecord,
+            )
+            if current is None or current.status not in {'bound', 'effective'}:
+                raise ReferralError('推广恢复操作缺少可生效关系。')
+            self._validate_recovery_operation(operation, current)
+
+        if operation.kind == 'points':
+            await self._points.apply_operation(
+                operation.bot_uuid,
+                operation.operation_id,
+                self._changes_from_operation(operation),
+                at=operation.created_at,
+                commit=False,
+            )
+
+        async with self._store.bot_lock(operation.bot_uuid):
+            current = await self._store.get(
+                growth_storage_key(
+                    REFERRAL_PREFIX,
+                    operation.bot_uuid,
+                    invitee_hash,
+                ),
+                ReferralRecord,
+            )
+            if current is None or current.status not in {'bound', 'effective'}:
+                raise ReferralError('推广恢复操作缺少可生效关系。')
+            if current.status == 'bound':
+                current = replace(
+                    current,
+                    status='effective',
+                    effective_at=operation.created_at,
+                )
+                await self._save_referral(current)
+            await self._store.mark_step_applied(
+                operation.bot_uuid,
+                operation.operation_id,
+                'referral-effective',
+                operation.created_at,
+            )
+            await self._store.commit_operation(
+                operation.bot_uuid,
+                operation.operation_id,
+                operation.created_at,
+            )
+
     async def _ensure_promoter_unlocked(
         self,
         bot_uuid: str,
@@ -380,25 +453,116 @@ class ReferralService:
     @staticmethod
     def _changes_from_operation(operation: GrowthOperation) -> tuple[PointChange, ...]:
         raw_changes = operation.payload.get('changes')
-        if type(raw_changes) is not list:
+        if set(operation.payload) != {'changes'} or type(raw_changes) is not list:
             raise ReferralError('推广奖励操作缺少积分变更。')
+        expected_fields = {
+            'identity_hash',
+            'amount',
+            'entry_type',
+            'step_id',
+            'reason',
+        }
         changes: list[PointChange] = []
         for raw in raw_changes:
-            if type(raw) is not dict:
+            if type(raw) is not dict or set(raw) != expected_fields:
                 raise ReferralError('推广奖励操作格式错误。')
-            try:
-                changes.append(
-                    PointChange(
-                        raw['identity_hash'],
-                        raw['amount'],
-                        raw['entry_type'],
-                        raw['step_id'],
-                        raw['reason'],
-                    )
+            if (
+                type(raw['identity_hash']) is not str
+                or type(raw['amount']) is not int
+                or type(raw['entry_type']) is not str
+                or type(raw['step_id']) is not str
+                or type(raw['reason']) is not str
+            ):
+                raise ReferralError('推广奖励操作格式错误。')
+            changes.append(
+                PointChange(
+                    raw['identity_hash'],
+                    raw['amount'],
+                    raw['entry_type'],
+                    raw['step_id'],
+                    raw['reason'],
                 )
-            except (KeyError, TypeError) as exc:
-                raise ReferralError('推广奖励操作格式错误。') from exc
+            )
         return tuple(changes)
+
+    @classmethod
+    def _validate_recovery_operation(
+        cls,
+        operation: GrowthOperation,
+        referral: ReferralRecord,
+    ) -> None:
+        invitee_hash = referral.invitee_hash
+        if (
+            referral.bot_uuid != operation.bot_uuid
+            or operation.operation_id != f'referral-effective:{invitee_hash}'
+            or re.fullmatch(r'[0-9a-f]{64}', referral.invitee_hash) is None
+            or re.fullmatch(r'[0-9a-f]{64}', referral.promoter_hash) is None
+        ):
+            raise ReferralError('推广恢复操作与关系不一致。')
+        try:
+            operation_time = _parse_time(operation.created_at)
+            bound_time = _parse_time(referral.bound_at)
+            effective_time = (
+                _parse_time(referral.effective_at)
+                if referral.effective_at
+                else None
+            )
+            if bound_time > operation_time:
+                raise ReferralError('推广恢复操作与关系时间不一致。')
+            if referral.status == 'effective':
+                if effective_time != operation_time:
+                    raise ReferralError('推广恢复操作与关系时间不一致。')
+            elif effective_time is not None:
+                raise ReferralError('推广恢复操作与关系时间不一致。')
+        except (TypeError, ValueError) as exc:
+            if isinstance(exc, ReferralError):
+                raise
+            raise ReferralError('推广恢复操作与关系时间不一致。') from exc
+
+        if operation.kind == 'referral-reward-zero':
+            if (
+                set(operation.payload)
+                != {'referral_id', 'promoter_points', 'invitee_points'}
+                or operation.payload.get('referral_id') != invitee_hash
+                or operation.payload.get('promoter_points') != 0
+                or operation.payload.get('invitee_points') != 0
+                or not set(operation.applied_steps) <= {'referral-effective'}
+            ):
+                raise ReferralError('推广恢复操作与关系不一致。')
+            return
+
+        changes = cls._changes_from_operation(operation)
+        if not changes:
+            raise ReferralError('推广恢复操作与关系不一致。')
+        expected_by_type = {
+            'referral_reward_promoter': (
+                referral.promoter_hash,
+                f'promoter:{invitee_hash}',
+            ),
+            'referral_reward_invitee': (
+                invitee_hash,
+                f'invitee:{invitee_hash}',
+            ),
+        }
+        seen_types: set[str] = set()
+        for change in changes:
+            expected = expected_by_type.get(change.entry_type)
+            if (
+                expected is None
+                or change.entry_type in seen_types
+                or change.identity_hash != expected[0]
+                or change.step_id != expected[1]
+                or change.reason != invitee_hash
+                or not 1 <= change.amount <= 1_000_000
+            ):
+                raise ReferralError('推广恢复操作与关系不一致。')
+            seen_types.add(change.entry_type)
+        allowed_steps = {
+            *(change.step_id for change in changes),
+            'referral-effective',
+        }
+        if not set(operation.applied_steps) <= allowed_steps:
+            raise ReferralError('推广恢复操作步骤不一致。')
 
     async def _create_zero_operation(
         self,

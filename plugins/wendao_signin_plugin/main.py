@@ -25,6 +25,9 @@ from components.command_parser import (
     ParsedCommand,
     parse_binding_input,
 )
+from components.entitlement import EntitlementService
+from components.growth_service import GrowthService
+from components.growth_store import GrowthStore
 from components.login import LoginSessionError, WendaoLoginClient, WendaoLoginService
 from components.models import AccountRecord, Credentials
 from components.scheduler import SigninScheduler
@@ -50,6 +53,14 @@ HELP_TEXT = '''问道签到助手命令：
 问道周报
 问道自动周报 开/关
 问道设置
+问道推广
+问道邀请 <邀请码>
+问道积分
+问道商城
+问道兑换 <商品ID>
+问道兑换记录
+问道激活 <卡密>
+问道权益
 问道解绑
 问道帮助
 访问凭据到期前会自动刷新。'''
@@ -59,6 +70,9 @@ class WendaoSigninPlugin(BasePlugin):
     def __init__(self) -> None:
         super().__init__()
         self.account_store: AccountStore | None = None
+        self.growth_store: GrowthStore | None = None
+        self.growth_service: GrowthService | None = None
+        self.entitlement_service: EntitlementService | None = None
         self.login_service: WendaoLoginService | None = None
         self.captcha_server: CaptchaWebServer | None = None
         self.account_session: AuthenticatedAccountSession[WendaoApiClient] | None = None
@@ -69,6 +83,7 @@ class WendaoSigninPlugin(BasePlugin):
         self._request_timeout_seconds = 15.0
         self._login_session_ttl_seconds = 600
         self._timezone = ZoneInfo('Asia/Shanghai')
+        self._admin_user_ids: set[str] = set()
 
     def _config_value(self, name: str, default: Any) -> Any:
         return self.get_config().get(name, default)
@@ -113,6 +128,11 @@ class WendaoSigninPlugin(BasePlugin):
         )
         max_concurrency = self._int_config('max_concurrency', 3, 1, 20)
         self._request_semaphore = asyncio.Semaphore(max_concurrency)
+        self._admin_user_ids = {
+            item.strip()
+            for item in str(self._config_value('admin_user_ids', '')).split(',')
+            if item.strip()
+        }
         plugin_ref = weakref.ref(self)
 
         def create_client(account: AccountRecord) -> WendaoApiClient:
@@ -149,6 +169,26 @@ class WendaoSigninPlugin(BasePlugin):
                 await plugin._notify_login(bot_uuid, target_id, text)
 
         self.account_store = AccountStore(weakref.proxy(self))
+        self.growth_store = GrowthStore(weakref.proxy(self))
+        self.growth_service = GrowthService(
+            self.growth_store,
+            self.account_store,
+            trial_days=self._int_config('growth_trial_days', 30, 0, 1_000_000),
+            promoter_reward_points=self._int_config(
+                'promoter_reward_points',
+                100,
+                0,
+                1_000_000,
+            ),
+            invitee_reward_points=self._int_config(
+                'invitee_reward_points',
+                20,
+                0,
+                1_000_000,
+            ),
+        )
+        self.entitlement_service = self.growth_service.entitlement_service
+        await self.growth_service.initialize()
         self.login_service = WendaoLoginService(
             client_factory=create_login_client,
             ttl_seconds=self._login_session_ttl_seconds,
@@ -371,6 +411,11 @@ class WendaoSigninPlugin(BasePlugin):
                 ),
             )
             await self.account_store.save(record)
+        if self.growth_service is not None:
+            try:
+                await self.growth_service.on_account_bound(record)
+            except Exception:
+                pass
         profile = f'（{record.nickname}）' if record.nickname else ''
         return (
             f'问道账号绑定成功{profile}。请立即删除{cleanup_label}。',
@@ -596,6 +641,7 @@ class WendaoSigninPlugin(BasePlugin):
         target_id: str,
         is_group: bool,
         command: ParsedCommand,
+        request_id: str = '',
     ) -> str:
         if is_group and command.kind != 'help':
             return '问道签到助手仅在私聊中处理账号操作，请转到机器人私聊后重试。'
@@ -668,6 +714,52 @@ class WendaoSigninPlugin(BasePlugin):
             )
         if command.kind == 'settings':
             return await self._settings(bot_uuid, sender_id)
+        if command.kind == 'promotion':
+            assert self.growth_service is not None
+            return await self.growth_service.promotion(bot_uuid, sender_id)
+        if command.kind == 'referral_bind':
+            assert self.growth_service is not None
+            return await self.growth_service.bind_referral(
+                bot_uuid,
+                sender_id,
+                command.argument,
+            )
+        if command.kind == 'points':
+            assert self.growth_service is not None
+            return await self.growth_service.points(bot_uuid, sender_id)
+        if command.kind == 'shop':
+            assert self.growth_service is not None
+            return await self.growth_service.shop(bot_uuid)
+        if command.kind == 'redeem':
+            assert self.growth_service is not None
+            return await self.growth_service.redeem(
+                bot_uuid,
+                sender_id,
+                command.argument,
+                request_id=request_id,
+            )
+        if command.kind == 'redemptions':
+            assert self.growth_service is not None
+            return await self.growth_service.redemptions(bot_uuid, sender_id)
+        if command.kind == 'activate':
+            assert self.growth_service is not None
+            return await self.growth_service.activate(
+                bot_uuid,
+                sender_id,
+                command.argument,
+            )
+        if command.kind == 'entitlement':
+            assert self.growth_service is not None
+            return await self.growth_service.entitlement(bot_uuid, sender_id)
+        if command.kind == 'admin':
+            if sender_id not in self._admin_user_ids:
+                return '无权限执行问道管理命令。'
+            assert self.growth_service is not None
+            return await self.growth_service.admin(
+                bot_uuid,
+                command.argument,
+                request_id=request_id,
+            )
         if command.kind == 'unbind':
             assert self.account_store is not None
             assert self.login_service is not None

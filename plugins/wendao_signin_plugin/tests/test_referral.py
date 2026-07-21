@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
-from components.growth_models import PointEntry
+from components.growth_models import GrowthOperation, PointEntry
 from components.growth_store import (
     POINT_ENTRY_PREFIX,
     REFERRAL_PREFIX,
     GrowthStore,
     growth_storage_key,
+    identity_hash,
 )
 from components.points import PointService
 from components.referral import (
@@ -380,5 +382,203 @@ def test_promotion_stats_use_status_buckets_and_seven_day_window() -> None:
         assert stats.bound_count == 3
         assert stats.effective_count == 2
         assert stats.recent_effective_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_recovery_rejects_malformed_invitee_hash_before_writing_points() -> None:
+    async def scenario() -> None:
+        _, referral, _ = build_service()
+        operation = GrowthOperation(
+            bot_uuid='bot-a',
+            operation_id='referral-effective:not-a-hash',
+            kind='points',
+            status='PENDING',
+            payload={
+                'changes': [
+                    {
+                        'identity_hash': 'target',
+                        'amount': 100,
+                        'entry_type': 'referral_reward_promoter',
+                        'reason': 'not-a-hash',
+                        'step_id': 'promoter:not-a-hash',
+                    }
+                ]
+            },
+            applied_steps=(),
+            created_at='2026-07-20T00:00:00+08:00',
+            updated_at='2026-07-20T00:00:00+08:00',
+        )
+        await referral._store.save(
+            growth_storage_key(
+                'growth-op:v1:',
+                operation.bot_uuid,
+                operation.operation_id,
+            ),
+            operation,
+        )
+
+        with pytest.raises(ReferralError, match='格式'):
+            await referral.recover_operation(operation)
+
+        entries = await referral._store.list_prefix(
+            f'{POINT_ENTRY_PREFIX}bot-a:',
+            PointEntry,
+        )
+        assert entries.records == ()
+
+    asyncio.run(scenario())
+
+
+def test_recovery_cross_checks_reward_payload_before_writing_points() -> None:
+    async def scenario() -> None:
+        _, referral, _ = build_service()
+        promoter = await referral.ensure_promoter('bot-a', 'promoter-a')
+        relation = await referral.register_invite(
+            'bot-a',
+            'invitee-a',
+            promoter.invite_code,
+        )
+        await referral.on_account_bound('bot-a', 'invitee-a', 'user-a')
+        wrong_identity = identity_hash('bot-a', 'other-promoter')
+        operation = GrowthOperation(
+            bot_uuid='bot-a',
+            operation_id=f'referral-effective:{relation.invitee_hash}',
+            kind='points',
+            status='PENDING',
+            payload={
+                'changes': [
+                    {
+                        'identity_hash': wrong_identity,
+                        'amount': 100,
+                        'entry_type': 'referral_reward_promoter',
+                        'reason': relation.invitee_hash,
+                        'step_id': f'promoter:{relation.invitee_hash}',
+                    }
+                ]
+            },
+            applied_steps=(),
+            created_at='2026-07-20T00:00:00+08:00',
+            updated_at='2026-07-20T00:00:00+08:00',
+        )
+        await referral._store.save(
+            growth_storage_key(
+                'growth-op:v1:',
+                operation.bot_uuid,
+                operation.operation_id,
+            ),
+            operation,
+        )
+
+        with pytest.raises(ReferralError, match='不一致'):
+            await referral.recover_operation(operation)
+
+        entries = await referral._store.list_prefix(
+            f'{POINT_ENTRY_PREFIX}bot-a:',
+            PointEntry,
+        )
+        assert entries.records == ()
+
+    asyncio.run(scenario())
+
+
+def test_recovery_rejects_bound_relation_after_operation_time() -> None:
+    async def scenario() -> None:
+        _, referral, _ = build_service()
+        promoter = await referral.ensure_promoter('bot-a', 'promoter-a')
+        relation = await referral.register_invite(
+            'bot-a',
+            'invitee-a',
+            promoter.invite_code,
+        )
+        await referral.on_account_bound(
+            'bot-a',
+            'invitee-a',
+            'user-a',
+            at='2026-07-21T00:00:00+08:00',
+        )
+        operation = GrowthOperation(
+            bot_uuid='bot-a',
+            operation_id=f'referral-effective:{relation.invitee_hash}',
+            kind='referral-reward-zero',
+            status='PENDING',
+            payload={
+                'referral_id': relation.invitee_hash,
+                'promoter_points': 0,
+                'invitee_points': 0,
+            },
+            applied_steps=(),
+            created_at='2026-07-20T00:00:00+08:00',
+            updated_at='2026-07-20T00:00:00+08:00',
+        )
+        await referral._store.save(
+            growth_storage_key(
+                'growth-op:v1:',
+                operation.bot_uuid,
+                operation.operation_id,
+            ),
+            operation,
+        )
+
+        with pytest.raises(ReferralError, match='时间'):
+            await referral.recover_operation(operation)
+
+    asyncio.run(scenario())
+
+
+def test_recovery_rejects_effective_relation_with_different_effective_time() -> None:
+    async def scenario() -> None:
+        _, referral, _ = build_service()
+        promoter = await referral.ensure_promoter('bot-a', 'promoter-a')
+        relation = await referral.register_invite(
+            'bot-a',
+            'invitee-a',
+            promoter.invite_code,
+        )
+        bound = await referral.on_account_bound(
+            'bot-a',
+            'invitee-a',
+            'user-a',
+            at='2026-07-19T00:00:00+08:00',
+        )
+        assert bound is not None
+        effective = replace(
+            bound,
+            status='effective',
+            effective_at='2026-07-21T00:00:00+08:00',
+        )
+        await referral._store.save(
+            growth_storage_key(
+                REFERRAL_PREFIX,
+                effective.bot_uuid,
+                effective.invitee_hash,
+            ),
+            effective,
+        )
+        operation = GrowthOperation(
+            bot_uuid='bot-a',
+            operation_id=f'referral-effective:{relation.invitee_hash}',
+            kind='referral-reward-zero',
+            status='PENDING',
+            payload={
+                'referral_id': relation.invitee_hash,
+                'promoter_points': 0,
+                'invitee_points': 0,
+            },
+            applied_steps=('referral-effective',),
+            created_at='2026-07-20T00:00:00+08:00',
+            updated_at='2026-07-20T00:00:00+08:00',
+        )
+        await referral._store.save(
+            growth_storage_key(
+                'growth-op:v1:',
+                operation.bot_uuid,
+                operation.operation_id,
+            ),
+            operation,
+        )
+
+        with pytest.raises(ReferralError, match='时间'):
+            await referral.recover_operation(operation)
 
     asyncio.run(scenario())

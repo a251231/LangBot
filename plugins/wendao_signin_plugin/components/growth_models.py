@@ -116,6 +116,17 @@ class EntitlementRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class GrowthConfigRecord:
+    schema_version: int = field(default=1, init=False)
+    bot_uuid: str
+    config_id: str
+    trial_days: int
+    promoter_reward_points: int
+    invitee_reward_points: int
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class GrowthOperation:
     schema_version: int = field(default=1, init=False)
     bot_uuid: str
@@ -137,5 +148,6 @@ GrowthRecord = (
     | CardRecord
     | RedemptionRecord
     | EntitlementRecord
+    | GrowthConfigRecord
     | GrowthOperation
 )

@@ -26,6 +26,7 @@ from components.growth_store import (
     GrowthStore,
     growth_storage_key,
     identity_hash,
+    strictly_later_timestamp,
 )
 from components.points import PointChange, PointService
 
@@ -121,26 +122,46 @@ class CommerceService:
         points_cost: int,
         duration_days: int,
         *,
+        request_id: str | None = None,
         at: str | None = None,
     ) -> ProductRecord:
         normalized_name = self._validate_product(name, points_cost, duration_days)
         timestamp = at or _now_iso()
         _parse_time(timestamp)
+        if request_id is not None:
+            self._validate_request_id(request_id)
         async with self._store.bot_lock(bot_uuid):
-            products = await self._load_products_unlocked(bot_uuid)
-            product_number = max(
-                (
-                    int(item.product_id[1:])
-                    for item in products
-                    if re.fullmatch(r'P\d{6}', item.product_id)
-                ),
-                default=0,
-            ) + 1
-            if product_number > 999999:
-                raise OverflowError('商品 ID 已达到六位上限。')
+            if request_id is not None:
+                operation_id = self._product_operation_id(bot_uuid, request_id)
+                operation = await self._store.get_operation(bot_uuid, operation_id)
+                if operation is None:
+                    product_id = await self._next_product_id_unlocked(bot_uuid)
+                    operation = await self._store.begin_operation(
+                        bot_uuid,
+                        operation_id,
+                        'product-create',
+                        {
+                            'product_id': product_id,
+                            'name': normalized_name,
+                            'points_cost': points_cost,
+                            'duration_days': duration_days,
+                            'created_at': timestamp,
+                        },
+                        timestamp,
+                    )
+                payload = self._product_payload(operation)
+                if (
+                    payload['name'] != normalized_name
+                    or payload['points_cost'] != points_cost
+                    or payload['duration_days'] != duration_days
+                ):
+                    raise CommerceError('请求 ID 已用于其他商品新增请求。')
+                return await self._complete_product_create_unlocked(operation)
+
+            product_id = await self._next_product_id_unlocked(bot_uuid)
             product = ProductRecord(
                 bot_uuid=bot_uuid,
-                product_id=f'P{product_number:06d}',
+                product_id=product_id,
                 name=normalized_name,
                 points_cost=points_cost,
                 duration_days=duration_days,
@@ -151,27 +172,88 @@ class CommerceService:
             await self._save_product(product)
             return product
 
+    async def _next_product_id_unlocked(self, bot_uuid: str) -> str:
+        products = await self._load_products_unlocked(bot_uuid)
+        pending = await self._store.list_pending_operations(bot_uuid)
+        if pending.skipped_count:
+            raise CommerceStorageError('增长操作日志包含损坏记录。')
+        reserved_products = tuple(
+            self._product_from_operation(operation)
+            for operation in pending.records
+            if operation.kind == 'product-create'
+        )
+        reserved_product_ids = tuple(
+            product.product_id for product in reserved_products
+        )
+        if len(set(reserved_product_ids)) != len(reserved_product_ids):
+            raise CommerceStorageError('待恢复商品新增操作包含重复商品预留。')
+        existing_by_id = {product.product_id: product for product in products}
+        for reserved_product in reserved_products:
+            existing = existing_by_id.get(reserved_product.product_id)
+            if existing is not None and not self._same_product_creation(
+                existing,
+                reserved_product,
+            ):
+                raise CommerceStorageError('待恢复商品新增操作预留冲突。')
+        product_ids = tuple(product.product_id for product in products) + (
+            reserved_product_ids
+        )
+        product_number = max(
+            (
+                int(product_id[1:])
+                for product_id in product_ids
+                if re.fullmatch(r'P\d{6}', product_id)
+            ),
+            default=0,
+        ) + 1
+        if product_number > 999999:
+            raise OverflowError('商品 ID 已达到六位上限。')
+        return f'P{product_number:06d}'
+
     async def set_enabled(
         self,
         bot_uuid: str,
         product_id: str,
         enabled: bool,
         *,
+        request_id: str,
         at: str | None = None,
     ) -> ProductRecord:
         if type(enabled) is not bool:
             raise ValueError('商品状态必须是布尔值。')
+        self._validate_request_id(request_id)
         timestamp = at or _now_iso()
         _parse_time(timestamp)
+        operation_id = self._product_enabled_operation_id(request_id)
         async with self._store.bot_lock(bot_uuid):
             product = await self._load_product(bot_uuid, product_id)
             if product is None:
                 raise ProductNotFoundError('商品不存在。')
-            if product.enabled == enabled:
-                return product
-            updated = replace(product, enabled=enabled, updated_at=timestamp)
-            await self._save_product(updated)
-            return updated
+            operation = await self._store.get_operation(bot_uuid, operation_id)
+            if operation is None:
+                await self._recover_pending_product_states_unlocked(bot_uuid)
+                product = await self._load_product(bot_uuid, product_id)
+                if product is None:
+                    raise ProductNotFoundError('商品不存在。')
+                timestamp = strictly_later_timestamp(
+                    timestamp,
+                    product.updated_at,
+                )
+                operation = await self._store.begin_operation(
+                    bot_uuid,
+                    operation_id,
+                    'admin-product-enabled',
+                    {'product_id': product.product_id, 'enabled': enabled},
+                    timestamp,
+                )
+            else:
+                payload = self._product_enabled_payload(operation)
+                if (
+                    payload['product_id'] != product_id
+                    or payload['enabled'] is not enabled
+                ):
+                    raise CommerceError('请求 ID 已用于其他商品状态请求。')
+            return await self._complete_product_enabled_unlocked(operation)
 
     async def add_inventory(
         self,
@@ -413,6 +495,12 @@ class CommerceService:
             )
             if current.status == 'COMMITTED':
                 return
+            if current.kind == 'product-create':
+                await self._complete_product_create_unlocked(current)
+                return
+            if current.kind == 'admin-product-enabled':
+                await self._complete_product_enabled_unlocked(current)
+                return
             if current.kind == 'inventory-add':
                 await self._complete_inventory_unlocked(current)
                 return
@@ -446,6 +534,126 @@ class CommerceService:
                     self._release_activation(current)
                 return
             raise CommerceError('操作不属于商城恢复范围。')
+
+    async def _complete_product_create_unlocked(
+        self,
+        operation: GrowthOperation,
+    ) -> ProductRecord:
+        product = self._product_from_operation(operation)
+        current = await self._load_product(operation.bot_uuid, product.product_id)
+        if current is None:
+            if operation.status == 'COMMITTED':
+                raise CommerceStorageError('已提交的商品新增操作缺少商品记录。')
+            await self._save_product(product)
+            current = product
+        if not self._same_product_creation(current, product):
+            raise CommerceStorageError('商品新增操作与商品记录不一致。')
+        operation = await self._mark_if_pending(
+            operation,
+            'product-saved',
+            product.created_at,
+        )
+        if operation.status == 'PENDING':
+            await self._store.commit_operation(
+                operation.bot_uuid,
+                operation.operation_id,
+                product.created_at,
+            )
+        return current
+
+    async def _complete_product_enabled_unlocked(
+        self,
+        operation: GrowthOperation,
+    ) -> ProductRecord:
+        payload = self._product_enabled_payload(operation)
+        product_id = cast(str, payload['product_id'])
+        enabled = cast(bool, payload['enabled'])
+        product = await self._load_product(operation.bot_uuid, product_id)
+        if product is None:
+            raise CommerceStorageError('商品状态操作对应的商品不存在。')
+        response = replace(
+            product,
+            enabled=enabled,
+            updated_at=operation.created_at,
+        )
+        operation_time = _parse_time(operation.created_at)
+        product_time = _parse_time(product.updated_at)
+        superseded = product_time > operation_time
+        if product_time == operation_time and product != response:
+            raise CommerceStorageError('商品状态事实与操作时间冲突。')
+        if operation.status == 'COMMITTED':
+            if not superseded and product != response:
+                raise CommerceStorageError('已提交的商品状态操作与商品记录不一致。')
+            return response
+        if 'target-saved' in operation.applied_steps:
+            if not superseded and product != response:
+                raise CommerceStorageError('商品状态操作步骤与商品记录不一致。')
+        else:
+            if not superseded and product != response:
+                await self._save_product(response)
+                product = response
+            operation = await self._store.mark_step_applied(
+                operation.bot_uuid,
+                operation.operation_id,
+                'target-saved',
+                operation.updated_at,
+            )
+        await self._store.commit_operation(
+            operation.bot_uuid,
+            operation.operation_id,
+            operation.updated_at,
+        )
+        return response
+
+    async def _recover_pending_product_states_unlocked(
+        self,
+        bot_uuid: str,
+    ) -> None:
+        pending = await self._store.list_pending_operations(bot_uuid)
+        if pending.skipped_count:
+            raise CommerceStorageError('增长操作日志包含损坏记录。')
+        operations = sorted(
+            (
+                operation
+                for operation in pending.records
+                if operation.kind == 'admin-product-enabled'
+            ),
+            key=lambda operation: _parse_time(operation.created_at),
+        )
+        for operation in operations:
+            await self._complete_product_enabled_unlocked(operation)
+
+    @staticmethod
+    def _same_product_creation(
+        current: ProductRecord,
+        expected: ProductRecord,
+    ) -> bool:
+        return (
+            current.bot_uuid == expected.bot_uuid
+            and current.product_id == expected.product_id
+            and current.name == expected.name
+            and current.points_cost == expected.points_cost
+            and current.duration_days == expected.duration_days
+            and current.created_at == expected.created_at
+        )
+
+    @classmethod
+    def _product_from_operation(
+        cls,
+        operation: GrowthOperation,
+    ) -> ProductRecord:
+        payload = cls._product_payload(operation)
+        created_at = cast(str, payload['created_at'])
+        return ProductRecord(
+            bot_uuid=operation.bot_uuid,
+            product_id=cast(str, payload['product_id']),
+            name=cast(str, payload['name']),
+            points_cost=cast(int, payload['points_cost']),
+            duration_days=cast(int, payload['duration_days']),
+            enabled=False,
+            created_at=created_at,
+            updated_at=created_at,
+        )
 
     async def initialize_pending_reservations(self, bot_uuid: str) -> None:
         async with self._store.bot_lock(bot_uuid):
@@ -955,6 +1163,86 @@ class CommerceService:
         return product_id, cards
 
     @staticmethod
+    def _product_payload(operation: GrowthOperation) -> dict[str, object]:
+        if operation.kind != 'product-create' or operation.status not in {
+            'PENDING',
+            'COMMITTED',
+        }:
+            raise CommerceStorageError('商品新增操作类型错误。')
+        required = {
+            'product_id': str,
+            'name': str,
+            'points_cost': int,
+            'duration_days': int,
+            'created_at': str,
+        }
+        if set(operation.payload) != set(required) or any(
+            type(operation.payload.get(key)) is not expected
+            for key, expected in required.items()
+        ):
+            raise CommerceStorageError('商品新增操作格式错误。')
+        product_id = cast(str, operation.payload['product_id'])
+        name = cast(str, operation.payload['name'])
+        points_cost = cast(int, operation.payload['points_cost'])
+        duration_days = cast(int, operation.payload['duration_days'])
+        created_at = cast(str, operation.payload['created_at'])
+        expected_prefix = f'product-create:{operation.bot_uuid}:'
+        operation_hash = operation.operation_id.removeprefix(expected_prefix)
+        try:
+            _parse_time(created_at)
+            CommerceService._validate_product(name, points_cost, duration_days)
+        except ValueError as exc:
+            raise CommerceStorageError('商品新增操作格式错误。') from exc
+        if (
+            re.fullmatch(r'P\d{6}', product_id) is None
+            or created_at != operation.created_at
+            or not operation.operation_id.startswith(expected_prefix)
+            or _HASH_PATTERN.fullmatch(operation_hash) is None
+            or tuple(operation.applied_steps) not in {
+                (),
+                ('product-saved',),
+            }
+            or (
+                operation.status == 'COMMITTED'
+                and operation.applied_steps != ('product-saved',)
+            )
+        ):
+            raise CommerceStorageError('商品新增操作业务字段不一致。')
+        return dict(operation.payload)
+
+    @staticmethod
+    def _product_enabled_payload(operation: GrowthOperation) -> dict[str, object]:
+        if operation.kind != 'admin-product-enabled' or operation.status not in {
+            'PENDING',
+            'COMMITTED',
+        }:
+            raise CommerceStorageError('商品状态操作类型错误。')
+        if set(operation.payload) != {'product_id', 'enabled'}:
+            raise CommerceStorageError('商品状态操作格式错误。')
+        product_id = operation.payload.get('product_id')
+        enabled = operation.payload.get('enabled')
+        if (
+            type(product_id) is not str
+            or re.fullmatch(r'P\d{6}', product_id) is None
+            or type(enabled) is not bool
+            or re.fullmatch(
+                r'admin-product-enabled:[0-9a-f]{64}',
+                operation.operation_id,
+            )
+            is None
+            or tuple(operation.applied_steps) not in {
+                (),
+                ('target-saved',),
+            }
+            or (
+                operation.status == 'COMMITTED'
+                and operation.applied_steps != ('target-saved',)
+            )
+        ):
+            raise CommerceStorageError('商品状态操作业务字段不一致。')
+        return dict(operation.payload)
+
+    @staticmethod
     def _card_from_payload(
         bot_uuid: str,
         raw: dict[str, object],
@@ -1179,6 +1467,16 @@ class CommerceService:
     ) -> str:
         request_hash = hashlib.sha256(request_id.encode('utf-8')).hexdigest()
         return f'inventory:{bot_uuid}:{request_hash}'
+
+    @staticmethod
+    def _product_operation_id(bot_uuid: str, request_id: str) -> str:
+        request_hash = hashlib.sha256(request_id.encode('utf-8')).hexdigest()
+        return f'product-create:{bot_uuid}:{request_hash}'
+
+    @staticmethod
+    def _product_enabled_operation_id(request_id: str) -> str:
+        request_hash = hashlib.sha256(request_id.encode('utf-8')).hexdigest()
+        return f'admin-product-enabled:{request_hash}'
 
     @staticmethod
     def _redeem_operation_id(

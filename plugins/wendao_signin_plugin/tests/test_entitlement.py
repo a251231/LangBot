@@ -6,6 +6,7 @@ import pytest
 
 from components.entitlement import (
     EntitlementExpiredError,
+    EntitlementNotFoundError,
     EntitlementService,
     EntitlementStorageError,
 )
@@ -140,6 +141,25 @@ def test_expired_entitlement_requires_extension_before_business_use() -> None:
             )
 
         assert status.active is False
+
+    asyncio.run(scenario())
+
+
+def test_missing_entitlement_uses_specific_not_found_storage_error() -> None:
+    async def scenario() -> None:
+        _, entitlement = build_service()
+
+        with pytest.raises(EntitlementNotFoundError) as status_error:
+            await entitlement.get_status('bot-a', 'missing-user')
+        with pytest.raises(EntitlementNotFoundError) as extend_error:
+            await entitlement.extend(
+                'bot-a',
+                'missing-user',
+                duration_days=30,
+            )
+
+        assert isinstance(status_error.value, EntitlementStorageError)
+        assert isinstance(extend_error.value, EntitlementStorageError)
 
     asyncio.run(scenario())
 

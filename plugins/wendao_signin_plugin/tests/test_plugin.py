@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from functools import partial
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,9 @@ from langbot_plugin.api.entities.builtin.platform.message import MessageChain, P
 
 from components.api_client import WendaoAuthError
 from components.command_parser import BindingInput, ParsedCommand
+from components.entitlement import EntitlementService
+from components.growth_service import GrowthService
+from components.growth_store import GrowthStore
 from components.models import ApiResponse, Credentials
 from components.weekly_report import WeeklyReportOutcome
 
@@ -206,13 +210,20 @@ class FakeCaptchaServer:
         pass
 
 
-async def command(plugin: WendaoSigninPlugin, kind: str, argument: str = "") -> str:
+async def command(
+    plugin: WendaoSigninPlugin,
+    kind: str,
+    argument: str = "",
+    *,
+    request_id: str = "",
+) -> str:
     return await plugin.handle_wendao_command(
         bot_uuid="bot-test-1",
         sender_id="sender-test-1",
         target_id="person-target-1",
         is_group=False,
         command=ParsedCommand(kind=kind, argument=argument),
+        request_id=request_id,
     )
 
 
@@ -226,6 +237,9 @@ def test_initialize_owns_store_workflow_and_scheduler() -> None:
         await plugin.initialize()
 
         assert plugin.account_store is not None
+        assert isinstance(plugin.growth_store, GrowthStore)
+        assert isinstance(plugin.growth_service, GrowthService)
+        assert isinstance(plugin.entitlement_service, EntitlementService)
         assert plugin.account_session is not None
         assert plugin.login_service is not None
         assert plugin.workflow is not None
@@ -234,6 +248,144 @@ def test_initialize_owns_store_workflow_and_scheduler() -> None:
         assert plugin.weekly_report._session is plugin.account_session
         assert plugin.scheduler is not None
         assert plugin.scheduler._task is not None
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_admin_ids_are_trimmed_deduplicated_and_checked_at_runtime() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin()
+        plugin.config['admin_user_ids'] = (
+            ' sender-test-1, other-admin, sender-test-1, , '
+        )
+        await plugin.initialize()
+
+        allowed = await command(plugin, 'admin', '商品列表')
+        denied = await plugin.handle_wendao_command(
+            bot_uuid='bot-test-1',
+            sender_id='not-admin',
+            target_id='person-target-2',
+            is_group=False,
+            command=ParsedCommand(kind='admin', argument='商品列表'),
+        )
+
+        assert plugin._admin_user_ids == {'sender-test-1', 'other-admin'}
+        assert '商品列表' in allowed
+        assert '无权限' in denied
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_growth_commands_route_to_service_and_forward_request_ids() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin()
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+        calls: list[tuple[str, tuple, dict]] = []
+
+        async def record(name: str, *args, **kwargs) -> str:
+            calls.append((name, args, kwargs))
+            return name
+
+        plugin.growth_service = SimpleNamespace(
+            promotion=partial(record, 'promotion'),
+            bind_referral=partial(record, 'bind_referral'),
+            points=partial(record, 'points'),
+            shop=partial(record, 'shop'),
+            redeem=partial(record, 'redeem'),
+            redemptions=partial(record, 'redemptions'),
+            activate=partial(record, 'activate'),
+            entitlement=partial(record, 'entitlement'),
+            admin=partial(record, 'admin'),
+        )
+
+        assert await command(plugin, 'promotion') == 'promotion'
+        assert await command(plugin, 'referral_bind', 'ABCDEFGH') == 'bind_referral'
+        assert await command(plugin, 'points') == 'points'
+        assert await command(plugin, 'shop') == 'shop'
+        assert (
+            await command(
+                plugin,
+                'redeem',
+                'P000001',
+                request_id='query-redeem-1',
+            )
+            == 'redeem'
+        )
+        assert await command(plugin, 'redemptions') == 'redemptions'
+        assert await command(plugin, 'activate', 'WD-CODE') == 'activate'
+        assert await command(plugin, 'entitlement') == 'entitlement'
+        assert (
+            await command(
+                plugin,
+                'admin',
+                '商品列表',
+                request_id='query-admin-1',
+            )
+            == 'admin'
+        )
+        group_reply = await plugin.handle_wendao_command(
+            bot_uuid='bot-test-1',
+            sender_id='sender-test-1',
+            target_id='group-test-1',
+            is_group=True,
+            command=ParsedCommand(kind='admin', argument='商品列表'),
+            request_id='query-admin-group-1',
+        )
+
+        assert calls == [
+            ('promotion', ('bot-test-1', 'sender-test-1'), {}),
+            (
+                'bind_referral',
+                ('bot-test-1', 'sender-test-1', 'ABCDEFGH'),
+                {},
+            ),
+            ('points', ('bot-test-1', 'sender-test-1'), {}),
+            ('shop', ('bot-test-1',), {}),
+            (
+                'redeem',
+                ('bot-test-1', 'sender-test-1', 'P000001'),
+                {'request_id': 'query-redeem-1'},
+            ),
+            ('redemptions', ('bot-test-1', 'sender-test-1'), {}),
+            ('activate', ('bot-test-1', 'sender-test-1', 'WD-CODE'), {}),
+            ('entitlement', ('bot-test-1', 'sender-test-1'), {}),
+            (
+                'admin',
+                ('bot-test-1', '商品列表'),
+                {'request_id': 'query-admin-1'},
+            ),
+        ]
+        assert '私聊' in group_reply
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_binding_growth_callback_failure_keeps_saved_account(monkeypatch) -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin([FakeApiClient({'signInStatus': 2})])
+        await plugin.initialize()
+        assert plugin.growth_service is not None
+
+        async def fail_growth_callback(*args, **kwargs) -> None:
+            raise RuntimeError('simulated growth callback failure')
+
+        monkeypatch.setattr(
+            plugin.growth_service,
+            'on_account_bound',
+            fail_growth_callback,
+        )
+
+        reply = await command(plugin, 'bind', BASE_CURL)
+
+        assert '绑定成功' in reply
+        assert (
+            await plugin.account_store.get('bot-test-1', 'sender-test-1')
+            is not None
+        )
         plugin.scheduler.stop()
 
     run(scenario())
