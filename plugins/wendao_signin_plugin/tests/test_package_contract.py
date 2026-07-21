@@ -92,6 +92,8 @@ def test_runtime_dependencies_and_documentation_are_complete() -> None:
     for command in (
         "问道登录 <手机号>",
         "问道验证码 <短信码>",
+        "问道验证 <randstr> <ticket>",
+        "问道绑定 <登录响应>",
         "问道查询",
         "问道签到",
         "问道补签",
@@ -104,8 +106,34 @@ def test_runtime_dependencies_and_documentation_are_complete() -> None:
         "问道设置",
         "问道解绑",
         "问道帮助",
+        "问道推广",
+        "问道邀请 <邀请码>",
+        "问道积分",
+        "问道商城",
+        "问道兑换 <商品ID>",
+        "问道兑换记录",
+        "问道激活 <卡密>",
+        "问道权益",
     ):
         assert command in readme
+    for command in (
+        "问道管理 商品新增 <名称> <积分> <天数>",
+        "问道管理 商品上架 <商品ID>",
+        "问道管理 商品下架 <商品ID>",
+        "问道管理 库存增加 <商品ID> <数量>",
+        "问道管理 商品列表",
+        "问道管理 积分规则 <推广人积分> <受邀人积分>",
+        "问道管理 积分调整 <用户ID> <数量> <原因>",
+        "问道管理 统计",
+    ):
+        assert command in readme
+    for config_name in (
+        "admin_user_ids",
+        "growth_trial_days",
+        "promoter_reward_points",
+        "invitee_reward_points",
+    ):
+        assert config_name in readme
     assert "数据库备份可直接读取 token" in readme
     assert "删除聊天记录中的绑定消息" in readme
     assert "2211133C/Android/16" in readme
@@ -126,3 +154,77 @@ def test_runtime_dependencies_and_documentation_are_complete() -> None:
     assert "高级兼容入口" in readme
     assert "Docker" in readme and "8788" in readme
     assert (PLUGIN_ROOT / "assets" / "icon.svg").is_file()
+
+
+def test_growth_modules_and_operational_boundaries_are_documented() -> None:
+    for module_name in (
+        "growth_models.py",
+        "growth_store.py",
+        "points.py",
+        "referral.py",
+        "commerce.py",
+        "entitlement.py",
+        "growth_service.py",
+    ):
+        assert (PLUGIN_ROOT / "components" / module_name).is_file()
+
+    readme = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+    for lifecycle_term in (
+        "rollout_at",
+        "首次绑定时间",
+        "重复绑定不重置",
+        "到期只暂停",
+        "推广关系、积分、兑换记录和权益",
+    ):
+        assert lifecycle_term in readme
+    for security_term in (
+        "卡密是敏感凭据",
+        "未激活",
+        "激活后不再回显明文",
+        "可转赠",
+        "只能激活一次",
+        "增长密钥",
+        "插件存储",
+        "备份",
+    ):
+        assert security_term in readme
+    for capacity_term in (
+        "单进程",
+        "asyncio.Lock",
+        "多实例",
+        "竞态",
+        "1 万用户",
+        "5 万个增长存储键",
+        "逐账号读取权益",
+        "轮询时延",
+    ):
+        assert capacity_term in readme
+
+
+def test_growth_config_persistence_is_documented() -> None:
+    readme = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "`admin_user_ids` 在每次插件初始化时读取" in readme
+    for config_name in (
+        "`growth_trial_days`",
+        "`promoter_reward_points`",
+        "`invitee_reward_points`",
+    ):
+        assert config_name in readme
+    assert "仅在每个 bot 首次创建持久化 `GrowthConfig` 时写入初值" in readme
+    assert "后续修改 manifest 不会覆盖已有 `GrowthConfig`" in readme
+    assert "既有积分规则" in readme
+    assert "既有权益" in readme
+    assert "`问道管理 积分规则`" in readme
+    assert "只影响之后生效的邀请关系" in readme
+
+
+def test_card_activation_and_backup_preconditions_are_documented() -> None:
+    readme = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "卡密接收人在激活前需至少完成过一次问道账号绑定" in readme
+    assert "从未绑定的用户激活会失败，卡密保持未激活且不会被消耗" in readme
+    assert (
+        "备份必须让增长密钥（卡密加密密钥）与对应插件存储数据"
+        "保持同一备份时间点。"
+    ) in readme
