@@ -19,6 +19,7 @@ from components.growth_models import (
     ReferralRecord,
 )
 from components.growth_store import (
+    CARD_POOL_PREFIX,
     CARD_PREFIX,
     ENTITLEMENT_PREFIX,
     GROWTH_OPERATION_PREFIX,
@@ -596,6 +597,33 @@ def test_growth_store_validates_field_types_before_write() -> None:
             await store.save(key, record)
 
         assert storage.values == {}
+
+    asyncio.run(scenario())
+
+
+def test_mutable_sharded_index_count_first_and_remove_are_consistent() -> None:
+    async def scenario() -> None:
+        storage = FakeStorage()
+        store = GrowthStore(storage)
+        base_key = growth_storage_key(CARD_POOL_PREFIX, 'bot-a', 'P000001')
+
+        await store.append_sharded_index(base_key, 'card-a')
+        await store.append_sharded_index(base_key, 'card-b')
+
+        assert await store.sharded_index_count(base_key) == 2
+        assert await store.first_sharded_index_item(base_key) == 'card-a'
+        assert await store.remove_sharded_index(base_key, 'card-a') is True
+        assert await store.remove_sharded_index(base_key, 'card-a') is False
+        assert await store.sharded_index_count(base_key) == 1
+        assert await store.first_sharded_index_item(base_key) == 'card-b'
+
+        await store.append_sharded_index(base_key, 'card-c')
+
+        assert await store.sharded_index_items(base_key) == ('card-b', 'card-c')
+        assert (await store.read_sharded_index(base_key)).items == (
+            'card-b',
+            'card-c',
+        )
 
     asyncio.run(scenario())
 

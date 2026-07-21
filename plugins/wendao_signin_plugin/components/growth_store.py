@@ -106,6 +106,7 @@ class _ShardAppendCache:
     tail_items: tuple[str, ...]
     tail_exists: bool
     tail_corrupt: bool
+    has_corruption: bool
 
 
 def identity_hash(bot_uuid: str, sender_id: str) -> str:
@@ -347,6 +348,29 @@ class GrowthStore:
     async def has_prefix(self, prefix: str) -> bool:
         return any(key.startswith(prefix) for key in await self._keys())
 
+    async def get_secret(self, bot_uuid: str, name: str) -> bytes | None:
+        key = growth_storage_key(GROWTH_SECRET_PREFIX, bot_uuid, name)
+        keys = await self._keys()
+        if key not in keys:
+            return None
+        value = await self._storage.get_plugin_storage(key)
+        if type(value) is not bytes or not value:
+            raise ValueError('增长域秘密记录格式错误。')
+        return value
+
+    async def save_secret(self, bot_uuid: str, name: str, value: bytes) -> None:
+        if type(value) is not bytes or not value:
+            raise ValueError('增长域秘密值不能为空。')
+        key = growth_storage_key(GROWTH_SECRET_PREFIX, bot_uuid, name)
+        keys = await self._keys()
+        if key in keys:
+            existing = await self._storage.get_plugin_storage(key)
+            if existing != value:
+                raise ValueError('增长域秘密记录不可覆盖。')
+            return
+        await self._storage.set_plugin_storage(key, value)
+        self._record_storage_key(key)
+
     async def get_operation(
         self,
         bot_uuid: str,
@@ -475,8 +499,64 @@ class GrowthStore:
             tail_items=tuple(updated_items),
             tail_exists=True,
             tail_corrupt=False,
+            has_corruption=cache.has_corruption,
         )
         return shard_id
+
+    async def sharded_index_count(self, base_key: str) -> int:
+        cache = await self._get_shard_append_cache(base_key)
+        if cache.has_corruption:
+            raise ValueError('索引分片包含损坏或重复记录。')
+        return len(cache.item_shards)
+
+    async def first_sharded_index_item(self, base_key: str) -> str | None:
+        cache = await self._get_shard_append_cache(base_key)
+        if cache.has_corruption:
+            raise ValueError('索引分片包含损坏或重复记录。')
+        return next(iter(cache.item_shards), None)
+
+    async def sharded_index_items(self, base_key: str) -> tuple[str, ...]:
+        cache = await self._get_shard_append_cache(base_key)
+        if cache.has_corruption:
+            raise ValueError('索引分片包含损坏或重复记录。')
+        return tuple(cache.item_shards)
+
+    async def remove_sharded_index(self, base_key: str, item: str) -> bool:
+        if type(item) is not str or not item:
+            raise ValueError('索引项不能为空。')
+        cache = await self._get_shard_append_cache(base_key)
+        if cache.has_corruption:
+            raise ValueError('索引分片包含损坏或重复记录。')
+        shard_id = cache.item_shards.get(item)
+        if shard_id is None:
+            return False
+        shard_key = _shard_key(base_key, shard_id)
+        shard_items = _decode_shard(
+            await self._storage.get_plugin_storage(shard_key)
+        )
+        if item not in shard_items:
+            raise ValueError('索引缓存与分片内容不一致。')
+        updated_items = [value for value in shard_items if value != item]
+        await self._storage.set_plugin_storage(
+            shard_key,
+            _encode_shard(updated_items),
+        )
+        self._record_storage_key(shard_key)
+        updated_item_shards = dict(cache.item_shards)
+        del updated_item_shards[item]
+        self._shard_append_caches[base_key] = _ShardAppendCache(
+            item_shards=updated_item_shards,
+            tail_shard_id=cache.tail_shard_id,
+            tail_items=(
+                tuple(updated_items)
+                if shard_id == cache.tail_shard_id
+                else cache.tail_items
+            ),
+            tail_exists=cache.tail_exists,
+            tail_corrupt=cache.tail_corrupt,
+            has_corruption=cache.has_corruption,
+        )
+        return True
 
     async def read_sharded_index(self, base_key: str) -> ShardedIndexResult:
         items: list[str] = []
@@ -508,17 +588,20 @@ class GrowthStore:
         tail_shard_id = shard_ids[-1] if shard_ids else 0
         tail_items: tuple[str, ...] = ()
         tail_corrupt = False
+        has_corruption = False
         for shard_id in shard_ids:
             raw = await self._storage.get_plugin_storage(_shard_key(base_key, shard_id))
             try:
                 shard_items = _decode_shard(raw)
             except (ValueError, UnicodeDecodeError):
+                has_corruption = True
                 if shard_id == tail_shard_id:
                     tail_corrupt = True
                 continue
             has_cross_shard_duplicate = any(
                 shard_item in item_shards for shard_item in shard_items
             )
+            has_corruption = has_corruption or has_cross_shard_duplicate
             for shard_item in shard_items:
                 item_shards.setdefault(shard_item, shard_id)
             if shard_id == tail_shard_id:
@@ -532,6 +615,7 @@ class GrowthStore:
             tail_items=tail_items,
             tail_exists=bool(shard_ids),
             tail_corrupt=tail_corrupt,
+            has_corruption=has_corruption,
         )
         self._shard_append_caches[base_key] = cache
         return cache

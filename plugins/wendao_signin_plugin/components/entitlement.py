@@ -135,10 +135,23 @@ class EntitlementService:
         *,
         now: str | None = None,
     ) -> EntitlementStatus:
-        current_time = _parse_time(now or _now_iso())
         identity = identity_hash(bot_uuid, sender_id)
         async with self._store.bot_lock(bot_uuid):
-            record = await self._load_record(bot_uuid, identity)
+            return await self._get_status_by_identity_unlocked(
+                bot_uuid,
+                identity,
+                now=now,
+            )
+
+    async def _get_status_by_identity_unlocked(
+        self,
+        bot_uuid: str,
+        identity: str,
+        *,
+        now: str | None = None,
+    ) -> EntitlementStatus:
+        current_time = _parse_time(now or _now_iso())
+        record = await self._load_record(bot_uuid, identity)
         if record is None:
             raise EntitlementStorageError('权益记录不存在。')
         expires_at = self._record_expiry(record)
@@ -187,6 +200,30 @@ class EntitlementService:
             )
             await self._save_record(updated)
             return updated
+
+    async def _ensure_identity_expiry_unlocked(
+        self,
+        bot_uuid: str,
+        identity: str,
+        *,
+        expires_at: str,
+        updated_at: str,
+    ) -> EntitlementRecord:
+        target_expiry = _parse_time(expires_at)
+        _parse_time(updated_at)
+        record = await self._load_record(bot_uuid, identity)
+        if record is None:
+            raise EntitlementStorageError('权益记录不存在。')
+        current_expiry = self._record_expiry(record)
+        if current_expiry >= target_expiry:
+            return record
+        updated = replace(
+            record,
+            expires_at=target_expiry.isoformat(),
+            updated_at=updated_at,
+        )
+        await self._save_record(updated)
+        return updated
 
     async def _load_record(
         self,

@@ -148,8 +148,30 @@ class PointService:
         at: str | None = None,
         commit: bool = True,
     ) -> tuple[PointEntry, ...]:
+        async with self._store.bot_lock(bot_uuid):
+            return await self._apply_operation_unlocked(
+                bot_uuid,
+                operation_id,
+                changes,
+                at=at,
+                commit=commit,
+            )
+
+    async def _apply_operation_unlocked(
+        self,
+        bot_uuid: str,
+        operation_id: str,
+        changes: Sequence[PointChange],
+        *,
+        at: str | None = None,
+        commit: bool = True,
+        operation_kind: str = 'points',
+        payload_extra: dict[str, object] | None = None,
+    ) -> tuple[PointEntry, ...]:
         if type(operation_id) is not str or not operation_id:
             raise ValueError('积分操作 ID 不能为空。')
+        if type(operation_kind) is not str or not operation_kind:
+            raise ValueError('积分操作类型不能为空。')
         timestamp = at or _now_iso()
         normalized = tuple(changes)
         self._validate_changes(normalized)
@@ -165,51 +187,54 @@ class PointService:
                 for change in normalized
             ]
         }
+        if payload_extra:
+            if 'changes' in payload_extra:
+                raise ValueError('附加操作载荷不能覆盖积分变更。')
+            payload.update(payload_extra)
 
-        async with self._store.bot_lock(bot_uuid):
-            existing = await self._store.get_operation(bot_uuid, operation_id)
-            if existing is None:
-                await self._preflight_new(bot_uuid, normalized)
-            operation = await self._store.begin_operation(
-                bot_uuid,
-                operation_id,
-                'points',
-                payload,
-                timestamp,
-            )
-            if operation.status == 'COMMITTED':
-                return await self._load_entries(
-                    bot_uuid,
-                    operation_id,
-                    normalized,
-                    timestamp,
-                )
-
-            await self._preflight_pending(
+        existing = await self._store.get_operation(bot_uuid, operation_id)
+        if existing is None:
+            await self._preflight_new(bot_uuid, normalized)
+        operation = await self._store.begin_operation(
+            bot_uuid,
+            operation_id,
+            operation_kind,
+            payload,
+            timestamp,
+        )
+        if operation.status == 'COMMITTED':
+            return await self._load_entries(
                 bot_uuid,
                 operation_id,
                 normalized,
-                set(operation.applied_steps),
+                timestamp,
             )
-            entries: list[PointEntry] = []
-            for change in normalized:
-                entry = await self._apply_change(
-                    bot_uuid,
-                    operation_id,
-                    change,
-                    set(operation.applied_steps),
-                    timestamp,
-                )
-                entries.append(entry)
-                operation = await self._store.mark_step_applied(
-                    bot_uuid,
-                    operation_id,
-                    change.step_id,
-                    timestamp,
-                )
-            if commit:
-                await self._store.commit_operation(bot_uuid, operation_id, timestamp)
-            return tuple(entries)
+
+        await self._preflight_pending(
+            bot_uuid,
+            operation_id,
+            normalized,
+            set(operation.applied_steps),
+        )
+        entries: list[PointEntry] = []
+        for change in normalized:
+            entry = await self._apply_change(
+                bot_uuid,
+                operation_id,
+                change,
+                set(operation.applied_steps),
+                timestamp,
+            )
+            entries.append(entry)
+            operation = await self._store.mark_step_applied(
+                bot_uuid,
+                operation_id,
+                change.step_id,
+                timestamp,
+            )
+        if commit:
+            await self._store.commit_operation(bot_uuid, operation_id, timestamp)
+        return tuple(entries)
 
     @staticmethod
     def _validate_changes(changes: tuple[PointChange, ...]) -> None:
