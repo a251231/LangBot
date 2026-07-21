@@ -65,6 +65,20 @@ class FakeStorage:
         del self.values[key]
 
 
+class SnapshotBarrierStorage(FakeStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get_plugin_storage_keys(self) -> list[str]:
+        self.get_keys_calls += 1
+        snapshot = list(self.values)
+        self.started.set()
+        await self.release.wait()
+        return snapshot
+
+
 def _model_samples() -> Iterable[object]:
     yield PromoterRecord(
         bot_uuid='bot-a',
@@ -231,19 +245,6 @@ def test_growth_store_crud_and_corrupt_record_diagnostics() -> None:
 
 def test_growth_store_serializes_first_key_cache_initialization_across_bots() -> None:
     async def scenario() -> None:
-        class SnapshotBarrierStorage(FakeStorage):
-            def __init__(self) -> None:
-                super().__init__()
-                self.started = asyncio.Event()
-                self.release = asyncio.Event()
-
-            async def get_plugin_storage_keys(self) -> list[str]:
-                self.get_keys_calls += 1
-                snapshot = list(self.values)
-                self.started.set()
-                await self.release.wait()
-                return snapshot
-
         storage = SnapshotBarrierStorage()
         store = GrowthStore(storage)
 
@@ -279,6 +280,61 @@ def test_growth_store_serializes_first_key_cache_initialization_across_bots() ->
             growth_storage_key(POINT_ENTRY_PREFIX, 'bot-b', 'entry-b'),
             PointEntry,
         ) is not None
+        assert storage.get_keys_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_regular_save_waits_for_first_key_cache_publication() -> None:
+    async def scenario() -> None:
+        storage = SnapshotBarrierStorage()
+        store = GrowthStore(storage)
+        product = ProductRecord(
+            bot_uuid='bot-b',
+            product_id='P000001',
+            name='30 天使用期限',
+            points_cost=500,
+            duration_days=30,
+            enabled=True,
+            created_at='2026-07-20T00:00:00+08:00',
+            updated_at='2026-07-20T00:00:00+08:00',
+        )
+        product_key = growth_storage_key(
+            PRODUCT_PREFIX,
+            product.bot_uuid,
+            product.product_id,
+        )
+        scan = asyncio.create_task(store.get(product_key, ProductRecord))
+        await storage.started.wait()
+        write = asyncio.create_task(store.save(product_key, product))
+        await asyncio.sleep(0)
+
+        storage.release.set()
+        await asyncio.gather(scan, write)
+
+        assert await store.get(product_key, ProductRecord) == product
+        assert storage.get_keys_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_shard_write_waits_for_first_directory_publication() -> None:
+    async def scenario() -> None:
+        storage = SnapshotBarrierStorage()
+        store = GrowthStore(storage)
+        first_base = 'card-pool:v1:bot-a:P000001'
+        second_base = 'card-pool:v1:bot-b:P000001'
+        first = asyncio.create_task(store.append_sharded_index(first_base, 'card-a'))
+        await storage.started.wait()
+        second = asyncio.create_task(store.append_sharded_index(second_base, 'card-b'))
+        await asyncio.sleep(0)
+
+        storage.release.set()
+        await asyncio.gather(first, second)
+
+        second_shard = f'{second_base}:000000'
+        assert await store.delete(second_shard) is True
+        assert second_shard not in storage.values
         assert storage.get_keys_calls == 1
 
     asyncio.run(scenario())

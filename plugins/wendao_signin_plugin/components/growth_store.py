@@ -265,6 +265,7 @@ class GrowthStore:
         self._bot_locks: dict[str, asyncio.Lock] = {}
         self._keys_init_lock = asyncio.Lock()
         self._storage_keys: set[str] | None = None
+        self._pending_storage_keys: set[str] = set()
         self._point_entry_revisions: dict[str, int] = {}
         self._shard_append_caches: dict[str, _ShardAppendCache] = {}
         self._shard_ids_by_base: dict[str, set[int]] | None = None
@@ -287,8 +288,7 @@ class GrowthStore:
                     raise ValueError('积分流水不可变。')
                 return
         await self._storage.set_plugin_storage(key, raw)
-        if self._storage_keys is not None:
-            self._storage_keys.add(key)
+        self._record_storage_key(key)
         if isinstance(record, PointEntry):
             self._point_entry_revisions[record.bot_uuid] = (
                 self._point_entry_revisions.get(record.bot_uuid, 0) + 1
@@ -465,8 +465,7 @@ class GrowthStore:
             shard_key,
             _encode_shard(updated_items),
         )
-        if self._storage_keys is not None:
-            self._storage_keys.add(shard_key)
+        self._record_storage_key(shard_key)
         if self._shard_ids_by_base is not None:
             self._shard_ids_by_base.setdefault(base_key, set()).add(shard_id)
         cache.item_shards[item] = shard_id
@@ -539,25 +538,35 @@ class GrowthStore:
 
     async def _shard_ids(self, base_key: str) -> list[int]:
         if self._shard_ids_by_base is None:
-            self._shard_ids_by_base = {}
             keys = await self._keys()
+            shard_ids_by_base: dict[str, set[int]] = {}
             for key in keys:
                 stored_base_key, separator, suffix = key.rpartition(':')
                 if separator and len(suffix) == 6 and suffix.isdigit():
-                    self._shard_ids_by_base.setdefault(
+                    shard_ids_by_base.setdefault(
                         stored_base_key,
                         set(),
                     ).add(int(suffix))
+            self._shard_ids_by_base = shard_ids_by_base
         return sorted(self._shard_ids_by_base.get(base_key, set()))
 
     async def _keys(self) -> set[str]:
         if self._storage_keys is None:
             async with self._keys_init_lock:
                 if self._storage_keys is None:
-                    self._storage_keys = set(
+                    storage_keys = set(
                         await self._storage.get_plugin_storage_keys()
                     )
+                    storage_keys.update(self._pending_storage_keys)
+                    self._storage_keys = storage_keys
+                    self._pending_storage_keys.clear()
         return self._storage_keys
+
+    def _record_storage_key(self, key: str) -> None:
+        if self._storage_keys is None:
+            self._pending_storage_keys.add(key)
+        else:
+            self._storage_keys.add(key)
 
     def point_entry_revision(self, bot_uuid: str) -> int:
         return self._point_entry_revisions.get(bot_uuid, 0)
