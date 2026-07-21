@@ -47,6 +47,8 @@ class WeeklyReportRunner(Protocol):
 
 
 Notifier = Callable[[AccountRecord, str], Awaitable[None]]
+EntitlementChecker = Callable[[AccountRecord], Awaitable[bool]]
+ENTITLEMENT_DIAGNOSTIC = '问道自动任务已跳过：权益读取失败，请稍后重试。'
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
@@ -97,11 +99,13 @@ class SigninScheduler:
         poll_seconds: int = 30,
         timezone: ZoneInfo | None = None,
         now: Callable[[], datetime] | None = None,
+        is_entitled: EntitlementChecker | None = None,
     ) -> None:
         self._store = store
         self._workflow = workflow
         self._weekly_report = weekly_report
         self._notify = notify
+        self._is_entitled = is_entitled
         self.poll_seconds = max(5, poll_seconds)
         self._timezone = timezone or ZoneInfo('Asia/Shanghai')
         timezone_value = self._timezone
@@ -133,6 +137,8 @@ class SigninScheduler:
             now = self._current_time()
             due_accounts: list[tuple[AccountRecord, bool, bool, str]] = []
             for account in await self._store.list_accounts():
+                if not await self._account_is_entitled(account):
+                    continue
                 normalized = await self._normalize_cross_day_retry(account, now)
                 if normalized is None:
                     continue
@@ -165,6 +171,28 @@ class SigninScheduler:
                         for account, daily_due, weekly_due, expected_period in due_accounts
                     )
                 )
+
+    async def _account_is_entitled(self, account: AccountRecord) -> bool:
+        checker = self._is_entitled
+        if checker is None:
+            return True
+        try:
+            return bool(await checker(account))
+        except Exception:
+            await self._record_entitlement_diagnostic(account)
+            return False
+
+    async def _record_entitlement_diagnostic(self, account: AccountRecord) -> None:
+        try:
+            async with self._store.account_lock(account.bot_uuid, account.sender_id):
+                latest = await self._store.get(account.bot_uuid, account.sender_id)
+                if latest is None or latest.last_result == ENTITLEMENT_DIAGNOSTIC:
+                    return
+                await self._store.save(
+                    replace(latest, last_result=ENTITLEMENT_DIAGNOSTIC)
+                )
+        except Exception:
+            pass
 
     async def _run_due_account(
         self,

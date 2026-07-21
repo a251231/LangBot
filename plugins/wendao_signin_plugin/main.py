@@ -25,7 +25,7 @@ from components.command_parser import (
     ParsedCommand,
     parse_binding_input,
 )
-from components.entitlement import EntitlementService
+from components.entitlement import EntitlementExpiredError, EntitlementService
 from components.growth_service import GrowthService
 from components.growth_store import GrowthStore
 from components.login import LoginSessionError, WendaoLoginClient, WendaoLoginService
@@ -168,6 +168,28 @@ class WendaoSigninPlugin(BasePlugin):
             if plugin is not None:
                 await plugin._notify_login(bot_uuid, target_id, text)
 
+        async def on_signin_confirmed(account: AccountRecord, at: datetime) -> None:
+            plugin = plugin_ref()
+            if plugin is None or plugin.growth_service is None:
+                return
+            await plugin.growth_service.on_signin_confirmed(
+                account,
+                at=at.isoformat(timespec='seconds'),
+            )
+
+        async def is_entitled(account: AccountRecord) -> bool:
+            plugin = plugin_ref()
+            if plugin is None or plugin.entitlement_service is None:
+                raise RuntimeError('权益服务尚未初始化。')
+            try:
+                await plugin.entitlement_service.require_active(
+                    account.bot_uuid,
+                    account.sender_id,
+                )
+            except EntitlementExpiredError:
+                return False
+            return True
+
         self.account_store = AccountStore(weakref.proxy(self))
         self.growth_store = GrowthStore(weakref.proxy(self))
         self.growth_service = GrowthService(
@@ -224,6 +246,7 @@ class WendaoSigninPlugin(BasePlugin):
             self.account_store,
             session=self.account_session,
             timezone=self._timezone,
+            on_signin_confirmed=on_signin_confirmed,
         )
         self.weekly_report = WeeklyReportService(
             self.account_store,
@@ -238,6 +261,7 @@ class WendaoSigninPlugin(BasePlugin):
             notify=notify,
             poll_seconds=self._int_config('scheduler_poll_seconds', 30, 5, 3600),
             timezone=self._timezone,
+            is_entitled=is_entitled,
         )
         self.scheduler.start()
 
@@ -633,6 +657,24 @@ class WendaoSigninPlugin(BasePlugin):
             return '问道周报查询异常，请稍后重试。'
         return outcome.message
 
+    async def _manual_entitlement_error(
+        self,
+        bot_uuid: str,
+        sender_id: str,
+    ) -> str:
+        assert self.account_store is not None
+        assert self.entitlement_service is not None
+        try:
+            account = await self.account_store.get(bot_uuid, sender_id)
+            if account is None:
+                return ''
+            await self.entitlement_service.require_active(bot_uuid, sender_id)
+        except EntitlementExpiredError:
+            return '问道权益已到期，请先执行“问道激活 <卡密>”续期。'
+        except Exception:
+            return '权益读取失败，请稍后重试。'
+        return ''
+
     async def handle_wendao_command(
         self,
         *,
@@ -675,8 +717,20 @@ class WendaoSigninPlugin(BasePlugin):
                 binding_text=command.argument,
             )
         if command.kind in {'query', 'signin', 'resign'}:
+            entitlement_error = await self._manual_entitlement_error(
+                bot_uuid,
+                sender_id,
+            )
+            if entitlement_error:
+                return entitlement_error
             return await self._run_manual(bot_uuid, sender_id, command.kind)
         if command.kind == 'weekly_report':
+            entitlement_error = await self._manual_entitlement_error(
+                bot_uuid,
+                sender_id,
+            )
+            if entitlement_error:
+                return entitlement_error
             return await self._run_weekly_report(bot_uuid, sender_id)
         if command.kind == 'schedule_time':
             return await self._set_schedule(bot_uuid, sender_id, command.argument)

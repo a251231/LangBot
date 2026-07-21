@@ -107,6 +107,7 @@ class WendaoSigninListener(EventListener):
             target_id=str(getattr(event, 'launcher_id', '')),
             is_group=is_group,
             command=command,
+            request_id=str(getattr(event_ctx, 'query_id', None) or ''),
         )
 
     async def _handle_message(self, event_ctx: context.EventContext) -> None:

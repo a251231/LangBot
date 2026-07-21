@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Literal, Protocol
@@ -119,11 +119,16 @@ class SigninWorkflow:
         semaphore: asyncio.Semaphore | None = None,
         timezone: ZoneInfo | None = None,
         now: Callable[[], datetime] | None = None,
+        on_signin_confirmed: Callable[
+            [AccountRecord, datetime], Awaitable[None]
+        ]
+        | None = None,
     ) -> None:
         self._store = store
         self._timezone = timezone or ZoneInfo('Asia/Shanghai')
         timezone_value = self._timezone
         self._now = now or (lambda: datetime.now(timezone_value))
+        self._on_signin_confirmed = on_signin_confirmed
         if session is None:
             if client_factory is None:
                 raise ValueError('必须提供账号会话或客户端工厂。')
@@ -172,14 +177,14 @@ class SigninWorkflow:
 
         if mode == 'query':
             message = _format_outcome(status, actions, notes)
-            await self._store.save(
-                replace(
-                    account,
-                    needs_rebind=False,
-                    last_run_at=now.isoformat(timespec='seconds'),
-                    last_result=message,
-                )
+            account = replace(
+                account,
+                needs_rebind=False,
+                last_run_at=now.isoformat(timespec='seconds'),
+                last_result=message,
             )
+            await self._store.save(account)
+            await self._confirm_signin(account, status, now)
             return WorkflowOutcome(
                 status=status,
                 actions=(),
@@ -250,6 +255,7 @@ class SigninWorkflow:
             updates['last_completed_date'] = today
         account = replace(account, **updates)
         await self._store.save(account)
+        await self._confirm_signin(account, status, now)
         return WorkflowOutcome(
             status=status,
             actions=tuple(actions),
@@ -257,6 +263,20 @@ class SigninWorkflow:
             run_date=today,
             credentials_fingerprint=credentials_fingerprint(account.credentials),
         )
+
+    async def _confirm_signin(
+        self,
+        account: AccountRecord,
+        status: dict[str, Any],
+        at: datetime,
+    ) -> None:
+        callback = self._on_signin_confirmed
+        if callback is None or _as_int(status.get('signInStatus')) != 2:
+            return
+        try:
+            await callback(account, at)
+        except Exception:
+            pass
 
     async def _retry_resign_after_read_task(
         self,

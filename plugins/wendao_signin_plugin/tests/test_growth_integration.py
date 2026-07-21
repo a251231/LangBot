@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import json
+from pathlib import Path
 import re
 from dataclasses import replace
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import components.growth_service as growth_service_module
 from components.account_store import AccountStore
+from components.account_session import ACCOUNT_NOT_BOUND_MESSAGE, AccountNotBoundError
+from components.command_parser import ParsedCommand
+from components.entitlement import EntitlementExpiredError
 from components.growth_service import GrowthService
 from components.growth_models import GrowthConfigRecord, GrowthOperation
 from components.growth_store import (
@@ -23,6 +30,14 @@ from components.growth_store import (
     identity_hash,
 )
 from components.models import AccountRecord, Credentials
+
+
+PLUGIN_MAIN = Path(__file__).parents[1] / 'main.py'
+SPEC = importlib.util.spec_from_file_location('wendao_growth_integration_main', PLUGIN_MAIN)
+assert SPEC is not None and SPEC.loader is not None
+MAIN_MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MAIN_MODULE)
+WendaoSigninPlugin = MAIN_MODULE.WendaoSigninPlugin
 
 
 class FakeStorage:
@@ -99,6 +114,126 @@ def extract_invite_code(text: str) -> str:
     match = re.search(r'\b[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}\b', text)
     assert match is not None
     return match.group(0)
+
+
+async def invoke_command(
+    plugin: WendaoSigninPlugin,
+    kind: str,
+    argument: str = '',
+) -> str:
+    return await plugin.handle_wendao_command(
+        bot_uuid='bot-a',
+        sender_id='user-a',
+        target_id='target-user-a',
+        is_group=False,
+        command=ParsedCommand(kind=kind, argument=argument),
+    )
+
+
+def test_expired_entitlement_blocks_only_manual_wendao_business_commands() -> None:
+    async def scenario() -> None:
+        backend = FakeStorage()
+        plugin = WendaoSigninPlugin()
+        plugin.account_store = AccountStore(backend)
+        await plugin.account_store.save(account('bot-a', 'user-a', 'wd-a'))
+        require_active = AsyncMock(
+            side_effect=EntitlementExpiredError('插件使用期限已到期。')
+        )
+        plugin.entitlement_service = SimpleNamespace(require_active=require_active)
+        workflow_execute = AsyncMock()
+        weekly_execute = AsyncMock()
+        plugin.workflow = SimpleNamespace(execute=workflow_execute)
+        plugin.weekly_report = SimpleNamespace(execute=weekly_execute)
+
+        replies = [
+            await invoke_command(plugin, kind)
+            for kind in ('query', 'signin', 'resign', 'weekly_report')
+        ]
+
+        assert all('已到期' in reply and '激活' in reply for reply in replies)
+        assert require_active.await_count == 4
+        workflow_execute.assert_not_awaited()
+        weekly_execute.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_growth_and_shop_commands_remain_available_after_expiry() -> None:
+    async def scenario() -> None:
+        backend = FakeStorage()
+        plugin = WendaoSigninPlugin()
+        plugin.account_store = AccountStore(backend)
+        await plugin.account_store.save(account('bot-a', 'user-a', 'wd-a'))
+        require_active = AsyncMock(
+            side_effect=EntitlementExpiredError('插件使用期限已到期。')
+        )
+        plugin.entitlement_service = SimpleNamespace(require_active=require_active)
+        promotion = AsyncMock(return_value='推广入口可用')
+        shop = AsyncMock(return_value='商城入口可用')
+        plugin.growth_service = SimpleNamespace(promotion=promotion, shop=shop)
+
+        promotion_reply = await invoke_command(plugin, 'promotion')
+        shop_reply = await invoke_command(plugin, 'shop')
+
+        assert promotion_reply == '推广入口可用'
+        assert shop_reply == '商城入口可用'
+        require_active.assert_not_awaited()
+        promotion.assert_awaited_once_with('bot-a', 'user-a')
+        shop.assert_awaited_once_with('bot-a')
+
+    asyncio.run(scenario())
+
+
+def test_manual_entitlement_read_error_returns_retry_message_without_business_call() -> None:
+    async def scenario() -> None:
+        backend = FakeStorage()
+        plugin = WendaoSigninPlugin()
+        plugin.account_store = AccountStore(backend)
+        await plugin.account_store.save(account('bot-a', 'user-a', 'wd-a'))
+        plugin.entitlement_service = SimpleNamespace(
+            require_active=AsyncMock(
+                side_effect=RuntimeError('simulated entitlement storage failure')
+            )
+        )
+        workflow_execute = AsyncMock()
+        plugin.workflow = SimpleNamespace(execute=workflow_execute)
+
+        reply = await invoke_command(plugin, 'query')
+
+        assert reply == '权益读取失败，请稍后重试。'
+        workflow_execute.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_unbound_manual_commands_keep_existing_not_bound_message() -> None:
+    async def scenario() -> None:
+        plugin = WendaoSigninPlugin()
+        plugin.account_store = AccountStore(FakeStorage())
+        require_active = AsyncMock(
+            side_effect=AssertionError('unbound account must bypass entitlement lookup')
+        )
+        plugin.entitlement_service = SimpleNamespace(require_active=require_active)
+        workflow_execute = AsyncMock(
+            side_effect=AccountNotBoundError(ACCOUNT_NOT_BOUND_MESSAGE)
+        )
+        weekly_execute = AsyncMock(
+            side_effect=AccountNotBoundError(ACCOUNT_NOT_BOUND_MESSAGE)
+        )
+        plugin.workflow = SimpleNamespace(execute=workflow_execute)
+        plugin.weekly_report = SimpleNamespace(execute=weekly_execute)
+
+        replies = [
+            await invoke_command(plugin, kind)
+            for kind in ('query', 'signin', 'resign', 'weekly_report')
+        ]
+
+        assert replies == [ACCOUNT_NOT_BOUND_MESSAGE] * 4
+        require_active.assert_not_awaited()
+        assert workflow_execute.await_count == 3
+        weekly_execute.assert_awaited_once()
+
+    asyncio.run(scenario())
 
 
 def test_initialize_rolls_out_existing_accounts_and_persists_initial_config() -> None:

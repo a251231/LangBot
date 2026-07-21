@@ -36,6 +36,18 @@ class MemoryPluginStorage:
         del self.values[key]
 
 
+class FailingDiagnosticStorage(MemoryPluginStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_write = False
+
+    async def set_plugin_storage(self, key: str, value: bytes) -> None:
+        if self.fail_next_write:
+            self.fail_next_write = False
+            raise RuntimeError("simulated diagnostic write failure")
+        await super().set_plugin_storage(key, value)
+
+
 class CountingPluginStorage(MemoryPluginStorage):
     def __init__(self) -> None:
         super().__init__()
@@ -144,6 +156,10 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def _append_async(values: list[str], value: str) -> None:
+    values.append(value)
+
+
 def make_account(**changes) -> AccountRecord:
     base = AccountRecord.create(
         bot_uuid="bot-test-1",
@@ -184,6 +200,105 @@ def weekly_only_account(**changes) -> AccountRecord:
         auto_weekly_report=True,
         **changes,
     )
+
+
+def test_expired_account_skips_daily_and_weekly_jobs() -> None:
+    async def scenario() -> None:
+        store = AccountStore(MemoryPluginStorage())
+        record = make_account(auto_weekly_report=True, last_result="previous result")
+        await store.save(record)
+        workflow = RecordingWorkflow([])
+        weekly_report = RecordingWeeklyReport([])
+        notifications: list[str] = []
+
+        async def is_entitled(account: AccountRecord) -> bool:
+            return False
+
+        scheduler = SigninScheduler(
+            store,
+            workflow,
+            weekly_report=weekly_report,
+            notify=lambda account, text: _append_async(notifications, text),
+            now=lambda: datetime(2026, 7, 13, 9, 0, tzinfo=SHANGHAI),
+            is_entitled=is_entitled,
+        )
+
+        await scheduler.run_once()
+
+        assert workflow.calls == []
+        assert weekly_report.calls == []
+        assert notifications == []
+        assert await store.get(record.bot_uuid, record.sender_id) == record
+
+    run(scenario())
+
+
+def test_entitlement_read_error_skips_jobs_and_records_diagnostic_only() -> None:
+    async def scenario() -> None:
+        store = AccountStore(MemoryPluginStorage())
+        record = make_account(auto_weekly_report=True, last_result="previous result")
+        await store.save(record)
+        workflow = RecordingWorkflow([])
+        weekly_report = RecordingWeeklyReport([])
+        notifications: list[str] = []
+
+        async def is_entitled(account: AccountRecord) -> bool:
+            raise RuntimeError("simulated entitlement read failure")
+
+        scheduler = SigninScheduler(
+            store,
+            workflow,
+            weekly_report=weekly_report,
+            notify=lambda account, text: _append_async(notifications, text),
+            now=lambda: datetime(2026, 7, 13, 9, 0, tzinfo=SHANGHAI),
+            is_entitled=is_entitled,
+        )
+
+        await scheduler.run_once()
+
+        saved = await store.get(record.bot_uuid, record.sender_id)
+        assert saved is not None
+        assert workflow.calls == []
+        assert weekly_report.calls == []
+        assert notifications == []
+        assert saved.last_result == "问道自动任务已跳过：权益读取失败，请稍后重试。"
+        assert saved.last_completed_date == record.last_completed_date
+        assert saved.last_run_at == record.last_run_at
+        assert saved.next_retry_at == record.next_retry_at
+        assert saved.weekly_report_last_attempt_date == record.weekly_report_last_attempt_date
+
+    run(scenario())
+
+
+def test_diagnostic_write_failure_does_not_block_other_accounts() -> None:
+    async def scenario() -> None:
+        backend = FailingDiagnosticStorage()
+        store = AccountStore(backend)
+        first = make_account(sender_id="user-test-1")
+        second = make_account(sender_id="user-test-2")
+        await store.save(first)
+        await store.save(second)
+        workflow = RecordingWorkflow([success()])
+
+        async def is_entitled(account: AccountRecord) -> bool:
+            if account.sender_id == first.sender_id:
+                raise RuntimeError("simulated entitlement read failure")
+            return True
+
+        backend.fail_next_write = True
+        scheduler = SigninScheduler(
+            store,
+            workflow,
+            notify=lambda account, text: _append_async([], text),
+            now=lambda: datetime(2026, 7, 13, 9, 0, tzinfo=SHANGHAI),
+            is_entitled=is_entitled,
+        )
+
+        await scheduler.run_once()
+
+        assert workflow.calls == [(second.bot_uuid, second.sender_id, "auto")]
+
+    run(scenario())
 
 
 def test_weekly_report_runs_monday_at_nine_and_pushes_once() -> None:

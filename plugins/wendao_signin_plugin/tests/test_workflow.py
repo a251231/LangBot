@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -187,6 +187,9 @@ def status(
 def setup_workflow(
     client_factory: Callable[[AccountRecord], object],
     account: AccountRecord | None = None,
+    *,
+    on_signin_confirmed: Callable[[AccountRecord, datetime], Awaitable[None]]
+    | None = None,
 ) -> tuple[AccountStore, SigninWorkflow]:
     store = AccountStore(MemoryPluginStorage())
     run(store.save(account or make_account()))
@@ -195,6 +198,7 @@ def setup_workflow(
         client_factory=client_factory,
         max_concurrency=3,
         now=lambda: NOW,
+        on_signin_confirmed=on_signin_confirmed,
     )
     return store, workflow
 
@@ -221,6 +225,55 @@ def test_auto_signs_in_then_rechecks_final_status() -> None:
     assert saved.retry_count == 0
     assert saved.next_retry_at == ""
     assert client.closed is True
+
+
+def test_final_signed_status_calls_confirmation_callback_once() -> None:
+    confirmed: list[tuple[AccountRecord, datetime]] = []
+
+    async def on_signin_confirmed(account: AccountRecord, at: datetime) -> None:
+        confirmed.append((account, at))
+
+    client = FakeClient(
+        [
+            status(signed=False),
+            status(signed=True),
+            status(signed=True),
+        ]
+    )
+    account = make_account(auto_resign=False, auto_milestone=False)
+    _, workflow = setup_workflow(
+        lambda record: client,
+        account,
+        on_signin_confirmed=on_signin_confirmed,
+    )
+
+    outcome = run(workflow.execute("bot-test-1", "user-test-1", mode="signin"))
+
+    assert outcome.status["signInStatus"] == 2
+    assert len(confirmed) == 1
+    confirmed_account, confirmed_at = confirmed[0]
+    assert confirmed_account.bot_uuid == account.bot_uuid
+    assert confirmed_account.sender_id == account.sender_id
+    assert confirmed_at == NOW
+
+
+def test_confirmation_callback_failure_does_not_change_successful_outcome() -> None:
+    async def fail_confirmation(account: AccountRecord, at: datetime) -> None:
+        raise RuntimeError("simulated growth callback failure")
+
+    client = FakeClient([status(signed=True), status(signed=True)])
+    store, workflow = setup_workflow(
+        lambda record: client,
+        on_signin_confirmed=fail_confirmation,
+    )
+
+    outcome = run(workflow.execute("bot-test-1", "user-test-1", mode="signin"))
+
+    assert outcome.status["signInStatus"] == 2
+    assert "今日已签到" in outcome.message
+    saved = run(store.get("bot-test-1", "user-test-1"))
+    assert saved is not None
+    assert saved.last_result == outcome.message
 
 
 def test_query_never_mutates_signin_state() -> None:

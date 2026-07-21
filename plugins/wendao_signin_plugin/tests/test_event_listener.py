@@ -38,7 +38,7 @@ class DummyEvent:
 
 
 class DummyContext:
-    def __init__(self, event: DummyEvent, *, query_id: int) -> None:
+    def __init__(self, event: DummyEvent, *, query_id: int | None) -> None:
         self.event = event
         self.query_id = query_id
         self.default_prevented = False
@@ -103,7 +103,17 @@ def test_private_keyword_prevents_default_but_keeps_postorder_plugins() -> None:
     assert plugin.calls[0]["sender_id"] == "sender-test-1"
     assert plugin.calls[0]["target_id"] == "launcher-test-1"
     assert plugin.calls[0]["is_group"] is False
+    assert plugin.calls[0]["request_id"] == "100"
     assert reply_text(context) == "已处理 query"
+
+
+def test_missing_query_id_passes_empty_request_id() -> None:
+    listener, plugin = build_listener()
+    context = DummyContext(DummyEvent("问道积分"), query_id=None)
+
+    run(listener._handle_message(context))
+
+    assert plugin.calls[0]["request_id"] == ""
 
 
 def test_group_command_except_help_redirects_to_private_chat() -> None:
