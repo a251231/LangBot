@@ -40,6 +40,7 @@ from components.referral import ReferralService
 
 _CONFIG_ID = 'runtime'
 _MAX_REWARD_POINTS = 1_000_000
+_SIGNIN_CONFIRMATION_PREFIX = 'signin-confirmed:'
 _ADMIN_MUTATIONS = frozenset(
     {
         '商品新增',
@@ -100,6 +101,7 @@ class GrowthService:
                 for account in bot_accounts:
                     await self._initialize_bound_account(account, at=rollout_at)
             await self.commerce_service.initialize_pending_reservations(bot_uuid)
+        await self.recover_pending()
 
     async def promotion(self, bot_uuid: str, sender_id: str) -> str:
         if await self.account_store.get(bot_uuid, sender_id) is None:
@@ -187,6 +189,14 @@ class GrowthService:
             )
         except ValueError as exc:
             return f'兑换失败：{exc}'
+        if not result.card_code:
+            return '\n'.join(
+                (
+                    f'兑换已完成：{result.redemption.product_id}',
+                    f'扣除积分：{result.redemption.points_cost}',
+                    '卡密已激活，不再回显。',
+                )
+            )
         return '\n'.join(
             (
                 f'兑换成功：{result.redemption.product_id}',
@@ -328,14 +338,32 @@ class GrowthService:
         *,
         at: str | None = None,
     ) -> None:
-        config = await self._config(account.bot_uuid, at=at)
-        await self.referral_service.on_signin_confirmed(
-            account.bot_uuid,
-            account.sender_id,
-            promoter_reward_points=config.promoter_reward_points,
-            invitee_reward_points=config.invitee_reward_points,
-            at=at,
-        )
+        identity = identity_hash(account.bot_uuid, account.sender_id)
+        operation_id = f'{_SIGNIN_CONFIRMATION_PREFIX}{identity}'
+        async with self.store.bot_lock(account.bot_uuid):
+            operation = await self.store.get_operation(
+                account.bot_uuid,
+                operation_id,
+            )
+            if operation is None:
+                timestamp = at or _now_iso()
+                _parse_time(timestamp)
+                operation = await self.store.begin_operation(
+                    account.bot_uuid,
+                    operation_id,
+                    'signin-confirmed',
+                    {
+                        'identity_hash': identity,
+                        'confirmed_at': timestamp,
+                    },
+                    timestamp,
+                )
+            self._signin_confirmation_payload(
+                operation,
+                expected_identity=identity,
+            )
+        if operation.status == 'PENDING':
+            await self._complete_signin_confirmation(operation)
 
     async def recover_pending(self) -> None:
         accounts = await self.account_store.list_accounts()
@@ -364,6 +392,8 @@ class GrowthService:
                     await self.commerce_service.recover_operation(operation)
                 elif operation.operation_id.startswith('referral-effective:'):
                     await self.referral_service.recover_operation(operation)
+                elif operation.kind == 'signin-confirmed':
+                    await self._recover_signin_confirmation(operation)
                 elif operation.kind == 'points':
                     await self.points_service.recover_operation(operation)
                 elif operation.kind == 'admin-reward-rules':
@@ -372,6 +402,131 @@ class GrowthService:
                     raise ValueError(
                         f'未知的待恢复增长操作类型：{operation.kind}'
                     )
+
+    async def _recover_signin_confirmation(
+        self,
+        operation: GrowthOperation,
+    ) -> None:
+        self._signin_confirmation_payload(operation)
+        current = await self.store.get_operation(
+            operation.bot_uuid,
+            operation.operation_id,
+        )
+        if current is None:
+            raise ValueError('签到确认操作不存在。')
+        self._signin_confirmation_payload(current)
+        immutable = (
+            operation.schema_version,
+            operation.bot_uuid,
+            operation.operation_id,
+            operation.kind,
+            operation.payload,
+            operation.created_at,
+        )
+        current_immutable = (
+            current.schema_version,
+            current.bot_uuid,
+            current.operation_id,
+            current.kind,
+            current.payload,
+            current.created_at,
+        )
+        if current_immutable != immutable:
+            raise ValueError('签到确认操作与存储记录不一致。')
+        try:
+            operation_created = _parse_time(operation.created_at)
+            operation_updated = _parse_time(operation.updated_at)
+            current_created = _parse_time(current.created_at)
+            current_updated = _parse_time(current.updated_at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('签到确认操作时间格式错误。') from exc
+        status_order = {'PENDING': 0, 'COMMITTED': 1}
+        if (
+            operation_updated < operation_created
+            or current_updated < current_created
+            or current_updated < operation_updated
+            or status_order[current.status] < status_order[operation.status]
+            or current.applied_steps[: len(operation.applied_steps)]
+            != operation.applied_steps
+        ):
+            raise ValueError('签到确认操作状态进展不一致。')
+        if current.status == 'COMMITTED':
+            return
+        await self._complete_signin_confirmation(current)
+
+    async def _pending_signin_confirmations(
+        self,
+        bot_uuid: str,
+    ) -> tuple[GrowthOperation, ...]:
+        pending = await self.store.list_pending_operations(bot_uuid)
+        if pending.skipped_count:
+            raise ValueError('增长操作日志包含损坏记录。')
+        operations = sorted(
+            (
+                operation
+                for operation in pending.records
+                if operation.kind == 'signin-confirmed'
+                or operation.operation_id.startswith(_SIGNIN_CONFIRMATION_PREFIX)
+            ),
+            key=lambda operation: (
+                _parse_time(operation.created_at),
+                operation.operation_id,
+            ),
+        )
+        for operation in operations:
+            self._signin_confirmation_payload(operation)
+        return tuple(operations)
+
+    async def _recover_pending_signin_confirmations(self, bot_uuid: str) -> None:
+        operations = await self._pending_signin_confirmations(bot_uuid)
+        for operation in operations:
+            await self._recover_signin_confirmation(operation)
+
+    async def _complete_signin_confirmation(
+        self,
+        operation: GrowthOperation,
+    ) -> None:
+        payload = self._signin_confirmation_payload(operation)
+        config = await self._config(
+            operation.bot_uuid,
+            at=operation.created_at,
+        )
+        referral = await self.referral_service.on_signin_confirmed_identity(
+            operation.bot_uuid,
+            cast(str, payload['identity_hash']),
+            promoter_reward_points=config.promoter_reward_points,
+            invitee_reward_points=config.invitee_reward_points,
+            at=operation.created_at,
+        )
+        if referral is not None and referral.status == 'pending':
+            return
+        if referral is not None and referral.status not in {
+            'effective',
+            'rejected',
+        }:
+            raise ValueError('签到确认操作未完成推广关系处理。')
+        async with self.store.bot_lock(operation.bot_uuid):
+            current = await self.store.get_operation(
+                operation.bot_uuid,
+                operation.operation_id,
+            )
+            if current is None:
+                raise ValueError('签到确认操作不存在。')
+            self._signin_confirmation_payload(current)
+            if current.status == 'COMMITTED':
+                return
+            if 'referral-processed' not in current.applied_steps:
+                current = await self.store.mark_step_applied(
+                    current.bot_uuid,
+                    current.operation_id,
+                    'referral-processed',
+                    current.updated_at,
+                )
+            await self.store.commit_operation(
+                current.bot_uuid,
+                current.operation_id,
+                current.updated_at,
+            )
 
     async def _initialize_bound_account(
         self,
@@ -525,13 +680,26 @@ class GrowthService:
             'promoter_reward_points': promoter_points,
             'invitee_reward_points': invitee_points,
         }
+        response = f'积分规则已更新：推广人 {promoter_points}，受邀人 {invitee_points}'
         async with self.store.bot_lock(bot_uuid):
+            if await self.store.get_operation(bot_uuid, operation_id) is not None:
+                await self._execute_reward_rules_unlocked(
+                    bot_uuid,
+                    operation_id,
+                    expected,
+                )
+                return response
+        await self._recover_pending_signin_confirmations(bot_uuid)
+        async with self.store.bot_lock(bot_uuid):
+            if await self.store.get_operation(bot_uuid, operation_id) is None:
+                if await self._pending_signin_confirmations(bot_uuid):
+                    raise ValueError('存在未完成的签到确认操作。')
             await self._execute_reward_rules_unlocked(
                 bot_uuid,
                 operation_id,
                 expected,
             )
-        return f'积分规则已更新：推广人 {promoter_points}，受邀人 {invitee_points}'
+        return response
 
     async def _admin_adjust_points(
         self,
@@ -774,6 +942,7 @@ class GrowthService:
             'redeem': 2,
             'activate': 2,
             'points': 4,
+            'signin-confirmed': 4,
             'admin-reward-rules': 4,
         }
         priority = (
@@ -782,6 +951,39 @@ class GrowthService:
             else priorities.get(operation.kind, 5)
         )
         return priority, _parse_time(operation.created_at)
+
+    @staticmethod
+    def _signin_confirmation_payload(
+        operation: GrowthOperation,
+        *,
+        expected_identity: str | None = None,
+    ) -> dict[str, object]:
+        identity = operation.payload.get('identity_hash')
+        confirmed_at = operation.payload.get('confirmed_at')
+        if (
+            operation.kind != 'signin-confirmed'
+            or operation.status not in {'PENDING', 'COMMITTED'}
+            or set(operation.payload) != {'identity_hash', 'confirmed_at'}
+            or type(identity) is not str
+            or type(confirmed_at) is not str
+            or re.fullmatch(r'[0-9a-f]{64}', identity) is None
+            or operation.operation_id
+            != f'{_SIGNIN_CONFIRMATION_PREFIX}{identity}'
+            or confirmed_at != operation.created_at
+            or tuple(operation.applied_steps)
+            not in {(), ('referral-processed',)}
+            or (
+                operation.status == 'COMMITTED'
+                and operation.applied_steps != ('referral-processed',)
+            )
+            or (expected_identity is not None and identity != expected_identity)
+        ):
+            raise ValueError('签到确认操作审计记录格式错误。')
+        try:
+            _parse_time(confirmed_at)
+        except ValueError as exc:
+            raise ValueError('签到确认操作时间格式错误。') from exc
+        return dict(operation.payload)
 
     @staticmethod
     def _reward_rules_operation_id(request_id: str) -> str:

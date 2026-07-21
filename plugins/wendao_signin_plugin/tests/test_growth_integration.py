@@ -19,14 +19,16 @@ from components.account_session import ACCOUNT_NOT_BOUND_MESSAGE, AccountNotBoun
 from components.command_parser import ParsedCommand
 from components.entitlement import EntitlementExpiredError
 from components.growth_service import GrowthService
-from components.growth_models import GrowthConfigRecord, GrowthOperation
+from components.growth_models import GrowthConfigRecord, GrowthOperation, ReferralRecord
 from components.growth_store import (
     ENTITLEMENT_PREFIX,
     GROWTH_CONFIG_PREFIX,
     GROWTH_OPERATION_PREFIX,
     PRODUCT_PREFIX,
     PROMOTER_PREFIX,
+    REFERRAL_PREFIX,
     GrowthStore,
+    growth_storage_key,
     identity_hash,
 )
 from components.models import AccountRecord, Credentials
@@ -114,6 +116,47 @@ def extract_invite_code(text: str) -> str:
     match = re.search(r'\b[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}\b', text)
     assert match is not None
     return match.group(0)
+
+
+async def build_pending_bound_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    invitee_sender_id: str = 'invitee',
+) -> tuple[AccountStore, GrowthService, str, AccountRecord]:
+    _, accounts, service = build_service()
+    promoter = account('bot-a', 'promoter', 'wd-promoter')
+    await accounts.save(promoter)
+    await service.initialize(at='2026-07-20T00:00:00+08:00')
+    code = extract_invite_code(await service.promotion('bot-a', 'promoter'))
+    await service.bind_referral(
+        'bot-a',
+        invitee_sender_id,
+        code,
+        at='2026-07-20T01:00:00+08:00',
+    )
+    invitee = account(
+        'bot-a',
+        invitee_sender_id,
+        f'wd-{invitee_sender_id}',
+    )
+    await accounts.save(invitee)
+    await service.on_account_bound(
+        invitee,
+        at='2026-07-20T02:00:00+08:00',
+    )
+    original_config = service._config
+
+    async def fail_config_once(bot_uuid: str, *, at: str | None = None):
+        monkeypatch.setattr(service, '_config', original_config)
+        raise RuntimeError('simulated config selection interruption')
+
+    monkeypatch.setattr(service, '_config', fail_config_once)
+    with pytest.raises(RuntimeError, match='config selection interruption'):
+        await service.on_signin_confirmed(
+            invitee,
+            at='2026-07-20T03:00:00+08:00',
+        )
+    return accounts, service, code, invitee
 
 
 async def invoke_command(
@@ -306,6 +349,809 @@ def test_referral_binding_and_first_signin_use_persisted_reward_rules() -> None:
     asyncio.run(scenario())
 
 
+def test_signin_confirmation_config_failure_recovers_referral_once(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        storage, accounts, service = build_service()
+        promoter = account('bot-a', 'promoter', 'wd-promoter')
+        await accounts.save(promoter)
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        code = extract_invite_code(await service.promotion('bot-a', 'promoter'))
+        await service.bind_referral(
+            'bot-a',
+            'invitee',
+            code,
+            at='2026-07-21T00:00:00+08:00',
+        )
+        invitee = account('bot-a', 'invitee', 'wd-invitee')
+        await accounts.save(invitee)
+        await service.on_account_bound(invitee, at='2026-07-21T01:00:00+08:00')
+
+        original_config = service._config
+        failed = False
+
+        async def fail_config_once(bot_uuid: str, *, at: str | None = None):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError('simulated config selection interruption')
+            return await original_config(bot_uuid, at=at)
+
+        monkeypatch.setattr(service, '_config', fail_config_once)
+        confirmed_at = '2026-07-22T00:00:00+08:00'
+        with pytest.raises(RuntimeError, match='config selection interruption'):
+            await service.on_signin_confirmed(invitee, at=confirmed_at)
+
+        invitee_hash = identity_hash('bot-a', 'invitee')
+        operation_id = f'signin-confirmed:{invitee_hash}'
+        pending = await service.store.list_pending_operations('bot-a')
+        confirmation = next(
+            operation
+            for operation in pending.records
+            if operation.operation_id == operation_id
+        )
+        assert confirmation.kind == 'signin-confirmed'
+        assert confirmation.payload == {
+            'identity_hash': invitee_hash,
+            'confirmed_at': confirmed_at,
+        }
+        operation_raw = storage.values[
+            f'{GROWTH_OPERATION_PREFIX}bot-a:{operation_id}'
+        ]
+        assert b'invitee' not in operation_raw
+
+        _, _, restarted = build_service(storage)
+        await restarted.initialize(at='2026-07-23T00:00:00+08:00')
+        relation = await restarted.store.get(
+            growth_storage_key(REFERRAL_PREFIX, 'bot-a', invitee_hash),
+            ReferralRecord,
+        )
+        committed = await restarted.store.get_operation('bot-a', operation_id)
+
+        assert relation is not None and relation.status == 'effective'
+        assert committed is not None and committed.status == 'COMMITTED'
+        assert committed.applied_steps == ('referral-processed',)
+        assert '100' in await restarted.points('bot-a', 'promoter')
+        assert '20' in await restarted.points('bot-a', 'invitee')
+
+        await restarted.initialize(at='2026-07-24T00:00:00+08:00')
+        replayed = await restarted.store.get_operation('bot-a', operation_id)
+        assert replayed == committed
+        assert '100' in await restarted.points('bot-a', 'promoter')
+        assert '20' in await restarted.points('bot-a', 'invitee')
+
+    asyncio.run(scenario())
+
+
+def test_initialize_retries_confirmation_after_pending_referral_is_bound(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        storage, accounts, service = build_service()
+        promoter = account('bot-a', 'promoter', 'wd-promoter')
+        await accounts.save(promoter)
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        code = extract_invite_code(await service.promotion('bot-a', 'promoter'))
+        relation = await service.referral_service.register_invite(
+            'bot-a',
+            'invitee',
+            code,
+            at='2026-07-21T00:00:00+08:00',
+        )
+        invitee = account('bot-a', 'invitee', 'wd-invitee')
+        await accounts.save(invitee)
+        storage.fail_prefix_once = f'{REFERRAL_PREFIX}bot-a:'
+        with pytest.raises(RuntimeError, match='interruption'):
+            await service.on_account_bound(
+                invitee,
+                at='2026-07-21T01:00:00+08:00',
+            )
+
+        original_config = service._config
+        failed = False
+
+        async def fail_config_once(bot_uuid: str, *, at: str | None = None):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError('simulated config selection interruption')
+            return await original_config(bot_uuid, at=at)
+
+        monkeypatch.setattr(service, '_config', fail_config_once)
+        with pytest.raises(RuntimeError, match='config selection interruption'):
+            await service.on_signin_confirmed(
+                invitee,
+                at='2026-07-22T00:00:00+08:00',
+            )
+
+        before_restart = await service.store.get(
+            growth_storage_key(REFERRAL_PREFIX, 'bot-a', relation.invitee_hash),
+            ReferralRecord,
+        )
+        assert before_restart is not None and before_restart.status == 'pending'
+
+        _, _, restarted = build_service(storage)
+        await restarted.initialize(at='2026-07-23T00:00:00+08:00')
+        recovered = await restarted.store.get(
+            growth_storage_key(REFERRAL_PREFIX, 'bot-a', relation.invitee_hash),
+            ReferralRecord,
+        )
+        operation = await restarted.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{relation.invitee_hash}',
+        )
+
+        assert recovered is not None and recovered.status == 'effective'
+        assert operation is not None and operation.status == 'COMMITTED'
+        assert '100' in await restarted.points('bot-a', 'promoter')
+        assert '20' in await restarted.points('bot-a', 'invitee')
+
+    asyncio.run(scenario())
+
+
+def test_signin_confirmation_without_referral_commits_idempotently() -> None:
+    async def scenario() -> None:
+        _, accounts, service = build_service()
+        standalone = account('bot-a', 'standalone', 'wd-standalone')
+        await accounts.save(standalone)
+
+        await service.on_signin_confirmed(
+            standalone,
+            at='2026-07-22T00:00:00+08:00',
+        )
+        await service.on_signin_confirmed(
+            standalone,
+            at='2026-07-23T00:00:00+08:00',
+        )
+
+        identity = identity_hash('bot-a', 'standalone')
+        operation = await service.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{identity}',
+        )
+        assert operation is not None and operation.status == 'COMMITTED'
+        assert operation.created_at == '2026-07-22T00:00:00+08:00'
+        assert operation.applied_steps == ('referral-processed',)
+        assert '0' in await service.points('bot-a', 'standalone')
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_update_resolves_earlier_confirmation_with_old_rules(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        accounts, service, code, old_invitee = (
+            await build_pending_bound_confirmation(
+                monkeypatch,
+                invitee_sender_id='old-invitee',
+            )
+        )
+
+        response = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id='rules-after-pending-confirmation',
+        )
+        await service.recover_pending()
+
+        old_identity = identity_hash('bot-a', 'old-invitee')
+        confirmation = await service.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{old_identity}',
+        )
+        config = await service._config('bot-a')
+        assert response == '积分规则已更新：推广人 150，受邀人 30'
+        assert confirmation is not None and confirmation.status == 'COMMITTED'
+        assert await service.points_service.balance(
+            'bot-a',
+            identity_hash('bot-a', 'promoter'),
+        ) == 100
+        assert await service.points_service.balance('bot-a', old_identity) == 20
+        assert config.promoter_reward_points == 150
+        assert config.invitee_reward_points == 30
+
+        await service.bind_referral(
+            'bot-a',
+            'new-invitee',
+            code,
+            at='2026-07-20T04:00:00+08:00',
+        )
+        new_invitee = account('bot-a', 'new-invitee', 'wd-new-invitee')
+        await accounts.save(new_invitee)
+        await service.on_account_bound(
+            new_invitee,
+            at='2026-07-20T05:00:00+08:00',
+        )
+        await service.on_signin_confirmed(
+            new_invitee,
+            at='2026-07-20T06:00:00+08:00',
+        )
+
+        assert await service.points_service.balance(
+            'bot-a',
+            identity_hash('bot-a', 'promoter'),
+        ) == 250
+        assert await service.points_service.balance(
+            'bot-a',
+            identity_hash('bot-a', 'new-invitee'),
+        ) == 30
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_update_fails_before_write_when_confirmation_still_fails(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        _, service, _, _ = await build_pending_bound_confirmation(monkeypatch)
+
+        async def fail_confirmation(*args, **kwargs):
+            raise RuntimeError('simulated persistent confirmation interruption')
+
+        monkeypatch.setattr(
+            service.referral_service,
+            'on_signin_confirmed_identity',
+            fail_confirmation,
+        )
+        with pytest.raises(RuntimeError, match='persistent confirmation interruption'):
+            await service.admin(
+                'bot-a',
+                '积分规则 150 30',
+                request_id='rules-blocked-by-confirmation',
+            )
+
+        identity = identity_hash('bot-a', 'invitee')
+        confirmation = await service.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{identity}',
+        )
+        config = await service.store.get(
+            f'{GROWTH_CONFIG_PREFIX}bot-a:runtime',
+            GrowthConfigRecord,
+        )
+        reward_operation = await service.store.get_operation(
+            'bot-a',
+            'admin-reward-rules:'
+            + hashlib.sha256(b'rules-blocked-by-confirmation').hexdigest(),
+        )
+        assert confirmation is not None and confirmation.status == 'PENDING'
+        assert reward_operation is None
+        assert config is not None
+        assert config.promoter_reward_points == 100
+        assert config.invitee_reward_points == 20
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_update_rejects_signin_operation_with_mismatched_kind() -> None:
+    async def scenario() -> None:
+        _, _, service = build_service()
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        identity = identity_hash('bot-a', 'invitee')
+        operation_id = f'signin-confirmed:{identity}'
+        malformed = await service.store.begin_operation(
+            'bot-a',
+            operation_id,
+            'points',
+            {
+                'identity_hash': identity,
+                'confirmed_at': '2026-07-20T01:00:00+08:00',
+            },
+            '2026-07-20T01:00:00+08:00',
+        )
+
+        response = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id='rules-with-mismatched-confirmation',
+        )
+
+        config = await service._config('bot-a')
+        assert response.startswith('管理操作失败：签到确认操作')
+        assert await service.store.get_operation('bot-a', operation_id) == malformed
+        assert config.promoter_reward_points == 100
+        assert config.invitee_reward_points == 20
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_update_rejects_corrupt_scan_before_new_operation() -> None:
+    async def scenario() -> None:
+        storage, _, service = build_service()
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        request_id = 'new-rules-with-corrupt-confirmation'
+        operation_id = 'admin-reward-rules:' + hashlib.sha256(
+            request_id.encode()
+        ).hexdigest()
+        corrupt_key = f'{GROWTH_OPERATION_PREFIX}bot-a:signin-confirmed:broken'
+        storage.values[corrupt_key] = b'{not-json'
+
+        _, _, restarted = build_service(storage)
+        response = await restarted.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id=request_id,
+        )
+
+        config = await restarted._config('bot-a')
+        assert response.startswith('管理操作失败：增长操作日志包含损坏记录')
+        assert await restarted.store.get_operation(
+            'bot-a',
+            operation_id,
+        ) is None
+        assert config.promoter_reward_points == 100
+        assert config.invitee_reward_points == 20
+        assert storage.values[corrupt_key] == b'{not-json'
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_update_stays_old_when_referral_is_still_pending() -> None:
+    async def scenario() -> None:
+        _, accounts, service = build_service()
+        promoter = account('bot-a', 'promoter', 'wd-promoter')
+        await accounts.save(promoter)
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        code = extract_invite_code(await service.promotion('bot-a', 'promoter'))
+        await service.referral_service.register_invite(
+            'bot-a',
+            'invitee',
+            code,
+            at='2026-07-20T01:00:00+08:00',
+        )
+        invitee = account('bot-a', 'invitee', 'wd-invitee')
+        await accounts.save(invitee)
+        await service.on_signin_confirmed(
+            invitee,
+            at='2026-07-20T02:00:00+08:00',
+        )
+
+        response = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id='rules-blocked-by-pending-referral',
+        )
+
+        identity = identity_hash('bot-a', 'invitee')
+        confirmation = await service.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{identity}',
+        )
+        config = await service._config('bot-a')
+        assert '未完成的签到确认操作' in response
+        assert confirmation is not None and confirmation.status == 'PENDING'
+        assert config.promoter_reward_points == 100
+        assert config.invitee_reward_points == 20
+        assert await service.store.get_operation(
+            'bot-a',
+            'admin-reward-rules:'
+            + hashlib.sha256(b'rules-blocked-by-pending-referral').hexdigest(),
+        ) is None
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_update_rechecks_confirmations_inside_write_lock(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        _, _, service = build_service()
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        original_recover = service._recover_pending_signin_confirmations
+        identity = identity_hash('bot-a', 'racing-invitee')
+        operation_id = f'signin-confirmed:{identity}'
+
+        async def inject_confirmation_after_recovery(bot_uuid: str) -> None:
+            await original_recover(bot_uuid)
+            await service.store.begin_operation(
+                bot_uuid,
+                operation_id,
+                'signin-confirmed',
+                {
+                    'identity_hash': identity,
+                    'confirmed_at': '2026-07-20T01:00:00+08:00',
+                },
+                '2026-07-20T01:00:00+08:00',
+            )
+
+        monkeypatch.setattr(
+            service,
+            '_recover_pending_signin_confirmations',
+            inject_confirmation_after_recovery,
+        )
+        response = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id='rules-racing-confirmation',
+        )
+
+        config = await service._config('bot-a')
+        confirmation = await service.store.get_operation('bot-a', operation_id)
+        assert '未完成的签到确认操作' in response
+        assert confirmation is not None and confirmation.status == 'PENDING'
+        assert config.promoter_reward_points == 100
+        assert config.invitee_reward_points == 20
+        assert await service.store.get_operation(
+            'bot-a',
+            'admin-reward-rules:'
+            + hashlib.sha256(b'rules-racing-confirmation').hexdigest(),
+        ) is None
+
+    asyncio.run(scenario())
+
+
+def test_committed_reward_rule_replay_ignores_later_pending_confirmation() -> None:
+    async def scenario() -> None:
+        _, accounts, service = build_service()
+        promoter = account('bot-a', 'promoter', 'wd-promoter')
+        await accounts.save(promoter)
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        code = extract_invite_code(await service.promotion('bot-a', 'promoter'))
+        first = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id='committed-rules-replay',
+        )
+        committed_config = await service._config('bot-a')
+        await service.referral_service.register_invite(
+            'bot-a',
+            'invitee',
+            code,
+            at='2026-07-20T01:00:00+08:00',
+        )
+        invitee = account('bot-a', 'invitee', 'wd-invitee')
+        await accounts.save(invitee)
+        await service.on_signin_confirmed(
+            invitee,
+            at='2026-07-20T02:00:00+08:00',
+        )
+
+        replay = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id='committed-rules-replay',
+        )
+
+        identity = identity_hash('bot-a', 'invitee')
+        confirmation = await service.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{identity}',
+        )
+        assert replay == first
+        assert await service._config('bot-a') == committed_config
+        assert confirmation is not None and confirmation.status == 'PENDING'
+
+    asyncio.run(scenario())
+
+
+def test_pending_reward_rule_replay_precedes_later_confirmation() -> None:
+    async def scenario() -> None:
+        _, accounts, service = build_service()
+        promoter = account('bot-a', 'promoter', 'wd-promoter')
+        await accounts.save(promoter)
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        code = extract_invite_code(await service.promotion('bot-a', 'promoter'))
+        request_id = 'pending-rules-replay'
+        reward_operation_id = 'admin-reward-rules:' + hashlib.sha256(
+            request_id.encode()
+        ).hexdigest()
+        await service.store.begin_operation(
+            'bot-a',
+            reward_operation_id,
+            'admin-reward-rules',
+            {'promoter_reward_points': 150, 'invitee_reward_points': 30},
+            '2026-07-20T01:00:00+08:00',
+        )
+        await service.referral_service.register_invite(
+            'bot-a',
+            'invitee',
+            code,
+            at='2026-07-20T02:00:00+08:00',
+        )
+        invitee = account('bot-a', 'invitee', 'wd-invitee')
+        await accounts.save(invitee)
+        await service.on_signin_confirmed(
+            invitee,
+            at='2026-07-20T03:00:00+08:00',
+        )
+
+        replay = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id=request_id,
+        )
+
+        identity = identity_hash('bot-a', 'invitee')
+        reward_operation = await service.store.get_operation(
+            'bot-a',
+            reward_operation_id,
+        )
+        confirmation = await service.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{identity}',
+        )
+        config = await service._config('bot-a')
+        assert replay == '积分规则已更新：推广人 150，受邀人 30'
+        assert reward_operation is not None
+        assert reward_operation.status == 'COMMITTED'
+        assert confirmation is not None and confirmation.status == 'PENDING'
+        assert config.promoter_reward_points == 150
+        assert config.invitee_reward_points == 30
+
+        await service.on_account_bound(
+            invitee,
+            at='2026-07-20T04:00:00+08:00',
+        )
+        await service.recover_pending()
+
+        assert await service.points_service.balance(
+            'bot-a',
+            identity_hash('bot-a', 'promoter'),
+        ) == 150
+        assert await service.points_service.balance('bot-a', identity) == 30
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_payload_conflict_precedes_later_confirmation_barrier() -> None:
+    async def scenario() -> None:
+        _, accounts, service = build_service()
+        promoter = account('bot-a', 'promoter', 'wd-promoter')
+        await accounts.save(promoter)
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        code = extract_invite_code(await service.promotion('bot-a', 'promoter'))
+        await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id='conflicting-rules-replay',
+        )
+        await service.referral_service.register_invite(
+            'bot-a',
+            'invitee',
+            code,
+            at='2026-07-20T01:00:00+08:00',
+        )
+        invitee = account('bot-a', 'invitee', 'wd-invitee')
+        await accounts.save(invitee)
+        await service.on_signin_confirmed(
+            invitee,
+            at='2026-07-20T02:00:00+08:00',
+        )
+
+        conflict = await service.admin(
+            'bot-a',
+            '积分规则 200 40',
+            request_id='conflicting-rules-replay',
+        )
+
+        config = await service._config('bot-a')
+        assert conflict == '管理操作失败：请求 ID 已用于其他管理操作。'
+        assert config.promoter_reward_points == 150
+        assert config.invitee_reward_points == 30
+
+    asyncio.run(scenario())
+
+
+def test_reward_rule_created_during_barrier_keeps_its_sequence_point(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        _, _, service = build_service()
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        request_id = 'rules-created-during-barrier'
+        reward_operation_id = 'admin-reward-rules:' + hashlib.sha256(
+            request_id.encode()
+        ).hexdigest()
+        identity = identity_hash('bot-a', 'racing-invitee')
+        confirmation_id = f'signin-confirmed:{identity}'
+        original_recover = service._recover_pending_signin_confirmations
+
+        async def inject_operations_after_recovery(bot_uuid: str) -> None:
+            await original_recover(bot_uuid)
+            await service.store.begin_operation(
+                bot_uuid,
+                reward_operation_id,
+                'admin-reward-rules',
+                {'promoter_reward_points': 150, 'invitee_reward_points': 30},
+                '2026-07-20T01:00:00+08:00',
+            )
+            await service.store.begin_operation(
+                bot_uuid,
+                confirmation_id,
+                'signin-confirmed',
+                {
+                    'identity_hash': identity,
+                    'confirmed_at': '2026-07-20T02:00:00+08:00',
+                },
+                '2026-07-20T02:00:00+08:00',
+            )
+
+        monkeypatch.setattr(
+            service,
+            '_recover_pending_signin_confirmations',
+            inject_operations_after_recovery,
+        )
+        response = await service.admin(
+            'bot-a',
+            '积分规则 150 30',
+            request_id=request_id,
+        )
+
+        reward_operation = await service.store.get_operation(
+            'bot-a',
+            reward_operation_id,
+        )
+        confirmation = await service.store.get_operation(
+            'bot-a',
+            confirmation_id,
+        )
+        config = await service._config('bot-a')
+        assert response == '积分规则已更新：推广人 150，受邀人 30'
+        assert reward_operation is not None
+        assert reward_operation.status == 'COMMITTED'
+        assert confirmation is not None and confirmation.status == 'PENDING'
+        assert config.promoter_reward_points == 150
+        assert config.invitee_reward_points == 30
+
+    asyncio.run(scenario())
+
+
+def test_signin_confirmation_recovery_accepts_committed_current_from_stale_snapshot(
+) -> None:
+    async def scenario() -> None:
+        _, _, service = build_service()
+        identity = identity_hash('bot-a', 'invitee')
+        operation_id = f'signin-confirmed:{identity}'
+        timestamp = '2026-07-20T01:00:00+08:00'
+        snapshot = await service.store.begin_operation(
+            'bot-a',
+            operation_id,
+            'signin-confirmed',
+            {'identity_hash': identity, 'confirmed_at': timestamp},
+            timestamp,
+        )
+        await service.store.mark_step_applied(
+            'bot-a',
+            operation_id,
+            'referral-processed',
+            '2026-07-20T01:01:00+08:00',
+        )
+        committed = await service.store.commit_operation(
+            'bot-a',
+            operation_id,
+            '2026-07-20T01:02:00+08:00',
+        )
+
+        await service._recover_signin_confirmation(snapshot)
+
+        assert await service.store.get_operation('bot-a', operation_id) == committed
+
+    asyncio.run(scenario())
+
+
+def test_signin_confirmation_recovery_rejects_replaced_immutable_fields() -> None:
+    async def scenario() -> None:
+        _, _, service = build_service()
+        identity = identity_hash('bot-a', 'invitee')
+        operation_id = f'signin-confirmed:{identity}'
+        timestamp = '2026-07-20T01:00:00+08:00'
+        snapshot = await service.store.begin_operation(
+            'bot-a',
+            operation_id,
+            'signin-confirmed',
+            {'identity_hash': identity, 'confirmed_at': timestamp},
+            timestamp,
+        )
+        replaced_at = '2026-07-20T02:00:00+08:00'
+        replacement = replace(
+            snapshot,
+            payload={
+                'identity_hash': identity,
+                'confirmed_at': replaced_at,
+            },
+            created_at=replaced_at,
+            updated_at=replaced_at,
+        )
+        await service.store.save(
+            f'{GROWTH_OPERATION_PREFIX}bot-a:{operation_id}',
+            replacement,
+        )
+
+        with pytest.raises(ValueError, match='签到确认操作'):
+            await service._recover_signin_confirmation(snapshot)
+
+        assert await service.store.get_operation(
+            'bot-a',
+            operation_id,
+        ) == replacement
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_reward_barriers_accept_shared_confirmation_snapshot(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        _, service, _, _ = await build_pending_bound_confirmation(monkeypatch)
+
+        original_recover = service._recover_signin_confirmation
+        recovery_snapshots: list[GrowthOperation] = []
+        both_snapshots_ready = asyncio.Event()
+        first_confirmation_done = asyncio.Event()
+        first_admin_done = asyncio.Event()
+
+        async def synchronize_recovery(operation: GrowthOperation) -> None:
+            recovery_snapshots.append(operation)
+            if len(recovery_snapshots) == 2:
+                both_snapshots_ready.set()
+            await both_snapshots_ready.wait()
+            task = asyncio.current_task()
+            assert task is not None
+            if task.get_name() == 'reward-rules-a':
+                await original_recover(operation)
+                first_confirmation_done.set()
+                return
+            await first_confirmation_done.wait()
+            await original_recover(operation)
+            await first_admin_done.wait()
+
+        monkeypatch.setattr(
+            service,
+            '_recover_signin_confirmation',
+            synchronize_recovery,
+        )
+
+        async def update_first_rules() -> str:
+            try:
+                return await service.admin(
+                    'bot-a',
+                    '积分规则 150 30',
+                    request_id='concurrent-rules-a',
+                )
+            finally:
+                first_admin_done.set()
+
+        first = asyncio.create_task(
+            update_first_rules(),
+            name='reward-rules-a',
+        )
+        second = asyncio.create_task(
+            service.admin(
+                'bot-a',
+                '积分规则 200 40',
+                request_id='concurrent-rules-b',
+            ),
+            name='reward-rules-b',
+        )
+        responses = await asyncio.gather(first, second)
+
+        identity = identity_hash('bot-a', 'invitee')
+        confirmation = await service.store.get_operation(
+            'bot-a',
+            f'signin-confirmed:{identity}',
+        )
+        config = await service._config('bot-a')
+        assert len(recovery_snapshots) == 2
+        assert recovery_snapshots[0] == recovery_snapshots[1]
+        assert recovery_snapshots[0].status == 'PENDING'
+        assert responses == [
+            '积分规则已更新：推广人 150，受邀人 30',
+            '积分规则已更新：推广人 200，受邀人 40',
+        ]
+        assert confirmation is not None and confirmation.status == 'COMMITTED'
+        assert await service.points_service.balance(
+            'bot-a',
+            identity_hash('bot-a', 'promoter'),
+        ) == 100
+        assert await service.points_service.balance('bot-a', identity) == 20
+        assert config.promoter_reward_points == 200
+        assert config.invitee_reward_points == 40
+
+    asyncio.run(scenario())
+
+
 def test_promotion_requires_binding_and_referral_uses_stored_binding_state() -> None:
     async def scenario() -> None:
         _, accounts, service = build_service()
@@ -399,6 +1245,76 @@ def test_admin_commerce_flow_and_cross_user_activation() -> None:
         assert card_code.group(0) not in await service.shop('bot-a')
         assert card_code.group(0) not in await service.admin('bot-a', '统计')
         assert card_code.group(0) not in await service.redemptions('bot-a', 'buyer')
+
+    asyncio.run(scenario())
+
+
+def test_growth_redeem_replay_after_activation_reports_code_is_hidden() -> None:
+    async def scenario() -> None:
+        storage, accounts, service = build_service()
+        buyer = account('bot-a', 'buyer', 'wd-buyer')
+        recipient = account('bot-a', 'recipient', 'wd-recipient')
+        await accounts.save(buyer)
+        await accounts.save(recipient)
+        await service.initialize(at='2026-07-20T00:00:00+08:00')
+        await service.admin(
+            'bot-a',
+            '商品新增 30 天使用期限 500 30',
+            request_id='admin-product-1',
+        )
+        await service.admin(
+            'bot-a',
+            '商品上架 P000001',
+            request_id='admin-enable-1',
+        )
+        await service.admin(
+            'bot-a',
+            '库存增加 P000001 1',
+            request_id='admin-stock-1',
+        )
+        await service.admin(
+            'bot-a',
+            '积分调整 buyer 1000 测试发放',
+            request_id='admin-points-1',
+        )
+        redeemed = await service.redeem(
+            'bot-a',
+            'buyer',
+            'P000001',
+            request_id='redeem-1',
+        )
+        card_match = re.search(r'WD-[A-Za-z0-9_-]{43}', redeemed)
+        assert card_match is not None
+        card_code = card_match.group(0)
+        activated = await service.activate(
+            'bot-a',
+            'recipient',
+            card_code,
+            at='2026-07-21T00:00:00+08:00',
+        )
+
+        _, _, restarted = build_service(storage)
+        await restarted.initialize(at='2026-07-22T00:00:00+08:00')
+        replay = await restarted.redeem(
+            'bot-a',
+            'buyer',
+            'P000001',
+            request_id='redeem-1',
+        )
+        recipient_entitlement = await restarted.entitlement(
+            'bot-a',
+            'recipient',
+            now='2026-07-22T00:00:00+08:00',
+        )
+
+        assert card_code not in replay
+        assert '兑换已完成' in replay
+        assert '已激活' in replay
+        assert '不再回显' in replay
+        assert '500' in await restarted.points('bot-a', 'buyer')
+        assert '已激活' in await restarted.redemptions('bot-a', 'buyer')
+        assert card_code not in await restarted.redemptions('bot-a', 'buyer')
+        assert activated.rsplit('：', 1)[-1] in recipient_entitlement
 
     asyncio.run(scenario())
 
@@ -1229,5 +2145,36 @@ def test_recover_pending_rejects_unknown_and_corrupt_operations() -> None:
         storage.values['growth-op:v1:corrupt-bot:broken'] = b'{not-json'
         with pytest.raises(ValueError, match='损坏'):
             await corrupt_service.recover_pending()
+
+    asyncio.run(scenario())
+
+
+def test_recover_pending_rejects_inconsistent_signin_confirmation() -> None:
+    async def scenario() -> None:
+        _, _, service = build_service()
+        identity = identity_hash('bot-a', 'invitee')
+        operation_id = f'signin-confirmed:{identity}'
+        malformed = GrowthOperation(
+            bot_uuid='bot-a',
+            operation_id=operation_id,
+            kind='signin-confirmed',
+            status='PENDING',
+            payload={
+                'identity_hash': 'a' * 64,
+                'confirmed_at': '2026-07-20T00:00:00+08:00',
+            },
+            applied_steps=(),
+            created_at='2026-07-20T00:00:00+08:00',
+            updated_at='2026-07-20T00:00:00+08:00',
+        )
+        await service.store.save(
+            f'{GROWTH_OPERATION_PREFIX}bot-a:{operation_id}',
+            malformed,
+        )
+
+        with pytest.raises(ValueError, match='签到确认操作'):
+            await service.recover_pending()
+        current = await service.store.get_operation('bot-a', operation_id)
+        assert current is not None and current.status == 'PENDING'
 
     asyncio.run(scenario())

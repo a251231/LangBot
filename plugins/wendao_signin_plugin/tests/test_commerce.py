@@ -1489,6 +1489,80 @@ def test_cross_user_activation_extends_once_and_hides_activated_code_from_histor
     asyncio.run(scenario())
 
 
+def test_redeem_replay_after_activation_never_returns_card_code() -> None:
+    async def scenario() -> None:
+        code = card_code('A')
+        storage, store, points, entitlement, commerce = build_services(codes=(code,))
+        product = await create_enabled_product(commerce)
+        redeemer = commerce.identity_for('bot-a', 'user-a')
+        await points.adjust('bot-a', redeemer, 1000, 'test credit', 'admin-credit-1')
+        await entitlement.ensure_for_binding(
+            'bot-a',
+            'user-b',
+            trial_days=30,
+            at='2026-07-20T00:00:00+08:00',
+        )
+        await commerce.add_inventory(
+            'bot-a',
+            product.product_id,
+            1,
+            request_id='inventory-1',
+        )
+        redeemed = await commerce.redeem(
+            'bot-a',
+            'user-a',
+            product.product_id,
+            request_id='redeem-1',
+            at='2026-07-20T01:00:00+08:00',
+        )
+        activated = await commerce.activate(
+            'bot-a',
+            'user-b',
+            redeemed.card_code,
+            at='2026-07-21T00:00:00+08:00',
+        )
+        current_replay = await commerce.redeem(
+            'bot-a',
+            'user-a',
+            product.product_id,
+            request_id='redeem-1',
+            at='2026-07-21T01:00:00+08:00',
+        )
+
+        restarted_store, restarted_points, restarted_entitlement, restarted = (
+            restart_services(storage)
+        )
+        replay = await restarted.redeem(
+            'bot-a',
+            'user-a',
+            product.product_id,
+            request_id='redeem-1',
+            at='2026-07-22T00:00:00+08:00',
+        )
+        card = await restarted_store.get(
+            growth_storage_key(CARD_PREFIX, 'bot-a', redeemed.redemption.card_hash),
+            CardRecord,
+        )
+        entitlement_after = await restarted_entitlement.get_status(
+            'bot-a',
+            'user-b',
+            now='2026-07-22T00:00:00+08:00',
+        )
+
+        assert replay.redemption == redeemed.redemption
+        assert current_replay.redemption == redeemed.redemption
+        assert current_replay.card_code == ''
+        assert replay.card_code == ''
+        assert code not in repr(current_replay)
+        assert code not in repr(replay)
+        assert card is not None and card.status == 'ACTIVATED'
+        assert entitlement_after.expires_at == activated.expires_at
+        assert await restarted_points.balance('bot-a', redeemer) == 500
+        assert (await restarted.list_products('bot-a'))[0].available_stock == 0
+
+    asyncio.run(scenario())
+
+
 def test_activation_interruption_uses_fixed_target_expiry_on_retry() -> None:
     async def scenario() -> None:
         code = card_code('A')

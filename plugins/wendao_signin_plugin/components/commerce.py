@@ -787,7 +787,11 @@ class CommerceService:
             or card.duration_days != cast(int, payload_extra['duration_days'])
         ):
             raise CommerceStorageError('兑换操作与卡密商品快照不一致。')
-        code = await self._decrypt_card_unlocked(bot_uuid, card)
+        code = (
+            await self._decrypt_card_unlocked(bot_uuid, card)
+            if card.status != 'ACTIVATED'
+            else ''
+        )
         await self._points._apply_operation_unlocked(
             bot_uuid,
             operation_id,

@@ -156,6 +156,23 @@ class ReferralService:
         invitee_reward_points: int,
         at: str | None = None,
     ) -> ReferralRecord | None:
+        return await self.on_signin_confirmed_identity(
+            bot_uuid,
+            identity_hash(bot_uuid, invitee_sender_id),
+            promoter_reward_points=promoter_reward_points,
+            invitee_reward_points=invitee_reward_points,
+            at=at,
+        )
+
+    async def on_signin_confirmed_identity(
+        self,
+        bot_uuid: str,
+        invitee_hash: str,
+        *,
+        promoter_reward_points: int,
+        invitee_reward_points: int,
+        at: str | None = None,
+    ) -> ReferralRecord | None:
         if (
             type(promoter_reward_points) is not int
             or type(invitee_reward_points) is not int
@@ -163,7 +180,8 @@ class ReferralService:
             or invitee_reward_points < 0
         ):
             raise ValueError('推广奖励积分必须是非负整数。')
-        invitee_hash = identity_hash(bot_uuid, invitee_sender_id)
+        if re.fullmatch(r'[0-9a-f]{64}', invitee_hash) is None:
+            raise ValueError('受邀用户身份摘要格式错误。')
         operation_id = f'referral-effective:{invitee_hash}'
         operation = await self._store.get_operation(bot_uuid, operation_id)
         async with self._store.bot_lock(bot_uuid):
