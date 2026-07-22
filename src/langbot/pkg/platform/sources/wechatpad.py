@@ -7,7 +7,7 @@ import httpx
 from langbot.libs.wechatpad_api.client import WeChatPadClient
 from langbot.pkg.platform.sources.wechatpad_message_guard import (
     WeChatPadMessageDeduplicator,
-    is_wechatpad_message,
+    is_wechatpad_text_message,
 )
 
 import typing
@@ -569,21 +569,22 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
     async def ws_message(self, data):
         """处理接收到的消息"""
 
-        if not is_wechatpad_message(data):
+        if not is_wechatpad_text_message(data):
             return 'ok'
         if self._message_deduplicator.is_duplicate(data):
             return 'ok'
 
         try:
             event = await self.event_converter.target2yiri(data.copy(), self.bot_account_id)
+            if event is not None and event.__class__ in self.listeners:
+                await self.listeners[event.__class__](event, self)
         except Exception:
             await self.logger.error(f'Error in wechatpad callback: {traceback.format_exc()}')
-            return 'ok'
-
-        if event is not None and event.__class__ in self.listeners:
-            await self.listeners[event.__class__](event, self)
 
         return 'ok'
+
+    def _submit_ws_message(self, event_loop: asyncio.AbstractEventLoop, data: dict) -> None:
+        asyncio.run_coroutine_threadsafe(self.ws_message(data), event_loop)
 
     async def _handle_message(self, message: platform_message.MessageChain, target_id: str):
         """统一消息处理核心逻辑"""
@@ -680,6 +681,8 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
         pass
 
     async def run_async(self):
+        event_loop = asyncio.get_running_loop()
+
         if not self.config['admin_key'] and not self.config['token']:
             raise RuntimeError('无wechatpad管理密匙，请填入配置文件后重启')
         else:
@@ -732,8 +735,7 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
             def on_message(ws, message):
                 try:
                     data = json.loads(message)
-                    # 这里需要确保ws_message是同步的，或者使用asyncio.run调用异步方法
-                    asyncio.run(self.ws_message(data))
+                    self._submit_ws_message(event_loop, data)
                 except json.JSONDecodeError:
                     self.logger.error(f'Non-JSON message: {message[:100]}...')
 

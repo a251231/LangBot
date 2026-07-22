@@ -10,6 +10,10 @@ def is_wechatpad_message(event: object) -> bool:
     return isinstance(sender, dict) and bool(sender.get('str'))
 
 
+def is_wechatpad_text_message(event: object) -> bool:
+    return isinstance(event, dict) and is_wechatpad_message(event) and event.get('msg_type') == 1
+
+
 class WeChatPadMessageDeduplicator:
     def __init__(self, max_entries: int = 4096):
         if max_entries < 1:
