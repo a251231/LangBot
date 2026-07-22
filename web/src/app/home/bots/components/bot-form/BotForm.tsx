@@ -13,6 +13,7 @@ import { IDynamicFormItemSchema } from '@/app/infra/entities/form/dynamic';
 import { UUID } from 'uuidjs';
 import DynamicFormComponent from '@/app/home/components/dynamic-form/DynamicFormComponent';
 import { httpClient } from '@/app/infra/http/HttpClient';
+import { systemInfo } from '@/app/infra/http';
 import { Bot } from '@/app/infra/entities/api';
 import { getAdapterDocUrl } from '@/app/infra/entities/adapter-docs';
 import { ExternalLink } from 'lucide-react';
@@ -267,6 +268,7 @@ export default function BotForm({
               type: parseDynamicFormItemType(item.type),
               options: item.options,
               show_if: item.show_if,
+              login_platform: item.login_platform,
             }),
         ),
       );
@@ -286,8 +288,7 @@ export default function BotForm({
         .then((res) => {
           const bot = res.bot;
           const runtimeValues = bot.adapter_runtime_values as
-            | Record<string, unknown>
-            | undefined;
+            Record<string, unknown> | undefined;
           resolve({
             adapter: bot.adapter,
             description: bot.description,
@@ -297,11 +298,9 @@ export default function BotForm({
             use_pipeline_uuid: bot.use_pipeline_uuid ?? '',
             pipeline_routing_rules: bot.pipeline_routing_rules ?? [],
             webhook_full_url: runtimeValues?.webhook_full_url as
-              | string
-              | undefined,
+              string | undefined,
             extra_webhook_full_url: runtimeValues?.extra_webhook_full_url as
-              | string
-              | undefined,
+              string | undefined,
           });
         })
         .catch((err) => {
@@ -618,6 +617,9 @@ export default function BotForm({
                 systemContext={{
                   webhook_url: webhookUrl,
                   extra_webhook_url: extraWebhookUrl,
+                  bot_uuid: initBotId || '',
+                  adapter_config: form.getValues('adapter_config') || {},
+                  outbound_ips: systemInfo.outbound_ips,
                 }}
               />
             )}
