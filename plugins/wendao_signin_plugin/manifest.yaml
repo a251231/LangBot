@@ -4,7 +4,7 @@ metadata:
   author: local
   name: wendao_signin_plugin
   repository: "https://github.com/langbot-app/LangBot"
-  version: 0.4.3
+  version: 0.5.0
   description:
     en_US: Phone login, scheduled sign-in, and weekly report assistant for Wendao Community.
     zh_Hans: 支持手机号登录、每日签到、补签、里程碑领取和心动周报的问道社区助手。

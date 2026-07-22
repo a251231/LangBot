@@ -15,7 +15,7 @@ def test_manifest_declares_langbot_plugin_and_expected_defaults() -> None:
     assert manifest["kind"] == "Plugin"
     assert manifest["metadata"]["author"] == "local"
     assert manifest["metadata"]["name"] == "wendao_signin_plugin"
-    assert manifest["metadata"]["version"] == "0.4.3"
+    assert manifest["metadata"]["version"] == "0.5.0"
     assert manifest["metadata"]["repository"] == "https://github.com/langbot-app/LangBot"
     assert manifest["metadata"]["icon"] == "assets/icon.svg"
     assert manifest["execution"]["python"] == {
