@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import sys
 import threading
+import time
 import types
 from functools import cache
 from unittest.mock import AsyncMock, patch
@@ -180,5 +181,32 @@ def test_main_loop_follow_up_task_is_not_cancelled_after_dispatch():
 
         assert worker.is_alive() is False
         await asyncio.wait_for(follow_up_finished.wait(), timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_outbound_send_does_not_block_main_event_loop():
+    async def scenario():
+        adapter = _build_adapter()
+        adapter.message_converter.yiri2target = AsyncMock(
+            return_value=[{'type': 'text', 'content': 'reply'}]
+        )
+        release = threading.Event()
+
+        def blocking_send(**kwargs):
+            release.wait(timeout=1)
+            return {'Code': 200}
+
+        adapter.bot.send_text_message = blocking_send
+        threading.Timer(0.2, release.set).start()
+
+        started = time.monotonic()
+        send_task = asyncio.create_task(adapter.send_message('person', 'wxid_target', object()))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.15
+        await send_task
 
     asyncio.run(scenario())

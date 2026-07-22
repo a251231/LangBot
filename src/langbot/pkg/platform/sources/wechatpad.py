@@ -596,8 +596,8 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
         at_targets = at_targets or []
         member_info = []
         if at_targets:
-            member_info = self.bot.get_chatroom_member_detail(
-                target_id,
+            member_info = (
+                await asyncio.to_thread(self.bot.get_chatroom_member_detail, target_id)
             )['Data']['member_data']['chatroom_member_list']
 
         # 处理消息组件
@@ -639,7 +639,7 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
             }
 
             if handler := handler_map.get(msg['type']):
-                handler(msg)
+                await asyncio.to_thread(handler, msg)
             else:
                 self.logger.warning(f'未处理的消息类型: {msg["type"]}')
                 continue
