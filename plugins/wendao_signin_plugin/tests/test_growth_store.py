@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Iterable
 from dataclasses import replace
+from typing import get_args
 
 import pytest
 
@@ -12,6 +13,8 @@ from components.growth_models import (
     EntitlementRecord,
     GrowthConfigRecord,
     GrowthOperation,
+    GrowthRecord,
+    GroupReplyRecord,
     PointAccount,
     PointEntry,
     ProductRecord,
@@ -25,6 +28,7 @@ from components.growth_store import (
     ENTITLEMENT_PREFIX,
     GROWTH_OPERATION_PREFIX,
     GROWTH_CONFIG_PREFIX,
+    GROUP_REPLY_PREFIX,
     INVITE_CODE_PREFIX,
     POINT_ACCOUNT_PREFIX,
     POINT_ENTRY_PREFIX,
@@ -160,6 +164,12 @@ def _model_samples() -> Iterable[object]:
         invitee_reward_points=20,
         updated_at='2026-07-20T00:00:00+08:00',
     )
+    yield GroupReplyRecord(
+        bot_uuid='bot-a',
+        group_hash='group-a',
+        enabled=True,
+        updated_at='2026-07-20T00:00:00+08:00',
+    )
     yield GrowthOperation(
         bot_uuid='bot-a',
         operation_id='operation-1',
@@ -219,6 +229,62 @@ def test_growth_config_rejects_invalid_updated_at_on_write_and_read(
     ).encode()
     with pytest.raises(ValueError, match='配置时间'):
         deserialize_record(raw, GrowthConfigRecord)
+
+
+def test_group_reply_record_is_a_supported_growth_record() -> None:
+    assert GroupReplyRecord in get_args(GrowthRecord)
+    assert GROUP_REPLY_PREFIX == 'group-reply:v1:'
+
+
+def test_group_reply_record_uses_hashed_group_key_and_isolates_bots() -> None:
+    async def scenario() -> None:
+        raw_group_id = 'group-sensitive-123'
+        first_hash = identity_hash('bot-a', raw_group_id)
+        second_hash = identity_hash('bot-b', raw_group_id)
+        first_key = growth_storage_key(GROUP_REPLY_PREFIX, 'bot-a', first_hash)
+        second_key = growth_storage_key(GROUP_REPLY_PREFIX, 'bot-b', second_hash)
+        record = GroupReplyRecord(
+            bot_uuid='bot-a',
+            group_hash=first_hash,
+            enabled=True,
+            updated_at='2026-07-20T00:00:00+08:00',
+        )
+        store = GrowthStore(FakeStorage())
+
+        await store.save(first_key, record)
+
+        assert raw_group_id not in first_key
+        assert first_key != second_key
+        assert await store.get(first_key, GroupReplyRecord) == record
+        assert await store.get(second_key, GroupReplyRecord) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('updated_at', ('', 'not-a-time', '2026-07-20T00:00:00'))
+def test_group_reply_record_rejects_invalid_updated_at(updated_at: str) -> None:
+    record = GroupReplyRecord(
+        bot_uuid='bot-a',
+        group_hash='group-a',
+        enabled=False,
+        updated_at=updated_at,
+    )
+
+    with pytest.raises(ValueError, match='群聊回复配置时间'):
+        serialize_record(record)
+
+    raw = json.dumps(
+        {
+            'schema_version': 1,
+            'bot_uuid': 'bot-a',
+            'group_hash': 'group-a',
+            'enabled': False,
+            'updated_at': updated_at,
+        },
+        separators=(',', ':'),
+    ).encode()
+    with pytest.raises(ValueError, match='群聊回复配置时间'):
+        deserialize_record(raw, GroupReplyRecord)
 
 
 def test_card_record_deserializes_product_name_snapshot() -> None:
@@ -541,6 +607,7 @@ def test_growth_store_rejects_stored_record_whose_payload_does_not_match_key() -
                 REDEMPTION_PREFIX,
                 ENTITLEMENT_PREFIX,
                 GROWTH_CONFIG_PREFIX,
+                GROUP_REPLY_PREFIX,
                 GROWTH_OPERATION_PREFIX,
             ),
             (
@@ -553,6 +620,7 @@ def test_growth_store_rejects_stored_record_whose_payload_does_not_match_key() -
                 'redemption-1',
                 'identity-a',
                 'runtime',
+                'group-a',
                 'operation-1',
             ),
             strict=True,

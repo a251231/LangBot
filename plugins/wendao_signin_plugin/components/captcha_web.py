@@ -34,13 +34,14 @@ class LoginCaptchaService(Protocol):
     ) -> None: ...
 
 
-CaptchaNotifier = Callable[[str, str, str, str], Awaitable[None]]
+CaptchaNotifier = Callable[[str, str, str, str, str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
 class CaptchaChallenge:
     bot_uuid: str
     sender_id: str
+    target_type: str
     target_id: str
     captcha_app_id: str
     expires_at_ms: int
@@ -153,6 +154,7 @@ class CaptchaWebServer:
         *,
         bot_uuid: str,
         sender_id: str,
+        target_type: str,
         target_id: str,
         captcha_app_id: str,
         expires_at_ms: int,
@@ -163,6 +165,9 @@ class CaptchaWebServer:
         expiry = int(expires_at_ms)
         if expiry <= self._clock_ms():
             raise ValueError('登录会话已过期。')
+        normalized_target_type = str(target_type).strip().lower()
+        if normalized_target_type not in {'person', 'group'}:
+            raise ValueError('验证码回复目标类型错误。')
 
         identity = (str(bot_uuid), str(sender_id))
         self.discard_identity(*identity)
@@ -179,6 +184,7 @@ class CaptchaWebServer:
         self._challenges[nonce] = CaptchaChallenge(
             bot_uuid=identity[0],
             sender_id=identity[1],
+            target_type=normalized_target_type,
             target_id=str(target_id),
             captcha_app_id=app_id,
             expires_at_ms=expiry,
@@ -345,6 +351,7 @@ class CaptchaWebServer:
                 await self._notify(
                     challenge.bot_uuid,
                     challenge.sender_id,
+                    challenge.target_type,
                     challenge.target_id,
                     '验证码已发送，请直接回复短信中的验证码，例如：123456。',
                 )

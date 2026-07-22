@@ -227,6 +227,25 @@ async def command(
     )
 
 
+async def group_command(
+    plugin: WendaoSigninPlugin,
+    kind: str,
+    argument: str = "",
+    *,
+    sender_id: str = "sender-test-1",
+    target_id: str = "group-test-1",
+    request_id: str = "",
+) -> str:
+    return await plugin.handle_wendao_command(
+        bot_uuid="bot-test-1",
+        sender_id=sender_id,
+        target_id=target_id,
+        is_group=True,
+        command=ParsedCommand(kind=kind, argument=argument),
+        request_id=request_id,
+    )
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -273,6 +292,298 @@ def test_admin_ids_are_trimmed_deduplicated_and_checked_at_runtime() -> None:
         assert plugin._admin_user_ids == {'sender-test-1', 'other-admin'}
         assert '商品列表' in allowed
         assert '无权限' in denied
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_group_reply_control_requires_admin_and_persists_per_group() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin()
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+
+        assert await group_command(
+            plugin,
+            'group_reply_control',
+            'on',
+            sender_id='not-admin',
+        ) == '无权限执行群聊回复设置。'
+        assert '目标群' in await command(plugin, 'group_reply_control', 'on')
+        assert '关闭' in await group_command(
+            plugin,
+            'group_reply_control',
+            'status',
+        )
+        assert '已开启' in await group_command(
+            plugin,
+            'group_reply_control',
+            'on',
+        )
+        assert '开启' in await group_command(
+            plugin,
+            'group_reply_control',
+            'status',
+        )
+        assert '关闭' in await group_command(
+            plugin,
+            'group_reply_control',
+            'status',
+            target_id='group-test-2',
+        )
+        assert not any('group-test-1' in key for key in plugin.values)
+
+        restarted = MemoryWendaoPlugin()
+        restarted.config['admin_user_ids'] = 'sender-test-1'
+        restarted.values = dict(plugin.values)
+        await restarted.initialize()
+
+        assert '开启' in await group_command(
+            restarted,
+            'group_reply_control',
+            'status',
+        )
+        assert '已关闭' in await group_command(
+            restarted,
+            'group_reply_control',
+            'off',
+        )
+        assert await group_command(restarted, 'help') == ''
+        plugin.scheduler.stop()
+        restarted.scheduler.stop()
+
+    run(scenario())
+
+
+def test_enabled_group_allows_planned_commands_and_redirects_private_only() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin()
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+
+        assert await group_command(plugin, 'help') == ''
+        await group_command(plugin, 'group_reply_control', 'on')
+
+        allowed = (
+            ('help', ''),
+            ('login_start', 'invalid-phone'),
+            ('login_captcha', 'rand ticket'),
+            ('login_code', '123456'),
+            ('bind', 'invalid-binding'),
+            ('referral_bind', 'INVALID'),
+            ('query', ''),
+            ('signin', ''),
+            ('resign', ''),
+            ('weekly_report', ''),
+            ('promotion', ''),
+            ('points', ''),
+            ('shop', ''),
+        )
+        for kind, argument in allowed:
+            reply = await group_command(plugin, kind, argument)
+            assert reply
+            assert '仅在私聊' not in reply
+
+        group_help = await group_command(plugin, 'help')
+        assert '问道登录 <手机号>' in group_help
+        assert '问道绑定 <登录响应>' in group_help
+        assert '问道邀请 <邀请码>' in group_help
+        assert '问道周报' in group_help
+        assert '问道自动' not in group_help
+        assert '问道兑换' not in group_help
+
+        private_only = (
+            ('schedule_time', '09:00'),
+            ('auto_signin', '开'),
+            ('auto_resign', '开'),
+            ('auto_milestone', '开'),
+            ('auto_weekly_report', '开'),
+            ('settings', ''),
+            ('redeem', 'P000001'),
+            ('redemptions', ''),
+            ('activate', 'WD-TEST'),
+            ('entitlement', ''),
+            ('unbind', ''),
+            ('admin', '商品列表'),
+        )
+        for kind, argument in private_only:
+            assert '私聊' in await group_command(plugin, kind, argument)
+
+        assert await group_command(
+            plugin,
+            'help',
+            target_id='group-test-2',
+        ) == ''
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_first_group_binding_skips_notifications_until_private_route_exists() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin([FakeApiClient({'signInStatus': 2})])
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+        await group_command(plugin, 'group_reply_control', 'on')
+
+        reply = await group_command(plugin, 'bind', BASE_CURL)
+        account = await plugin.account_store.get('bot-test-1', 'sender-test-1')
+
+        assert '绑定成功' in reply
+        assert account.target_type == 'person'
+        assert account.target_id == ''
+        await plugin._notify_account(account, '自动签到完成')
+        assert plugin.sent_messages == []
+
+        await plugin.handle_wendao_command(
+            bot_uuid='bot-test-1',
+            sender_id='sender-test-1',
+            target_id='person-target-new',
+            is_group=False,
+            command=ParsedCommand('help'),
+        )
+        refreshed = await plugin.account_store.get('bot-test-1', 'sender-test-1')
+        assert refreshed.target_type == 'person'
+        assert refreshed.target_id == 'person-target-new'
+        await plugin._notify_account(refreshed, '自动签到完成')
+        assert plugin.sent_messages[-1]['target_type'] == 'person'
+        assert plugin.sent_messages[-1]['target_id'] == 'person-target-new'
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_group_phone_login_uses_temporary_group_reply_route() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin()
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+        plugin.login_service = FakeLoginService(
+            BindingInput(
+                credentials=Credentials(
+                    token='TOKEN_TEST',
+                    device='DEVICE_TEST/Android/16',
+                    version='2.26.1',
+                    version_code='260604',
+                    guest_id='1030000000000000',
+                    client_type='wd_android',
+                )
+            )
+        )
+        captcha_server = FakeCaptchaServer()
+        plugin.captcha_server = captcha_server
+        await group_command(plugin, 'group_reply_control', 'on')
+
+        reply = await group_command(plugin, 'login_start', '13800138000')
+
+        assert '验证码链接' in reply
+        assert captcha_server.challenges == [
+            {
+                'bot_uuid': 'bot-test-1',
+                'sender_id': 'sender-test-1',
+                'target_type': 'group',
+                'target_id': 'group-test-1',
+                'captcha_app_id': 'APP_ID_PLUGIN_TEST',
+                'expires_at_ms': 1784363360000,
+            }
+        ]
+        await plugin._notify_login(
+            'bot-test-1',
+            'group',
+            'group-test-1',
+            '验证码已发送',
+        )
+        assert plugin.sent_messages[-1]['target_type'] == 'group'
+        assert plugin.sent_messages[-1]['target_id'] == 'group-test-1'
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_group_rebinding_preserves_existing_private_notification_route() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin(
+            [
+                FakeApiClient({'signInStatus': 2}),
+                FakeApiClient({'signInStatus': 2}),
+            ]
+        )
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+        assert '绑定成功' in await command(plugin, 'bind', BASE_CURL)
+        await group_command(plugin, 'group_reply_control', 'on')
+
+        assert '绑定成功' in await group_command(plugin, 'bind', BASE_CURL)
+        account = await plugin.account_store.get('bot-test-1', 'sender-test-1')
+
+        assert account.target_type == 'person'
+        assert account.target_id == 'person-target-1'
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_group_reply_storage_failure_fails_closed() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin()
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+        original_save = plugin.growth_store.save
+
+        async def fail_save(*args, **kwargs):
+            raise ValueError('storage failed')
+
+        plugin.growth_store.save = fail_save
+        assert '失败' in await group_command(
+            plugin,
+            'group_reply_control',
+            'on',
+        )
+        assert await group_command(plugin, 'help') == ''
+        plugin.growth_store.save = original_save
+
+        async def fail_read(*args, **kwargs):
+            raise ValueError('storage failed')
+
+        plugin.growth_store.get = fail_read
+
+        assert await group_command(plugin, 'help') == ''
+        assert '失败' in await group_command(
+            plugin,
+            'group_reply_control',
+            'status',
+        )
+        plugin.scheduler.stop()
+
+    run(scenario())
+
+
+def test_private_command_survives_notification_route_storage_failure() -> None:
+    async def scenario() -> None:
+        plugin = MemoryWendaoPlugin([FakeApiClient({'signInStatus': 2})])
+        plugin.config['admin_user_ids'] = 'sender-test-1'
+        await plugin.initialize()
+        await group_command(plugin, 'group_reply_control', 'on')
+        assert '绑定成功' in await group_command(plugin, 'bind', BASE_CURL)
+        original_save = plugin.account_store.save
+
+        async def fail_save(record):
+            raise ValueError('route storage failed')
+
+        plugin.account_store.save = fail_save
+
+        reply = await plugin.handle_wendao_command(
+            bot_uuid='bot-test-1',
+            sender_id='sender-test-1',
+            target_id='person-target-new',
+            is_group=False,
+            command=ParsedCommand('help'),
+        )
+
+        assert '问道签到助手命令' in reply
+        plugin.account_store.save = original_save
+        account = await plugin.account_store.get('bot-test-1', 'sender-test-1')
+        assert account.target_id == ''
         plugin.scheduler.stop()
 
     run(scenario())
@@ -358,7 +669,7 @@ def test_growth_commands_route_to_service_and_forward_request_ids() -> None:
                 {'request_id': 'query-admin-1'},
             ),
         ]
-        assert '私聊' in group_reply
+        assert group_reply == ''
         plugin.scheduler.stop()
 
     run(scenario())
@@ -444,6 +755,7 @@ def test_phone_login_commands_validate_and_save_dynamic_credentials() -> None:
             {
                 "bot_uuid": "bot-test-1",
                 "sender_id": "sender-test-1",
+                "target_type": "person",
                 "target_id": "person-target-1",
                 "captcha_app_id": "APP_ID_PLUGIN_TEST",
                 "expires_at_ms": 1784363360000,
@@ -764,7 +1076,7 @@ def test_query_uses_shared_workflow_and_unbind_removes_account() -> None:
     run(scenario())
 
 
-def test_help_group_policy_and_unbound_errors_are_clear() -> None:
+def test_help_default_group_policy_and_unbound_errors_are_clear() -> None:
     async def scenario() -> None:
         plugin = MemoryWendaoPlugin()
         await plugin.initialize()
@@ -789,7 +1101,7 @@ def test_help_group_policy_and_unbound_errors_are_clear() -> None:
             "尚未绑定问道账号，请发送“问道登录 11位手机号”开始登录。"
         )
         assert "问道绑定 <登录响应>" not in query_text
-        assert "私聊" in group_text
+        assert group_text == ''
         plugin.scheduler.stop()
 
     run(scenario())

@@ -127,6 +127,12 @@ def test_runtime_dependencies_and_documentation_are_complete() -> None:
         "问道管理 统计",
     ):
         assert command in readme
+    for command in (
+        "群聊回复 开始",
+        "群聊回复 关闭",
+        "群聊回复 状态",
+    ):
+        assert command in readme
     for config_name in (
         "admin_user_ids",
         "growth_trial_days",
@@ -152,6 +158,10 @@ def test_runtime_dependencies_and_documentation_are_complete() -> None:
     assert "自动发送短信验证码" in readme
     assert "直接回复短信中的验证码" in readme
     assert "高级兼容入口" in readme
+    assert "群聊回复默认关闭" in readme
+    assert "按机器人和群独立" in readme
+    assert "群内消息对所有成员可见" in readme
+    assert "自动通知始终使用最近一次有效私聊路由" in readme
     assert "Docker" in readme and "8788" in readme
     assert (PLUGIN_ROOT / "assets" / "icon.svg").is_file()
 

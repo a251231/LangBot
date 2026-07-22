@@ -14,7 +14,6 @@ from components.command_parser import ParsedCommand, parse_keyword
 
 MAX_SEEN_QUERY_IDS = 2048
 PLAIN_SMS_CODE_RE = re.compile(r'\d{4,8}')
-PRIVATE_CHAT_MESSAGE = '问道签到助手仅在私聊中处理账号操作，请转到机器人私聊后重试。'
 
 
 class WendaoSigninListener(EventListener):
@@ -97,8 +96,6 @@ class WendaoSigninListener(EventListener):
         *,
         is_group: bool,
     ) -> str:
-        if is_group and command.kind != 'help':
-            return PRIVATE_CHAT_MESSAGE
         bot_uuid = await self._resolve_bot_uuid(event_ctx)
         event = event_ctx.event
         return await self.plugin.handle_wendao_command(  # type: ignore[attr-defined]
@@ -115,12 +112,14 @@ class WendaoSigninListener(EventListener):
         command = parse_keyword(text)
         launcher_type = str(getattr(event_ctx.event, 'launcher_type', '')).lower()
         is_group = launcher_type == 'group'
-        if command is None and not is_group and PLAIN_SMS_CODE_RE.fullmatch(text):
+        if command is None and PLAIN_SMS_CODE_RE.fullmatch(text):
             bot_uuid = await self._resolve_bot_uuid(event_ctx)
             try:
-                waiting = await self.plugin.is_waiting_for_login_code(  # type: ignore[attr-defined]
-                    bot_uuid,
-                    str(getattr(event_ctx.event, 'sender_id', '')),
+                waiting = await self.plugin.should_accept_plain_login_code(  # type: ignore[attr-defined]
+                    bot_uuid=bot_uuid,
+                    sender_id=str(getattr(event_ctx.event, 'sender_id', '')),
+                    target_id=str(getattr(event_ctx.event, 'launcher_id', '')),
+                    is_group=is_group,
                 )
             except Exception:
                 waiting = False
@@ -137,4 +136,5 @@ class WendaoSigninListener(EventListener):
             reply = await self._dispatch(event_ctx, command, is_group=is_group)
         except Exception:
             reply = '问道签到助手执行失败，请稍后重试。'
-        await self._reply_text(event_ctx, reply)
+        if reply:
+            await self._reply_text(event_ctx, reply)

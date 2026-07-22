@@ -52,15 +52,16 @@ def run(coro):
 def make_server(
     service: FakeLoginService,
     now: list[int],
-    notifications: list[tuple[str, str, str, str]],
+    notifications: list[tuple[str, str, str, str, str]],
 ):
     async def notify(
         bot_uuid: str,
         sender_id: str,
+        target_type: str,
         target_id: str,
         text: str,
     ) -> None:
-        notifications.append((bot_uuid, sender_id, target_id, text))
+        notifications.append((bot_uuid, sender_id, target_type, target_id, text))
 
     assert CaptchaWebServer is not None
     return CaptchaWebServer(
@@ -83,11 +84,12 @@ def test_captcha_page_uses_one_time_server_url_without_exposing_phone() -> None:
     async def scenario() -> None:
         service = FakeLoginService()
         now = [1784362760000]
-        notifications: list[tuple[str, str, str, str]] = []
+        notifications: list[tuple[str, str, str, str, str]] = []
         server = make_server(service, now, notifications)
         url = server.create_challenge(
             bot_uuid="bot-test",
             sender_id="sender-test",
+            target_type="group",
             target_id="target-test",
             captcha_app_id="APP_ID_TEST_123",
             expires_at_ms=now[0] + 600_000,
@@ -129,6 +131,7 @@ def test_captcha_page_uses_one_time_server_url_without_exposing_phone() -> None:
                 (
                     "bot-test",
                     "sender-test",
+                    "group",
                     "target-test",
                     "验证码已发送，请直接回复短信中的验证码，例如：123456。",
                 )
@@ -153,6 +156,7 @@ def test_captcha_page_rejects_expired_or_unknown_nonce() -> None:
         url = server.create_challenge(
             bot_uuid="bot-test",
             sender_id="sender-test",
+            target_type="person",
             target_id="target-test",
             captcha_app_id="APP_ID_TEST_123",
             expires_at_ms=now[0] + 1,
@@ -183,6 +187,7 @@ def test_captcha_callback_keeps_challenge_for_retry_and_masks_ticket() -> None:
         url = server.create_challenge(
             bot_uuid="bot-test",
             sender_id="sender-test",
+            target_type="person",
             target_id="target-test",
             captcha_app_id="APP_ID_TEST_123",
             expires_at_ms=now[0] + 600_000,
@@ -219,6 +224,7 @@ def test_captcha_callback_validates_payload_without_echoing_input() -> None:
         url = server.create_challenge(
             bot_uuid="bot-test",
             sender_id="sender-test",
+            target_type="person",
             target_id="target-test",
             captcha_app_id="APP_ID_TEST_123",
             expires_at_ms=now[0] + 600_000,
@@ -248,6 +254,7 @@ def test_captcha_callback_maps_expired_login_session_to_gone() -> None:
         url = server.create_challenge(
             bot_uuid="bot-test",
             sender_id="sender-test",
+            target_type="person",
             target_id="target-test",
             captcha_app_id="APP_ID_TEST_123",
             expires_at_ms=now[0] + 600_000,

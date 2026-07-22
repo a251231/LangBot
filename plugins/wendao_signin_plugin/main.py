@@ -26,8 +26,14 @@ from components.command_parser import (
     parse_binding_input,
 )
 from components.entitlement import EntitlementExpiredError, EntitlementService
+from components.growth_models import GroupReplyRecord
 from components.growth_service import GrowthService
-from components.growth_store import GrowthStore
+from components.growth_store import (
+    GROUP_REPLY_PREFIX,
+    GrowthStore,
+    growth_storage_key,
+    identity_hash,
+)
 from components.login import LoginSessionError, WendaoLoginClient, WendaoLoginService
 from components.models import AccountRecord, Credentials
 from components.scheduler import SigninScheduler
@@ -64,6 +70,39 @@ HELP_TEXT = '''问道签到助手命令：
 问道解绑
 问道帮助
 访问凭据到期前会自动刷新。'''
+GROUP_HELP_TEXT = '''问道群聊命令：
+问道登录 <手机号>
+问道验证码 <短信码>
+问道验证 <randstr> <ticket>
+问道绑定 <登录响应>
+问道邀请 <邀请码>
+问道查询
+问道签到
+问道补签
+问道周报
+问道推广
+问道积分
+问道商城
+问道帮助
+群内消息对所有成员可见，请谨慎发送账号信息。'''
+PRIVATE_CHAT_MESSAGE = '该问道命令仅在私聊中处理，请转到机器人私聊后重试。'
+GROUP_ALLOWED_COMMANDS = frozenset(
+    {
+        'help',
+        'login_start',
+        'login_captcha',
+        'login_code',
+        'bind',
+        'referral_bind',
+        'query',
+        'signin',
+        'resign',
+        'weekly_report',
+        'promotion',
+        'points',
+        'shop',
+    }
+)
 
 
 class WendaoSigninPlugin(BasePlugin):
@@ -161,12 +200,13 @@ class WendaoSigninPlugin(BasePlugin):
         async def notify_login(
             bot_uuid: str,
             sender_id: str,
+            target_type: str,
             target_id: str,
             text: str,
         ) -> None:
             plugin = plugin_ref()
             if plugin is not None:
-                await plugin._notify_login(bot_uuid, target_id, text)
+                await plugin._notify_login(bot_uuid, target_type, target_id, text)
 
         async def on_signin_confirmed(account: AccountRecord, at: datetime) -> None:
             plugin = plugin_ref()
@@ -289,6 +329,8 @@ class WendaoSigninPlugin(BasePlugin):
         return WeeklyReportClient(timeout_seconds=self._request_timeout_seconds)
 
     async def _notify_account(self, account: AccountRecord, text: str) -> None:
+        if account.target_type != 'person' or not account.target_id:
+            return
         chain = platform_message.MessageChain([platform_message.Plain(text=text)])
         await self.send_message(
             bot_uuid=account.bot_uuid,
@@ -297,16 +339,99 @@ class WendaoSigninPlugin(BasePlugin):
             message_chain=chain,
         )
 
+    @staticmethod
+    def _group_reply_key(bot_uuid: str, target_id: str) -> tuple[str, str]:
+        group_hash = identity_hash(bot_uuid, target_id)
+        return (
+            growth_storage_key(GROUP_REPLY_PREFIX, bot_uuid, group_hash),
+            group_hash,
+        )
+
+    async def _load_group_reply_record(
+        self,
+        bot_uuid: str,
+        target_id: str,
+    ) -> GroupReplyRecord | None:
+        assert self.growth_store is not None
+        key, _ = self._group_reply_key(bot_uuid, target_id)
+        return await self.growth_store.get(key, GroupReplyRecord)
+
+    async def _is_group_reply_enabled(self, bot_uuid: str, target_id: str) -> bool:
+        if not target_id:
+            return False
+        try:
+            record = await self._load_group_reply_record(bot_uuid, target_id)
+        except Exception:
+            return False
+        return record is not None and record.enabled
+
+    async def _handle_group_reply_control(
+        self,
+        *,
+        bot_uuid: str,
+        target_id: str,
+        operation: str,
+    ) -> str:
+        assert self.growth_store is not None
+        if not target_id:
+            return '未识别到当前群聊，请在目标群中重试。'
+        try:
+            if operation == 'status':
+                record = await self._load_group_reply_record(bot_uuid, target_id)
+                state = '开启' if record is not None and record.enabled else '关闭'
+                return f'本群问道回复状态：{state}。'
+            if operation not in {'on', 'off'}:
+                return '群聊回复口令格式错误。'
+            enabled = operation == 'on'
+            key, group_hash = self._group_reply_key(bot_uuid, target_id)
+            async with self.growth_store.bot_lock(bot_uuid):
+                await self.growth_store.save(
+                    key,
+                    GroupReplyRecord(
+                        bot_uuid=bot_uuid,
+                        group_hash=group_hash,
+                        enabled=enabled,
+                        updated_at=datetime.now(self._timezone).isoformat(
+                            timespec='seconds'
+                        ),
+                    ),
+                )
+        except Exception:
+            return '群聊回复设置失败，请稍后重试。'
+        return '本群问道回复已开启。' if enabled else '本群问道回复已关闭。'
+
+    async def _remember_private_notification_route(
+        self,
+        bot_uuid: str,
+        sender_id: str,
+        target_id: str,
+    ) -> None:
+        if not target_id or self.account_store is None:
+            return
+        try:
+            async with self.account_store.account_lock(bot_uuid, sender_id):
+                account = await self.account_store.get(bot_uuid, sender_id)
+                if account is None or (
+                    account.target_type == 'person' and account.target_id == target_id
+                ):
+                    return
+                await self.account_store.save(
+                    replace(account, target_type='person', target_id=target_id)
+                )
+        except Exception:
+            return
+
     async def _notify_login(
         self,
         bot_uuid: str,
+        target_type: str,
         target_id: str,
         text: str,
     ) -> None:
         chain = platform_message.MessageChain([platform_message.Plain(text=text)])
         await self.send_message(
             bot_uuid=bot_uuid,
-            target_type='person',
+            target_type=target_type,
             target_id=target_id,
             message_chain=chain,
         )
@@ -349,6 +474,7 @@ class WendaoSigninPlugin(BasePlugin):
         bot_uuid: str,
         sender_id: str,
         target_id: str,
+        is_group: bool,
         binding_text: str,
     ) -> str:
         try:
@@ -360,6 +486,7 @@ class WendaoSigninPlugin(BasePlugin):
             bot_uuid=bot_uuid,
             sender_id=sender_id,
             target_id=target_id,
+            is_group=is_group,
             binding=binding,
             action_label='问道绑定',
             cleanup_label='聊天记录中的绑定消息',
@@ -372,6 +499,7 @@ class WendaoSigninPlugin(BasePlugin):
         bot_uuid: str,
         sender_id: str,
         target_id: str,
+        is_group: bool,
         binding: BindingInput,
         action_label: str,
         cleanup_label: str,
@@ -401,11 +529,21 @@ class WendaoSigninPlugin(BasePlugin):
         user_identifier = binding.user_identifier or status_identifier
         async with self.account_store.account_lock(bot_uuid, sender_id):
             existing = await self.account_store.get(bot_uuid, sender_id)
+            if is_group:
+                notification_target_type = (
+                    existing.target_type if existing is not None else 'person'
+                )
+                notification_target_id = (
+                    existing.target_id if existing is not None else ''
+                )
+            else:
+                notification_target_type = 'person'
+                notification_target_id = target_id
             record = AccountRecord.create(
                 bot_uuid=bot_uuid,
                 sender_id=sender_id,
                 credentials=credentials,
-                target_id=target_id,
+                target_id=notification_target_id,
                 schedule_time=(
                     existing.schedule_time if existing else self._schedule_config()
                 ),
@@ -434,6 +572,7 @@ class WendaoSigninPlugin(BasePlugin):
                     user_identifier or (existing.user_identifier if existing else '')
                 ),
             )
+            record = replace(record, target_type=notification_target_type)
             await self.account_store.save(record)
         if self.growth_service is not None:
             try:
@@ -451,6 +590,7 @@ class WendaoSigninPlugin(BasePlugin):
         bot_uuid: str,
         sender_id: str,
         target_id: str,
+        is_group: bool,
         phone_number: str,
     ) -> str:
         assert self.login_service is not None
@@ -476,6 +616,7 @@ class WendaoSigninPlugin(BasePlugin):
             url = self.captcha_server.create_challenge(
                 bot_uuid=bot_uuid,
                 sender_id=sender_id,
+                target_type='group' if is_group else 'person',
                 target_id=target_id,
                 captcha_app_id=app_id,
                 expires_at_ms=session.expires_at_ms,
@@ -528,12 +669,25 @@ class WendaoSigninPlugin(BasePlugin):
             return False
         return await self.login_service.is_waiting_for_code(bot_uuid, sender_id)
 
+    async def should_accept_plain_login_code(
+        self,
+        *,
+        bot_uuid: str,
+        sender_id: str,
+        target_id: str,
+        is_group: bool,
+    ) -> bool:
+        if is_group and not await self._is_group_reply_enabled(bot_uuid, target_id):
+            return False
+        return await self.is_waiting_for_login_code(bot_uuid, sender_id)
+
     async def _submit_login_code(
         self,
         *,
         bot_uuid: str,
         sender_id: str,
         target_id: str,
+        is_group: bool,
         verification_code: str,
     ) -> str:
         assert self.login_service is not None
@@ -557,6 +711,7 @@ class WendaoSigninPlugin(BasePlugin):
             bot_uuid=bot_uuid,
             sender_id=sender_id,
             target_id=target_id,
+            is_group=is_group,
             binding=binding,
             action_label='问道登录',
             cleanup_label='本次登录相关聊天记录',
@@ -685,15 +840,35 @@ class WendaoSigninPlugin(BasePlugin):
         command: ParsedCommand,
         request_id: str = '',
     ) -> str:
-        if is_group and command.kind != 'help':
-            return '问道签到助手仅在私聊中处理账号操作，请转到机器人私聊后重试。'
+        if command.kind == 'group_reply_control':
+            if sender_id not in self._admin_user_ids:
+                return '无权限执行群聊回复设置。'
+            if not is_group:
+                return '请在需要设置的目标群中执行群聊回复口令。'
+            return await self._handle_group_reply_control(
+                bot_uuid=bot_uuid,
+                target_id=target_id,
+                operation=command.argument,
+            )
+        if is_group:
+            if not await self._is_group_reply_enabled(bot_uuid, target_id):
+                return ''
+            if command.kind not in GROUP_ALLOWED_COMMANDS:
+                return PRIVATE_CHAT_MESSAGE
+        else:
+            await self._remember_private_notification_route(
+                bot_uuid,
+                sender_id,
+                target_id,
+            )
         if command.kind == 'help':
-            return HELP_TEXT
+            return GROUP_HELP_TEXT if is_group else HELP_TEXT
         if command.kind == 'login_start':
             return await self._start_phone_login(
                 bot_uuid,
                 sender_id,
                 target_id,
+                is_group,
                 command.argument,
             )
         if command.kind == 'login_captcha':
@@ -707,6 +882,7 @@ class WendaoSigninPlugin(BasePlugin):
                 bot_uuid=bot_uuid,
                 sender_id=sender_id,
                 target_id=target_id,
+                is_group=is_group,
                 verification_code=command.argument,
             )
         if command.kind == 'bind':
@@ -714,6 +890,7 @@ class WendaoSigninPlugin(BasePlugin):
                 bot_uuid=bot_uuid,
                 sender_id=sender_id,
                 target_id=target_id,
+                is_group=is_group,
                 binding_text=command.argument,
             )
         if command.kind in {'query', 'signin', 'resign'}:

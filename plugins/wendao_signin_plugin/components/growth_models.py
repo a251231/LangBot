@@ -127,6 +127,15 @@ class GrowthConfigRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupReplyRecord:
+    schema_version: int = field(default=1, init=False)
+    bot_uuid: str
+    group_hash: str
+    enabled: bool
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class GrowthOperation:
     schema_version: int = field(default=1, init=False)
     bot_uuid: str
@@ -149,5 +158,6 @@ GrowthRecord = (
     | RedemptionRecord
     | EntitlementRecord
     | GrowthConfigRecord
+    | GroupReplyRecord
     | GrowthOperation
 )

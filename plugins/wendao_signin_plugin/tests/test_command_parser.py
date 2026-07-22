@@ -196,5 +196,37 @@ def test_parse_keyword_distinguishes_login_verification_commands() -> None:
     assert sms_code == ParsedCommand('login_code', '123456')
 
 
+@pytest.mark.parametrize(
+    ('text', 'operation'),
+    (
+        ('群聊回复 开始', 'on'),
+        ('群聊回复 开', 'on'),
+        ('群聊回复 开启', 'on'),
+        ('群聊回复 关闭', 'off'),
+        ('群聊回复 关', 'off'),
+        ('群聊回复 状态', 'status'),
+    ),
+)
+def test_parse_keyword_matches_standalone_group_reply_control(
+    text: str,
+    operation: str,
+) -> None:
+    assert parse_keyword(text) == ParsedCommand('group_reply_control', operation)
+
+
+@pytest.mark.parametrize(
+    'text',
+    (
+        '群聊回复',
+        '群聊回复 暂停',
+        '群聊回复 开始 现在',
+        '请群聊回复 开始',
+        '群聊回复开始',
+    ),
+)
+def test_parse_keyword_rejects_invalid_group_reply_control(text: str) -> None:
+    assert parse_keyword(text) is None
+
+
 def test_parse_keyword_ignores_unrelated_messages() -> None:
     assert parse_keyword('今天问道游戏好玩吗') is None

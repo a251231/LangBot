@@ -2,7 +2,8 @@
 
 - 状态：Accepted
 - 日期：2026-07-20
-- 决策范围：`wendao_signin_plugin` 的推广、积分、商品、卡密、权益和操作日志存储
+- 修订：2026-07-22，补充按群回复开关的持久化 owner 与兼容边界
+- 决策范围：`wendao_signin_plugin` 的推广、积分、商品、卡密、权益、操作日志和按群回复开关存储
 - 依据：问道增长域设计规格第 8、10、12 节；问道增长域实施计划的 Architecture、Compatibility Boundary、Risks 和 Retirement
 
 ## 背景与范围
@@ -36,12 +37,15 @@
 3. 积分流水与卡密状态可审计、可重建，余额和库存快照损坏时可以从事实源校正。
 4. `BinaryStorage` 没有跨键事务时，操作日志为多键变更提供明确的中断点、恢复入口和幂等合同。
 
+2026-07-22 增补的群聊回复开关继续复用 `GrowthStore` 的版本化键和单进程锁。已比较 Manifest 全局配置、Listener 进程内集合和主插件策略配合持久化记录三种方案；前两种分别缺少按群动态控制和重启恢复能力。群开关是单键布尔状态，使用单键原子替换，不进入跨键操作日志。
+
 ### Owner 与事实源映射
 
 | 数据或能力 | 唯一 owner | 事实源或约束 |
 | --- | --- | --- |
 | 问道账号凭据、签到状态、调度状态 | `AccountStore` | `AccountRecord v1`，键前缀 `account:v1:` 保持原样 |
 | 推广、积分、商品、卡密、兑换、权益、配置、秘密和操作日志等全部增长持久化状态 | `GrowthStore` | 新增长域键空间按 `bot_uuid` 分片，身份部分使用摘要 |
+| 按群回复开关 | `GrowthStore` | `group-reply:v1:` 按 `bot_uuid + group_hash` 保存；主插件是群命令策略的唯一判断 owner |
 | 积分余额 | `GrowthStore` | `point-entry:v1:` 不可变积分流水是事实源；`point-account:v1:` 账户余额是带最后流水 ID 的可重建快照 |
 | 卡密库存和状态 | `GrowthStore` | `card:v1:` 卡密状态 `AVAILABLE → ISSUED → ACTIVATED` 是事实源；`card-pool:v1:` 卡密池和库存数量是快照 |
 
@@ -63,6 +67,7 @@ redemption-index:v1:
 entitlement:v1:
 growth-op:v1:
 growth-config:v1:
+group-reply:v1:
 growth-secret:v1:
 ```
 
@@ -100,6 +105,7 @@ growth-secret:v1:
 
 - `AccountRecord v1` 及 `account:v1:` 序列化格式保持不变，账号解绑仍只删除问道凭据。
 - 增长域使用上述新增版本化实体键空间；旧版本插件不识别这些键时，新增数据保持留存，不回写旧账号记录。
+- 群聊回复默认关闭；旧版本忽略 `group-reply:v1:`，重新升级后继续读取原开关状态。
 - 回退到旧插件版本时，既有签到、补签、周报和调度继续读取原账号数据；重新升级后由增长域恢复任务继续处理未提交操作。
 - 当前版本不做外部数据库、多进程共享、密钥轮换或跨实例迁移；这些事项需要新的架构决策。
 
@@ -115,4 +121,4 @@ growth-secret:v1:
 
 ## 基线同步
 
-本 ADR 与设计规格及实施计划中的 owner、键空间、事实源、恢复流程和容量边界保持一致；当前 `docs/aegis/baseline/` 没有已发布快照，因此无需修改基线文件。后续实现若改变 owner、事实源或兼容边界，必须先更新或新增 ADR，再调整实现。
+本 ADR 与设计规格、实施计划和已实现的群聊回复策略保持一致；`GrowthStore` 持久化 owner、主插件策略 owner、键空间、事实源、恢复流程和容量边界均已同步。当前 `docs/aegis/baseline/` 没有已发布快照，因此本次没有可更新的基线文件。后续实现若改变 owner、事实源或兼容边界，必须先更新或新增 ADR，再调整实现。

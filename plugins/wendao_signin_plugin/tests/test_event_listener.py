@@ -14,12 +14,17 @@ class DummyPlugin:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.waiting_for_code = False
+        self.plain_code_checks: list[dict[str, object]] = []
+        self.reply: str | None = None
 
-    async def is_waiting_for_login_code(self, bot_uuid: str, sender_id: str) -> bool:
+    async def should_accept_plain_login_code(self, **kwargs) -> bool:
+        self.plain_code_checks.append(kwargs)
         return self.waiting_for_code
 
     async def handle_wendao_command(self, **kwargs) -> str:
         self.calls.append(kwargs)
+        if self.reply is not None:
+            return self.reply
         return f"已处理 {kwargs['command'].kind}"
 
 
@@ -116,7 +121,7 @@ def test_missing_query_id_passes_empty_request_id() -> None:
     assert plugin.calls[0]["request_id"] == ""
 
 
-def test_group_command_except_help_redirects_to_private_chat() -> None:
+def test_group_command_is_dispatched_to_plugin_policy() -> None:
     listener, plugin = build_listener()
     context = DummyContext(DummyEvent("问道绑定 curl test", launcher_type="group"), query_id=101)
 
@@ -124,11 +129,12 @@ def test_group_command_except_help_redirects_to_private_chat() -> None:
 
     assert context.default_prevented is True
     assert context.postorder_prevented is False
-    assert plugin.calls == []
-    assert "私聊" in reply_text(context)
+    assert len(plugin.calls) == 1
+    assert plugin.calls[0]["command"] == ParsedCommand("bind", "curl test")
+    assert plugin.calls[0]["is_group"] is True
 
 
-def test_group_phone_login_is_rejected_before_sensitive_input_dispatch() -> None:
+def test_group_phone_login_is_dispatched_without_echoing_sensitive_input() -> None:
     listener, plugin = build_listener()
     context = DummyContext(
         DummyEvent("问道登录 13800138000", launcher_type="group"),
@@ -138,8 +144,11 @@ def test_group_phone_login_is_rejected_before_sensitive_input_dispatch() -> None
     run(listener._handle_message(context))
 
     assert context.default_prevented is True
-    assert plugin.calls == []
-    assert "私聊" in reply_text(context)
+    assert len(plugin.calls) == 1
+    assert plugin.calls[0]["command"] == ParsedCommand(
+        "login_start",
+        "13800138000",
+    )
     assert "13800138000" not in reply_text(context)
 
 
@@ -197,17 +206,49 @@ def test_plain_sms_code_is_only_handled_during_pending_private_login() -> None:
     assert pending_login.default_prevented is True
     assert len(plugin.calls) == 1
     assert plugin.calls[0]["command"] == ParsedCommand("login_code", "873157")
+    assert plugin.plain_code_checks[-1]["is_group"] is False
 
 
-def test_plain_sms_code_is_not_accepted_in_group_chat() -> None:
+def test_plain_sms_code_is_accepted_in_enabled_group_login() -> None:
     listener, plugin = build_listener()
     plugin.waiting_for_code = True
     context = DummyContext(DummyEvent("873157", launcher_type="group"), query_id=109)
 
     run(listener._handle_message(context))
 
+    assert context.default_prevented is True
+    assert plugin.calls[0]["command"] == ParsedCommand("login_code", "873157")
+    assert plugin.plain_code_checks == [
+        {
+            "bot_uuid": "bot-test-1",
+            "sender_id": "sender-test-1",
+            "target_id": "launcher-test-1",
+            "is_group": True,
+        }
+    ]
+
+
+def test_plain_sms_code_remains_ordinary_when_plugin_policy_declines() -> None:
+    listener, plugin = build_listener()
+    context = DummyContext(DummyEvent("873157", launcher_type="group"), query_id=110)
+
+    run(listener._handle_message(context))
+
     assert context.default_prevented is False
     assert plugin.calls == []
+
+
+def test_empty_plugin_reply_consumes_command_without_sending_blank_message() -> None:
+    listener, plugin = build_listener()
+    plugin.reply = ''
+    context = DummyContext(DummyEvent("问道帮助", launcher_type="group"), query_id=111)
+
+    run(listener._handle_message(context))
+
+    assert context.default_prevented is True
+    assert len(plugin.calls) == 1
+    assert context.event.reply_message_chain is None
+    assert context.direct_replies == []
 
 
 def test_raw_message_event_uses_context_reply_route() -> None:

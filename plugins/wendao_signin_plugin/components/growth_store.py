@@ -15,6 +15,7 @@ from components.growth_models import (
     GrowthConfigRecord,
     GrowthOperation,
     GrowthRecord,
+    GroupReplyRecord,
     POINT_ENTRY_TYPES,
     PointAccount,
     PointEntry,
@@ -38,6 +39,7 @@ REDEMPTION_INDEX_PREFIX = 'redemption-index:v1:'
 ENTITLEMENT_PREFIX = 'entitlement:v1:'
 GROWTH_OPERATION_PREFIX = 'growth-op:v1:'
 GROWTH_CONFIG_PREFIX = 'growth-config:v1:'
+GROUP_REPLY_PREFIX = 'group-reply:v1:'
 GROWTH_SECRET_PREFIX = 'growth-secret:v1:'
 
 SHARD_CAPACITY = 500
@@ -57,6 +59,7 @@ _GROWTH_PREFIXES = (
     ENTITLEMENT_PREFIX,
     GROWTH_OPERATION_PREFIX,
     GROWTH_CONFIG_PREFIX,
+    GROUP_REPLY_PREFIX,
     GROWTH_SECRET_PREFIX,
 )
 _RECORD_TYPES = (
@@ -69,6 +72,7 @@ _RECORD_TYPES = (
     RedemptionRecord,
     EntitlementRecord,
     GrowthConfigRecord,
+    GroupReplyRecord,
     GrowthOperation,
 )
 _RECORD_KEY_SPECS: dict[type[object], tuple[tuple[str, str], ...]] = {
@@ -84,6 +88,7 @@ _RECORD_KEY_SPECS: dict[type[object], tuple[tuple[str, str], ...]] = {
     RedemptionRecord: ((REDEMPTION_PREFIX, 'redemption_id'),),
     EntitlementRecord: ((ENTITLEMENT_PREFIX, 'identity_hash'),),
     GrowthConfigRecord: ((GROWTH_CONFIG_PREFIX, 'config_id'),),
+    GroupReplyRecord: ((GROUP_REPLY_PREFIX, 'group_hash'),),
     GrowthOperation: ((GROWTH_OPERATION_PREFIX, 'operation_id'),),
 }
 
@@ -222,6 +227,11 @@ def _validate_record_payload(
         _aware_datetime(
             payload['updated_at'],
             '增长配置时间格式错误。',
+        )
+    if record_type is GroupReplyRecord:
+        _aware_datetime(
+            payload['updated_at'],
+            '群聊回复配置时间格式错误。',
         )
     if record_type is PointEntry and payload['entry_type'] not in POINT_ENTRY_TYPES:
         raise ValueError('积分流水类型错误。')

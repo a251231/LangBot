@@ -162,6 +162,18 @@ def _prefixed_argument(text: str, prefix: str) -> str | None:
 
 def parse_keyword(raw: str) -> ParsedCommand | None:
     text = raw.strip()
+    group_reply_operations = {
+        '群聊回复 开始': 'on',
+        '群聊回复 开': 'on',
+        '群聊回复 开启': 'on',
+        '群聊回复 关闭': 'off',
+        '群聊回复 关': 'off',
+        '群聊回复 状态': 'status',
+    }
+    group_reply_operation = group_reply_operations.get(text)
+    if group_reply_operation is not None:
+        return ParsedCommand('group_reply_control', group_reply_operation)
+
     bind_argument = _prefixed_argument(text, '问道绑定')
     if bind_argument is not None:
         return ParsedCommand('bind', bind_argument)
@@ -199,5 +211,5 @@ def parse_keyword(raw: str) -> ParsedCommand | None:
         '问道解绑': 'unbind',
         '问道帮助': 'help',
     }
-    kind = exact_commands.get(text)
-    return ParsedCommand(kind) if kind else None
+    exact_kind = exact_commands.get(text)
+    return ParsedCommand(exact_kind) if exact_kind else None
