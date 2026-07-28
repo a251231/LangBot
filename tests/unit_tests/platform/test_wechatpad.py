@@ -5,8 +5,10 @@ import threading
 import time
 import types
 from functools import cache
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from langbot.libs.wechatpad_api.api.friend import FriendApi
+from langbot.libs.wechatpad_api.client import WeChatPadClient
 from langbot.pkg.platform.sources import wechatpad_message_guard
 from langbot.pkg.platform.sources.wechatpad_message_guard import (
     WeChatPadMessageDeduplicator,
@@ -27,7 +29,7 @@ def _load_wechatpad_adapter():
     return sys.modules[module_name].WeChatPadAdapter
 
 
-def _build_adapter():
+def _build_adapter(*, auto_accept_friend: bool = False):
     adapter_class = _load_wechatpad_adapter()
     config = {
         'wechatpad_url': 'http://wechatpad.invalid',
@@ -35,6 +37,7 @@ def _build_adapter():
         'admin_key': '',
         'token': 'test-token',
         'wxid': 'wxid_bot',
+        'auto_accept_friend': auto_accept_friend,
     }
     return adapter_class(config, AsyncMock())
 
@@ -70,6 +73,153 @@ def test_only_text_messages_are_accepted():
     assert wechatpad_message_guard.is_wechatpad_text_message({**event, 'msg_type': 34}) is False
     assert wechatpad_message_guard.is_wechatpad_text_message({**event, 'msg_type': 49}) is False
     assert wechatpad_message_guard.is_wechatpad_text_message(event) is False
+
+
+def test_only_type_37_messages_are_friend_requests():
+    event = {'from_user_name': {'str': 'fmessage'}}
+
+    assert wechatpad_message_guard.is_wechatpad_friend_request({**event, 'msg_type': 37}) is True
+    assert wechatpad_message_guard.is_wechatpad_friend_request({**event, 'msg_type': 1}) is False
+    assert wechatpad_message_guard.is_wechatpad_friend_request(event) is False
+
+
+def test_friend_api_accepts_request_with_wechatpad_contract():
+    api = FriendApi('http://wechatpad.invalid', 'test-token')
+
+    with patch('langbot.libs.wechatpad_api.api.friend.post_json') as post_json:
+        post_json.return_value = {'Code': 200}
+        result = api.accept_friend_request(
+            scene=30,
+            v3='v3_requester@stranger',
+            v4='v4_ticket',
+        )
+
+    assert result == {'Code': 200}
+    post_json.assert_called_once_with(
+        base_url='http://wechatpad.invalid/friend/AgreeAdd',
+        token='test-token',
+        data={
+            'ChatRoomUserName': '',
+            'OpCode': 3,
+            'Scene': 30,
+            'V3': 'v3_requester@stranger',
+            'V4': 'v4_ticket',
+            'VerifyContent': '',
+        },
+    )
+
+
+def test_wechatpad_client_exposes_friend_request_acceptance():
+    client = WeChatPadClient('http://wechatpad.invalid', 'test-token')
+    client._friend_api.accept_friend_request = MagicMock(return_value={'Code': 200})
+
+    result = client.accept_friend_request(
+        scene=30,
+        v3='v3_requester@stranger',
+        v4='v4_ticket',
+    )
+
+    assert result == {'Code': 200}
+    client._friend_api.accept_friend_request.assert_called_once_with(
+        scene=30,
+        v3='v3_requester@stranger',
+        v4='v4_ticket',
+    )
+
+
+def test_friend_request_is_ignored_when_auto_accept_is_disabled():
+    async def scenario():
+        adapter = _build_adapter(auto_accept_friend=False)
+        adapter.bot.accept_friend_request = MagicMock(return_value={'Code': 200})
+
+        result = await adapter.ws_message(
+            {
+                'from_user_name': {'str': 'fmessage'},
+                'msg_type': 37,
+                'new_msg_id': 123,
+                'content': {
+                    'str': '<msg encryptusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'
+                },
+            }
+        )
+
+        assert result == 'ok'
+        adapter.bot.accept_friend_request.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_friend_request_is_accepted_once_when_auto_accept_is_enabled():
+    async def scenario():
+        adapter = _build_adapter(auto_accept_friend=True)
+        adapter.bot.accept_friend_request = MagicMock(return_value={'Code': 200})
+        payload = {
+            'from_user_name': {'str': 'fmessage'},
+            'msg_type': 37,
+            'new_msg_id': 123,
+            'content': {
+                'str': '<msg encryptusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'
+            },
+        }
+
+        assert await adapter.ws_message(payload) == 'ok'
+        assert await adapter.ws_message(payload) == 'ok'
+
+        adapter.bot.accept_friend_request.assert_called_once_with(
+            scene=30,
+            v3='v3_requester@stranger',
+            v4='v4_ticket',
+        )
+        adapter.logger.info.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_friend_request_uses_fromusername_as_v3_fallback():
+    async def scenario():
+        adapter = _build_adapter(auto_accept_friend=True)
+        adapter.bot.accept_friend_request = MagicMock(return_value={'Code': 200})
+
+        result = await adapter.ws_message(
+            {
+                'from_user_name': {'str': 'fmessage'},
+                'msg_type': 37,
+                'new_msg_id': 123,
+                'content': {
+                    'str': '<msg fromusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'
+                },
+            }
+        )
+
+        assert result == 'ok'
+        adapter.bot.accept_friend_request.assert_called_once_with(
+            scene=30,
+            v3='v3_requester@stranger',
+            v4='v4_ticket',
+        )
+
+    asyncio.run(scenario())
+
+
+def test_malformed_friend_request_is_logged_and_does_not_call_api():
+    async def scenario():
+        adapter = _build_adapter(auto_accept_friend=True)
+        adapter.bot.accept_friend_request = MagicMock(return_value={'Code': 200})
+
+        result = await adapter.ws_message(
+            {
+                'from_user_name': {'str': 'fmessage'},
+                'msg_type': 37,
+                'new_msg_id': 123,
+                'content': {'str': '<msg'},
+            }
+        )
+
+        assert result == 'ok'
+        adapter.bot.accept_friend_request.assert_not_called()
+        adapter.logger.error.assert_awaited_once()
+
+    asyncio.run(scenario())
 
 
 def test_non_text_messages_skip_conversion():

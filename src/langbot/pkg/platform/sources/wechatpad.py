@@ -5,8 +5,10 @@ import time
 import httpx
 
 from langbot.libs.wechatpad_api.client import WeChatPadClient
+from langbot.pkg.platform.sources.wechatpad_friend_request import handle_wechatpad_friend_request
 from langbot.pkg.platform.sources.wechatpad_message_guard import (
     WeChatPadMessageDeduplicator,
+    is_wechatpad_friend_request,
     is_wechatpad_text_message,
 )
 
@@ -568,6 +570,14 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
 
     async def ws_message(self, data):
         """处理接收到的消息"""
+
+        if is_wechatpad_friend_request(data):
+            if not self.config.get('auto_accept_friend', False):
+                return 'ok'
+            if self._message_deduplicator.is_duplicate(data):
+                return 'ok'
+            await handle_wechatpad_friend_request(self.bot, self.logger, data)
+            return 'ok'
 
         if not is_wechatpad_text_message(data):
             return 'ok'
