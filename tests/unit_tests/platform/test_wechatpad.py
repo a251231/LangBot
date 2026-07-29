@@ -109,21 +109,50 @@ def test_friend_api_accepts_request_with_wechatpad_contract():
     )
 
 
+def test_friend_api_passes_chatroom_context_for_group_request():
+    api = FriendApi('http://wechatpad.invalid', 'test-token')
+
+    with patch('langbot.libs.wechatpad_api.api.friend.post_json') as post_json:
+        post_json.return_value = {'Code': 200}
+        result = api.accept_friend_request(
+            scene=14,
+            v3='v3_requester@stranger',
+            v4='v4_ticket',
+            chatroom_username='room@chatroom',
+        )
+
+    assert result == {'Code': 200}
+    post_json.assert_called_once_with(
+        base_url='http://wechatpad.invalid/friend/AgreeAdd',
+        token='test-token',
+        data={
+            'ChatRoomUserName': 'room@chatroom',
+            'OpCode': 3,
+            'Scene': 14,
+            'V3': 'v3_requester@stranger',
+            'V4': 'v4_ticket',
+            'VerifyContent': '',
+        },
+    )
+
+
 def test_wechatpad_client_exposes_friend_request_acceptance():
     client = WeChatPadClient('http://wechatpad.invalid', 'test-token')
     client._friend_api.accept_friend_request = MagicMock(return_value={'Code': 200})
 
     result = client.accept_friend_request(
-        scene=30,
+        scene=14,
         v3='v3_requester@stranger',
         v4='v4_ticket',
+        chatroom_username='room@chatroom',
     )
 
     assert result == {'Code': 200}
     client._friend_api.accept_friend_request.assert_called_once_with(
-        scene=30,
+        scene=14,
         v3='v3_requester@stranger',
         v4='v4_ticket',
+        chatroom_username='room@chatroom',
     )
 
 
@@ -158,7 +187,8 @@ def test_friend_request_is_accepted_once_when_auto_accept_is_enabled():
             'msg_type': 37,
             'new_msg_id': 123,
             'content': {
-                'str': '<msg encryptusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'
+                'str': '<msg encryptusername="v3_requester@stranger" ticket="v4_ticket" '
+                'scene="14" chatroomusername="room@chatroom" />'
             },
         }
 
@@ -166,9 +196,10 @@ def test_friend_request_is_accepted_once_when_auto_accept_is_enabled():
         assert await adapter.ws_message(payload) == 'ok'
 
         adapter.bot.accept_friend_request.assert_called_once_with(
-            scene=30,
+            scene=14,
             v3='v3_requester@stranger',
             v4='v4_ticket',
+            chatroom_username='room@chatroom',
         )
         adapter.logger.info.assert_awaited_once()
 
@@ -196,7 +227,34 @@ def test_friend_request_uses_fromusername_as_v3_fallback():
             scene=30,
             v3='v3_requester@stranger',
             v4='v4_ticket',
+            chatroom_username='',
         )
+
+    asyncio.run(scenario())
+
+
+def test_friend_request_with_failed_business_response_is_logged_as_error():
+    async def scenario():
+        adapter = _build_adapter(auto_accept_friend=True)
+        adapter.bot.accept_friend_request = MagicMock(
+            return_value={'Code': 200, 'Data': {'BaseResponse': {'Ret': -1}}}
+        )
+
+        result = await adapter.ws_message(
+            {
+                'from_user_name': {'str': 'fmessage'},
+                'msg_type': 37,
+                'new_msg_id': 123,
+                'content': {
+                    'str': '<msg encryptusername="v3_requester@stranger" ticket="v4_ticket" '
+                    'scene="14" chatroomusername="room@chatroom" />'
+                },
+            }
+        )
+
+        assert result == 'ok'
+        adapter.logger.error.assert_awaited_once()
+        adapter.logger.info.assert_not_awaited()
 
     asyncio.run(scenario())
 

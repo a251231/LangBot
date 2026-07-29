@@ -19,6 +19,7 @@ async def handle_wechatpad_friend_request(
         scene = request.get('scene')
         v3 = request.get('encryptusername') or request.get('fromusername')
         v4 = request.get('ticket')
+        chatroom_username = request.get('chatroomusername') or ''
         if not scene or not v3 or not v4:
             raise ValueError('friend request is missing scene, v3, or v4')
 
@@ -27,11 +28,16 @@ async def handle_wechatpad_friend_request(
             scene=int(scene),
             v3=v3,
             v4=v4,
+            chatroom_username=chatroom_username,
         )
-        if not isinstance(result, dict) or result.get('Code') != 200:
+        response_code = result.get('Code') if isinstance(result, dict) else None
+        response_data = result.get('Data') if isinstance(result, dict) else None
+        base_response = response_data.get('BaseResponse') if isinstance(response_data, dict) else None
+        response_ret = base_response.get('Ret') if isinstance(base_response, dict) else None
+        if response_code != 200 or (response_ret is not None and response_ret != 0):
             await logger.error(
                 f'Failed to accept WeChatPad friend request: message_id={data.get("new_msg_id")}, '
-                f'response_code={result.get("Code") if isinstance(result, dict) else None}'
+                f'response_code={response_code}, response_ret={response_ret}'
             )
             return
 

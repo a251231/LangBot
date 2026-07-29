@@ -8,11 +8,11 @@ class FriendApi:
         self.base_url = base_url
         self.token = token
 
-    def accept_friend_request(self, scene: int, v3: str, v4: str):
+    def accept_friend_request(self, scene: int, v3: str, v4: str, chatroom_username: str = ''):
         """Accept an incoming friend request."""
         url = f'{self.base_url}/friend/AgreeAdd'
         data = {
-            'ChatRoomUserName': '',
+            'ChatRoomUserName': chatroom_username,
             'OpCode': 3,
             'Scene': scene,
             'V3': v3,
