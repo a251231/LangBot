@@ -237,7 +237,7 @@ def test_friend_request_with_failed_business_response_is_logged_as_error():
     async def scenario():
         adapter = _build_adapter(auto_accept_friend=True)
         adapter.bot.accept_friend_request = MagicMock(
-            return_value={'Code': 200, 'Data': {'BaseResponse': {'Ret': -1}}}
+            return_value={'Code': 200, 'Data': {'base_response': {'ret': -24}}}
         )
 
         result = await adapter.ws_message(

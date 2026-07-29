@@ -29,7 +29,7 @@
 - 群聊来源把 XML 的 `chatroomusername` 原样映射到 `ChatRoomUserName`。
 - 非群聊来源缺少该字段时仍发送空字符串。
 - `scene`、`V3`、`V4`、`OpCode=3` 和 `VerifyContent=''` 保持原样。
-- 外层 `Code=200` 继续兼容；响应存在 `Data.BaseResponse.Ret` 时，只有 `Ret=0` 视为业务成功。
+- 外层 `Code=200` 继续兼容；响应存在 v861 的 `Data.base_response.ret` 时，只有 `ret=0` 视为业务成功。
 - 只重建 `langbot`，其他 Docker 容器 ID 必须保持不变。
 
 ## Verification
@@ -50,8 +50,8 @@ D:\code\LangBot\.venv\Scripts\python.exe -m ruff check `
 - Fact：生产已调用 `/friend/AgreeAdd`，原始事件是 `scene=14` 且群 ID 非空。
 - Fact：当前 `FriendApi` 固定发送 `ChatRoomUserName=''`。
 - Fact：v861 Swagger 明确要求通过群添加时传群 ID。
-- Assumption：v861 成功响应沿用外层 `Code=200`；内层 `Ret` 存在时是更强的业务状态。
-- Unknown：原失败请求的完整响应体没有被历史日志保留；部署后通过实际重放当前待处理申请验证。
+- Fact：重放旧申请得到外层 `Code=200`、内层 `Data.base_response.ret=-24`，旧票据已经失效。
+- Unknown：新鲜好友申请的成功响应尚待下一条真实申请验证。
 
 ### Ripple Signal Triage
 
@@ -73,7 +73,7 @@ D:\code\LangBot\.venv\Scripts\python.exe -m ruff check `
 - [x] 新增 `FriendApi` 测试，期望 `ChatRoomUserName='room@chatroom'`。
 - [x] 新增客户端委托测试，期望可选群 ID 原样下传。
 - [x] 把群聊事件测试改为携带 `chatroomusername`，期望处理器透传。
-- [x] 新增 `Data.BaseResponse.Ret != 0` 测试，期望记录失败而不是成功。
+- [x] 新增 `Data.base_response.ret != 0` 测试，期望记录失败而不是成功。
 - [x] 运行测试并记录预期 RED，不修改生产代码。
 
 ## Task 2: 最小实现并完成回归

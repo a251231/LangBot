@@ -32,8 +32,8 @@ async def handle_wechatpad_friend_request(
         )
         response_code = result.get('Code') if isinstance(result, dict) else None
         response_data = result.get('Data') if isinstance(result, dict) else None
-        base_response = response_data.get('BaseResponse') if isinstance(response_data, dict) else None
-        response_ret = base_response.get('Ret') if isinstance(base_response, dict) else None
+        base_response = response_data.get('base_response') if isinstance(response_data, dict) else None
+        response_ret = base_response.get('ret') if isinstance(base_response, dict) else None
         if response_code != 200 or (response_ret is not None and response_ret != 0):
             await logger.error(
                 f'Failed to accept WeChatPad friend request: message_id={data.get("new_msg_id")}, '
