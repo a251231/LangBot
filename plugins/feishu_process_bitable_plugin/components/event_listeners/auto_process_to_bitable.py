@@ -337,6 +337,7 @@ class AutoProcessToBitableListener(EventListener):
             "product.S006": "S006成品数据汇总",
             "product.S18": "S18成品数据汇总",
             "product.S20": "S20成品数据汇总",
+            "production_output": "生产产量汇总表",
             "pure_water": "车间纯水PH汇总",
             "kiln_batch_io": "窑炉批次进窑出窑表",
             "kiln_batch_io.phase2": "二期窑炉批次进窑出窑表",
@@ -1116,6 +1117,7 @@ class AutoProcessToBitableListener(EventListener):
                 "crushing": True,
                 "particle_size": True,
                 "product": True,
+                "production_output": True,
                 "pure_water": True,
                 "kiln_batch_io": True,
             },
@@ -1124,6 +1126,468 @@ class AutoProcessToBitableListener(EventListener):
         if isinstance(value, bool):
             return value
         return bool(value)
+
+    @staticmethod
+    def _normalize_report_date_text(raw: str, fallback_year: int | None = None) -> str:
+        match = re.search(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", str(raw or ""))
+        if match:
+            year, month, day = match.groups()
+            return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?", str(raw or ""))
+        if match:
+            current_year = fallback_year or datetime.datetime.now().year
+            month, day = match.groups()
+            return f"{current_year:04d}-{int(month):02d}-{int(day):02d}"
+        return ""
+
+    @classmethod
+    def _extract_production_output_date(cls, text: str, message_time: str) -> str:
+        fallback = cls._normalize_report_date_text(message_time)
+        fallback_year = int(fallback[:4]) if len(fallback) >= 4 and fallback[:4].isdigit() else None
+        date_text = cls._normalize_report_date_text(text, fallback_year=fallback_year)
+        if date_text:
+            return date_text
+        if fallback:
+            return fallback
+        return message_time[:10] if len(message_time) >= 10 else ""
+
+    @staticmethod
+    def _normalize_production_output_line_label(raw: str) -> str:
+        text = str(raw or "").strip().upper()
+        match = re.search(r"S\s*(\d{2,3})\s*[-_/\s]?\s*([A-Z])\s*(?:线|LINE)?", text, flags=re.IGNORECASE)
+        if match:
+            series, line = match.groups()
+            return f"S{series}-{line.upper()}线"
+        match = re.search(r"\b([A-E])\s*(?:线|LINE)\b", text, flags=re.IGNORECASE)
+        if match:
+            return f"{match.group(1).upper()}线"
+        return ""
+
+    @staticmethod
+    def _is_numeric_text(value: str) -> bool:
+        return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", str(value or "").strip()))
+
+    @staticmethod
+    def _looks_like_production_output_label(value: str) -> bool:
+        text = re.sub(r"\s+", "", str(value or ""))
+        return bool(
+            re.search(r"(?:[A-E]线|S\d{2,3}[-_/\s]?[A-E]线)", text, flags=re.IGNORECASE)
+            and re.search(r"(?:产量|日产|生产量|入库量|成品量|净包装量|包装量|掺料|垫底|重烧|投料|进笼)", text, flags=re.IGNORECASE)
+        )
+
+    @staticmethod
+    def _normalize_production_output_type(label_text: str) -> str:
+        text = re.sub(r"\s+", "", str(label_text or ""))
+        if "投料" in text or "进笼" in text:
+            return ""
+        if "掺料" in text or "垫底" in text:
+            return "掺料垫底量"
+        if "重烧" in text:
+            return "重烧料"
+        if "净包装量" in text:
+            return "净包装量"
+        if "包装量" in text:
+            return "包装量"
+        if "日产" in text:
+            return "日产"
+        if "生产量" in text:
+            return "生产量"
+        if "入库量" in text:
+            return "入库量"
+        if "成品量" in text:
+            return "成品量"
+        return "产量"
+
+    @staticmethod
+    def _is_production_output_excluded_label(label_text: str) -> bool:
+        text = re.sub(r"\s+", "", str(label_text or ""))
+        return any(
+            token in text
+            for token in (
+                "投料量",
+                "实际投料",
+                "计划投料",
+                "合计投料",
+                "进笼量",
+                "实际进笼",
+                "合计实际进笼",
+                "进窑量",
+                "实际进窑",
+                "合计实际进窑",
+            )
+        )
+
+    @classmethod
+    def _build_production_output_record(
+        cls,
+        report_date: str,
+        line_label: str,
+        output_value: float,
+        output_type: str,
+        detail_fields: dict[str, float] | None = None,
+    ) -> ParsedRecord:
+        fields: dict[str, Any] = {
+            "日期": report_date,
+            "线别": line_label,
+            "产量": output_value,
+            "产量口径": output_type,
+            "单位": "吨",
+            "解析状态": "已解析",
+        }
+        if detail_fields:
+            fields.update(detail_fields)
+        return ParsedRecord(
+            scenario="production_output",
+            line=line_label,
+            batch_id="",
+            route_key="production_output",
+            fields=fields,
+        )
+
+    @classmethod
+    def _build_production_output_records_from_details(
+        cls,
+        report_date: str,
+        details_by_line: dict[str, dict[str, float]],
+    ) -> list[ParsedRecord]:
+        records: list[ParsedRecord] = []
+        for line_label, details in details_by_line.items():
+            net = details.get("净包装量")
+            packaging = details.get("包装量")
+            padding = details.get("掺料垫底量")
+            rework = details.get("重烧料")
+            plain = details.get("产量") or details.get("日产") or details.get("生产量") or details.get("入库量") or details.get("成品量")
+
+            detail_fields = {key: value for key, value in details.items() if key in {"净包装量", "包装量", "掺料垫底量", "重烧料"}}
+            if net is not None:
+                output_value = float(net)
+                output_type = "净包装量"
+            elif packaging is not None:
+                output_value = float(packaging)
+                output_type = "包装量"
+            elif plain is not None:
+                output_value = float(plain)
+                output_type = "产量"
+            else:
+                continue
+            if output_value <= 0:
+                continue
+            records.append(cls._build_production_output_record(report_date, line_label, output_value, output_type, detail_fields))
+        return records
+
+    def _parse_production_output(self, text: str, message_time: str) -> list[ParsedRecord]:
+        if not self._process_switch("production_output", True):
+            return []
+
+        normalized_text = self._normalize_message_text(text).translate(
+            str.maketrans({"：": ":", "，": ",", "／": ".", "/": "."})
+        )
+        compact = re.sub(r"\s+", "", normalized_text)
+        has_output_hint = any(token in compact for token in ("产量", "日产", "生产量", "入库量", "成品量", "净包装量", "包装量"))
+        if not has_output_hint:
+            return []
+
+        report_date = self._extract_production_output_date(normalized_text, message_time)
+        if not report_date:
+            return []
+
+        details_by_line: dict[str, dict[str, float]] = {}
+
+        def put_detail(line_label: str, output_value: float, output_type: str) -> None:
+            if not output_type or output_value <= 0:
+                return
+            line_details = details_by_line.setdefault(line_label, {})
+            line_details[output_type] = output_value
+
+        def remove_detail(line_label: str, output_type: str) -> None:
+            line_details = details_by_line.get(line_label)
+            if not line_details:
+                return
+            line_details.pop(output_type, None)
+            if not line_details:
+                details_by_line.pop(line_label, None)
+
+        line_pattern = r"(?:S\s*\d{2,3}\s*[-_/\s]?\s*)?[A-Z]\s*(?:线|LINE)"
+        has_packaging_detail = any(token in compact for token in ("净包装量", "包装量", "掺料", "垫底", "重烧"))
+        if not has_packaging_detail:
+            line_value_regex = re.compile(
+                rf"(?P<line>{line_pattern})[^\d\n]{{0,32}}(?:(?:产量|日产|生产量|入库量|成品量)[^\d\n]{{0,12}})?"
+                r"(?P<value>\d+(?:[.,]\d+)?)\s*(?:吨|T|t)?",
+                re.IGNORECASE,
+            )
+
+            for match in line_value_regex.finditer(normalized_text):
+                if self._is_production_output_excluded_label(match.group(0)):
+                    continue
+                line_label = self._normalize_production_output_line_label(match.group("line"))
+                if not line_label:
+                    continue
+                value_text = match.group("value").replace(",", ".")
+                try:
+                    output_value = float(value_text)
+                except ValueError:
+                    continue
+                output_type = self._normalize_production_output_type(match.group(0))
+                put_detail(line_label, output_value, output_type)
+
+        tokens = [item.strip() for item in re.split(r"[\r\n]+", normalized_text) if item.strip()]
+        line_label_regex = re.compile(
+            r"(?P<line>(?:S\s*\d{2,3}\s*[-_/\s]?\s*)?[A-E]\s*(?:线|LINE))",
+            re.IGNORECASE,
+        )
+        output_label_regex = re.compile(r"(?:产量|日产|生产量|入库量|成品量|净包装量|包装量|掺料|垫底|重烧)", re.IGNORECASE)
+
+        def previous_non_numeric_token(pos: int) -> str:
+            for nearby in reversed(tokens[max(0, pos - 8) : pos]):
+                if not self._is_numeric_text(nearby):
+                    return nearby
+            return ""
+
+        def value_context_token(value_pos: int) -> str:
+            for nearby in reversed(tokens[max(0, value_pos - 6) : value_pos]):
+                if not self._is_numeric_text(nearby):
+                    return nearby
+            return ""
+
+        def is_total_or_section_context(value: str) -> bool:
+            compact_value = re.sub(r"\s+", "", str(value or ""))
+            if self._is_production_output_excluded_label(compact_value):
+                return True
+            total_tokens = ("合计", "累计", "计划", "实际总包装量", "累计总包装量", "累计总净包装量")
+            if any(token in compact_value for token in total_tokens) and not output_label_regex.search(compact_value):
+                return True
+            return False
+
+        total_output_values: set[float] = set()
+        total_label_regex = re.compile(r"(?:合计净包装量|实际总包装量|累计.*包装量|累计.*净包装量)")
+        for idx, token in enumerate(tokens):
+            if not total_label_regex.search(token):
+                continue
+            for nearby in tokens[idx + 1 : idx + 5]:
+                if self._looks_like_production_output_label(nearby) or self._is_production_output_excluded_label(nearby):
+                    break
+                if self._is_numeric_text(nearby):
+                    total_output_values.add(float(nearby.replace(",", ".")))
+                    break
+
+        def is_total_output_value(value: float) -> bool:
+            return any(abs(value - total_value) < 0.001 for total_value in total_output_values)
+
+        def nearest_previous_output_number(pos: int) -> float | None:
+            for value_pos in range(pos - 1, max(-1, pos - 14), -1):
+                candidate = tokens[value_pos]
+                if output_label_regex.search(candidate) and not self._is_production_output_excluded_label(candidate):
+                    break
+                if not self._is_numeric_text(candidate):
+                    continue
+                value = float(candidate.replace(",", "."))
+                if value > 0 and is_total_output_value(value):
+                    continue
+                if "投入与产出" in value_context_token(value_pos):
+                    continue
+                return value
+            return None
+
+        def nearest_next_output_number(pos: int) -> float | None:
+            for nearby in tokens[pos + 1 : pos + 6]:
+                if self._looks_like_production_output_label(nearby) or self._is_production_output_excluded_label(nearby):
+                    return None
+                if is_total_or_section_context(nearby):
+                    return None
+                if not self._is_numeric_text(nearby):
+                    continue
+                value = float(nearby.replace(",", "."))
+                if value > 0 and is_total_output_value(value):
+                    continue
+                return value
+            return None
+
+        def repair_interleaved_output_value(idx: int, line_label: str, output_type: str) -> bool:
+            if output_type not in {"净包装量", "包装量"}:
+                return False
+            next_value = nearest_next_output_number(idx)
+            previous_value = nearest_previous_output_number(idx)
+            previous_context = previous_non_numeric_token(idx)
+            prefer_previous = is_total_or_section_context(previous_context)
+            prefer_previous_over_positive_next = bool(re.search(r"(?:合计投料|投入与产出|合计\(吨\)|合计（吨）)", previous_context))
+            if next_value is None:
+                corrected_value = previous_value
+            elif next_value > 0 and prefer_previous_over_positive_next and previous_value is not None:
+                corrected_value = previous_value
+            elif next_value <= 0 and prefer_previous and previous_value is not None:
+                corrected_value = previous_value
+            elif next_value <= 0:
+                corrected_value = next_value
+            else:
+                corrected_value = next_value
+            if corrected_value is None:
+                return False
+            if corrected_value <= 0:
+                remove_detail(line_label, output_type)
+                return True
+            put_detail(line_label, corrected_value, output_type)
+            return True
+
+        consumed_label_indexes: set[int] = set()
+        for idx, token in enumerate(tokens):
+            if idx in consumed_label_indexes:
+                continue
+            if not output_label_regex.search(token):
+                continue
+            if self._is_production_output_excluded_label(token):
+                continue
+            line_match = line_label_regex.search(token)
+            if not line_match:
+                continue
+            line_label = self._normalize_production_output_line_label(line_match.group("line"))
+            if not line_label:
+                continue
+            queued_labels: list[tuple[int, str, str]] = []
+            scan_idx = idx
+            while scan_idx < len(tokens):
+                label_token = tokens[scan_idx]
+                if not output_label_regex.search(label_token) or self._is_production_output_excluded_label(label_token):
+                    break
+                label_line_match = line_label_regex.search(label_token)
+                if not label_line_match:
+                    break
+                label_line = self._normalize_production_output_line_label(label_line_match.group("line"))
+                label_type = self._normalize_production_output_type(label_token)
+                if not label_line or not label_type:
+                    break
+                queued_labels.append((scan_idx, label_line, label_type))
+                scan_idx += 1
+            if len(queued_labels) > 1:
+                queued_values: list[float] = []
+                value_idx = scan_idx
+                while value_idx < len(tokens) and len(queued_values) < len(queued_labels):
+                    nearby = tokens[value_idx]
+                    if self._looks_like_production_output_label(nearby) or self._is_production_output_excluded_label(nearby):
+                        break
+                    if not self._is_numeric_text(nearby):
+                        break
+                    queued_values.append(float(nearby.replace(",", ".")))
+                    value_idx += 1
+                if len(queued_values) == len(queued_labels):
+                    for (_label_idx, queued_line, queued_type), queued_value in zip(queued_labels, queued_values):
+                        put_detail(queued_line, queued_value, queued_type)
+                    consumed_label_indexes.update(label_idx for label_idx, _queued_line, _queued_type in queued_labels)
+                    continue
+            output_value: float | None = None
+            for nearby in tokens[idx + 1 : idx + 5]:
+                if self._looks_like_production_output_label(nearby) or self._is_production_output_excluded_label(nearby):
+                    break
+                if not self._is_numeric_text(nearby):
+                    continue
+                output_value = float(nearby.replace(",", "."))
+                break
+            if output_value is None:
+                output_type = self._normalize_production_output_type(token)
+                repair_interleaved_output_value(idx, line_label, output_type)
+                continue
+            output_type = self._normalize_production_output_type(token)
+            put_detail(line_label, output_value, output_type)
+            repair_interleaved_output_value(idx, line_label, output_type)
+
+        def next_number_after_label(label_pattern: str) -> float | None:
+            label_regex = re.compile(label_pattern)
+            for idx, token in enumerate(tokens):
+                if not label_regex.search(token):
+                    continue
+                for nearby in tokens[idx + 1 : idx + 6]:
+                    if self._looks_like_production_output_label(nearby) or self._is_production_output_excluded_label(nearby):
+                        break
+                    if self._is_numeric_text(nearby):
+                        return float(nearby.replace(",", "."))
+            return None
+
+        def line_detail(line_label: str, output_type: str) -> float | None:
+            return details_by_line.get(line_label, {}).get(output_type)
+
+        def has_zero_packaging_label(line_label: str) -> bool:
+            line_code = line_label[:1]
+            label_regex = re.compile(rf"{line_code}线包装量", re.IGNORECASE)
+            for idx, token in enumerate(tokens):
+                if not label_regex.search(token):
+                    continue
+                for nearby in tokens[idx + 1 : idx + 4]:
+                    if self._looks_like_production_output_label(nearby) or self._is_production_output_excluded_label(nearby):
+                        break
+                    if self._is_numeric_text(nearby):
+                        return abs(float(nearby.replace(",", "."))) < 0.001
+                for nearby in reversed(tokens[max(0, idx - 4) : idx]):
+                    if self._looks_like_production_output_label(nearby) or self._is_production_output_excluded_label(nearby):
+                        break
+                    if self._is_numeric_text(nearby):
+                        return abs(float(nearby.replace(",", "."))) < 0.001
+            return False
+
+        phase1_total = next_number_after_label(r"一期合计净包装量")
+        if phase1_total is not None:
+            a_net = line_detail("A线", "净包装量")
+            if a_net is not None:
+                b_net = round(float(phase1_total) - float(a_net), 3)
+                if b_net > 0:
+                    put_detail("B线", b_net, "净包装量")
+
+        phase2_total = next_number_after_label(r"二期合计净包装量")
+        if phase2_total is not None and phase2_total >= 0:
+            phase2_lines = ("C线", "D线", "E线")
+            for line_label in phase2_lines:
+                value = line_detail(line_label, "包装量")
+                if value is not None and value > phase2_total + 0.001:
+                    remove_detail(line_label, "包装量")
+            for line_label in phase2_lines:
+                if line_detail(line_label, "包装量") is None and has_zero_packaging_label(line_label):
+                    remove_detail(line_label, "包装量")
+                    details_by_line.setdefault(line_label, {})["包装量"] = 0.0
+
+            known_values = {
+                line_label: line_detail(line_label, "包装量")
+                for line_label in phase2_lines
+                if line_detail(line_label, "包装量") is not None
+            }
+            for line_label in phase2_lines:
+                if line_label not in known_values and has_zero_packaging_label(line_label):
+                    known_values[line_label] = 0.0
+            missing_lines = [line_label for line_label in phase2_lines if line_label not in known_values]
+            if len(missing_lines) == 1:
+                missing_value = round(float(phase2_total) - sum(float(value) for value in known_values.values()), 3)
+                missing_line = missing_lines[0]
+                if missing_value > 0:
+                    put_detail(missing_line, missing_value, "包装量")
+                else:
+                    remove_detail(missing_line, "包装量")
+            else:
+                current_values = {
+                    line_label: line_detail(line_label, "包装量")
+                    for line_label in phase2_lines
+                    if line_detail(line_label, "包装量") is not None
+                }
+                current_sum = sum(float(value) for value in current_values.values())
+                if current_values and abs(current_sum - float(phase2_total)) > 0.001:
+                    for line_label, value in reversed(list(current_values.items())):
+                        duplicate_count = sum(
+                            1
+                            for other_value in current_values.values()
+                            if abs(float(other_value) - float(value)) < 0.001
+                        )
+                        if duplicate_count <= 1:
+                            continue
+                        other_sum = sum(
+                            float(other_value)
+                            for other_line, other_value in current_values.items()
+                            if other_line != line_label
+                        )
+                        corrected_value = round(float(phase2_total) - other_sum, 3)
+                        if corrected_value > 0 and abs(corrected_value - float(value)) > 0.001:
+                            put_detail(line_label, corrected_value, "包装量")
+                            break
+            for line_label in phase2_lines:
+                value = line_detail(line_label, "包装量")
+                if value is not None and value <= 0:
+                    remove_detail(line_label, "包装量")
+        return self._build_production_output_records_from_details(report_date, details_by_line)
 
     def _parse_spray(self, text: str, message_time: str) -> list[ParsedRecord]:
         if not self._process_switch("spray", True):
@@ -2243,16 +2707,21 @@ class AutoProcessToBitableListener(EventListener):
         normalized_text = self._normalize_dash(text)
         line_pattern = self._production_line_pattern()
         regex = re.compile(
-            rf"(S\d+-SC-[A-Z]{{2}}\d{{4}}-\d+)-([{line_pattern}]\d+-\d+)-\d+\s*min\s*[:：]\s*([\d\.]+)",
+            rf"(?P<batch>S\d+\s*-\s*SC\s*-\s*[A-Z]{{2}}\d{{4}}\s*-\s*\d+)"
+            rf"\s*-\s*(?P<slot>[{line_pattern}]\d+)"
+            r"(?:\s*-\s*(?P<sample_number>\d+)\s*-\s*\d+\s*min)?"
+            r"\s*[:：]\s*(?P<value>[\d\.]+)",
             re.IGNORECASE,
         )
 
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
         for match in regex.finditer(normalized_text):
-            base_id, sample_id, value = match.groups()
-            base_id = base_id.upper().strip()
-            sample_id = sample_id.upper().strip()
-            line = sample_id[:1]
+            base_id = self._normalize_hyphen_token(match.group("batch")).upper()
+            slot = match.group("slot").upper().strip()
+            sample_number = match.group("sample_number") or "1"
+            sample_id = f"{slot}-{sample_number}"
+            value = match.group("value")
+            line = slot[:1]
             if not self._is_supported_production_line(line):
                 continue
 
@@ -4013,6 +4482,18 @@ class AutoProcessToBitableListener(EventListener):
         if not self._get_bool_config("upsert_by_batch", True):
             return {}
 
+        route_field = self._get_str_config("route_field", "路由")
+        route_value = self._field_to_text(write_fields.get(route_field)) if route_field else ""
+        if route_value == "production_output":
+            match_fields: dict[str, str] = {}
+            for field_name in ("日期", "线别"):
+                value = self._field_to_text(write_fields.get(field_name))
+                if field_name and value:
+                    match_fields[field_name] = value
+            if len(match_fields) >= 2:
+                return match_fields
+            return {}
+
         batch_field = self._get_str_config("batch_field", "批次号")
         if not batch_field:
             return {}
@@ -4023,8 +4504,6 @@ class AutoProcessToBitableListener(EventListener):
         match_fields: dict[str, str] = {batch_field: batch_value}
 
         if self._get_bool_config("upsert_match_include_route", True):
-            route_field = self._get_str_config("route_field", "路由")
-            route_value = self._field_to_text(write_fields.get(route_field))
             if route_field and route_value:
                 match_fields[route_field] = route_value
 
@@ -4249,6 +4728,7 @@ class AutoProcessToBitableListener(EventListener):
 
     def _parse_records(self, full_text: str, message_time: str) -> list[ParsedRecord]:
         records: list[ParsedRecord] = []
+        records.extend(self._parse_production_output(full_text, message_time))
         records.extend(self._parse_product(full_text, message_time))
         records.extend(self._parse_particle_size(full_text, message_time))
         records.extend(self._parse_xm_solids(full_text, message_time))

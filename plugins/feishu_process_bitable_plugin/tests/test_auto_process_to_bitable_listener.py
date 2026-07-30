@@ -217,6 +217,71 @@ class AutoProcessToBitableListenerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(listener._send_feedback.await_args.kwargs["is_error"])  # type: ignore[attr-defined]
         self.assertIn("history write failed", listener._send_feedback.await_args.args[1])  # type: ignore[attr-defined]
 
+    async def test_parse_sintering_supports_short_compaction_rows(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "压实\n"
+            "S18-SC-DC2607-182- C1：2.357\n"
+            "S18-SC-DC2607-177- C2：2.349\n"
+            "压实\n"
+            "S18-SC-DC2607-177- C1：2.363\n"
+            "S18-SC-DC2607-172- C2：2.359",
+            "",
+            "2026-07-30 09:00:00",
+        )
+
+        self.assertEqual(len(records), 3)
+        by_batch = {record.batch_id: record for record in records}
+        self.assertEqual(
+            set(by_batch),
+            {
+                "S18-SC-DC2607-182",
+                "S18-SC-DC2607-177",
+                "S18-SC-DC2607-172",
+            },
+        )
+        for record in records:
+            self.assertEqual(record.scenario, "sintering")
+            self.assertEqual(record.line, "C")
+            self.assertEqual(record.route_key, "sintering.C")
+
+        self.assertEqual(by_batch["S18-SC-DC2607-182"].fields["C1-1"], 2.357)
+        self.assertEqual(by_batch["S18-SC-DC2607-182"].fields["C1-均值"], 2.357)
+        self.assertEqual(by_batch["S18-SC-DC2607-177"].fields["C1-1"], 2.363)
+        self.assertEqual(by_batch["S18-SC-DC2607-177"].fields["C2-1"], 2.349)
+        self.assertEqual(by_batch["S18-SC-DC2607-177"].fields["C1-均值"], 2.363)
+        self.assertEqual(by_batch["S18-SC-DC2607-177"].fields["C2-均值"], 2.349)
+        self.assertEqual(by_batch["S18-SC-DC2607-172"].fields["C2-1"], 2.359)
+        self.assertEqual(by_batch["S18-SC-DC2607-172"].fields["C2-均值"], 2.359)
+
+    async def test_parse_sintering_short_row_accepts_ascii_colon_and_spaced_batch(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_sintering(
+            "S18 - SC - DC2607 - 181 - C1: 2.351",
+            "2026-07-30 09:10:00",
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].batch_id, "S18-SC-DC2607-181")
+        self.assertEqual(records[0].fields["C1-1"], 2.351)
+        self.assertEqual(records[0].fields["C1-均值"], 2.351)
+
+    async def test_parse_sintering_preserves_full_measurement_format(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_sintering(
+            "S18-SC-DC2607-190-C1-1-60min：2.350\n"
+            "S18-SC-DC2607-190-C1-2-60min:2.370",
+            "2026-07-30 09:20:00",
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].fields["C1-1"], 2.350)
+        self.assertEqual(records[0].fields["C1-2"], 2.370)
+        self.assertEqual(records[0].fields["C1-均值"], 2.360)
+
     async def test_parse_particle_size_supports_c_line_batch_id(self) -> None:
         listener = self._build_listener()
 
@@ -575,6 +640,500 @@ class AutoProcessToBitableListenerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.fields["残碱(Li+)"], 268.0)
         self.assertEqual(record.fields["pH"], 9.18)
         self.assertEqual(record.fields["检测日期"], "2026.05.23")
+
+    async def test_parse_production_output_screenshot_splits_lines_without_batch(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "生产日报产量统计\n"
+            "日期：2026.07.01\n"
+            "线别 产量\n"
+            "S18-C线 12.5吨\n"
+            "S20-A线 8.25吨",
+            "2026-07-01 20:15:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(set(by_line), {"S18-C线", "S20-A线"})
+        self.assertEqual(by_line["S18-C线"].route_key, "production_output")
+        self.assertEqual(by_line["S18-C线"].batch_id, "")
+        self.assertEqual(by_line["S18-C线"].fields["日期"], "2026-07-01")
+        self.assertEqual(by_line["S18-C线"].fields["线别"], "S18-C线")
+        self.assertEqual(by_line["S18-C线"].fields["产量"], 12.5)
+        self.assertEqual(by_line["S18-C线"].fields["单位"], "吨")
+        self.assertEqual(by_line["S18-C线"].fields["解析状态"], "已解析")
+        self.assertEqual(by_line["S20-A线"].fields["产量"], 8.25)
+
+    async def test_parse_production_output_uses_message_date_when_ocr_date_missing(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "今日产量\nS20-B线：产量 6.8 吨",
+            "2026-07-02 08:15:00",
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].scenario, "production_output")
+        self.assertEqual(records[0].fields["日期"], "2026-07-02")
+        self.assertEqual(records[0].fields["产量"], 6.8)
+
+    async def test_parse_production_output_handles_feishu_ocr_misaligned_packaging_table(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "时间\n"
+            "6月30日\n"
+            "班次\n"
+            "白夜班\n"
+            "A线实际投料量（吨）\n"
+            "96\n"
+            "A线实际进笼量（吨）\n"
+            "135.682\n"
+            "小计总包装量\n"
+            "A线净包装量（吨）\n"
+            "103.45\n"
+            "A线掺料、垫底量（吨）\n"
+            "7.75\n"
+            "A线重烧料（吨）\n"
+            "4.8\n"
+            "B线净包装量（吨）\n"
+            "104.45\n"
+            "B线掺料、垫底量（吨）\n"
+            "6.75\n"
+            "B线重烧料（吨）\n"
+            "4.8\n"
+            "C线包装量（吨）\n"
+            "55.6\n"
+            "D线包装量（吨）\n"
+            "16\n"
+            "E线包装量（吨）\n"
+            "0\n"
+            "实际总包装量（吨）\n"
+            "303.6\n",
+            "2026-06-30 23:50:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(set(by_line), {"A线", "B线", "C线", "D线"})
+        self.assertEqual(by_line["A线"].fields["日期"], "2026-06-30")
+        self.assertEqual(by_line["A线"].fields["产量"], 103.45)
+        self.assertEqual(by_line["A线"].fields["净包装量"], 103.45)
+        self.assertEqual(by_line["A线"].fields["掺料垫底量"], 7.75)
+        self.assertEqual(by_line["A线"].fields["重烧料"], 4.8)
+        self.assertEqual(by_line["B线"].fields["产量"], 104.45)
+        self.assertEqual(by_line["B线"].fields["净包装量"], 104.45)
+        self.assertEqual(by_line["B线"].fields["掺料垫底量"], 6.75)
+        self.assertEqual(by_line["B线"].fields["重烧料"], 4.8)
+        self.assertEqual(by_line["C线"].fields["产量"], 55.6)
+        self.assertEqual(by_line["D线"].fields["产量"], 16.0)
+        self.assertNotIn("E线", by_line)
+        self.assertEqual(round(sum(record.fields["产量"] for record in by_line.values()), 3), 279.5)
+        self.assertEqual(by_line["A线"].fields["产量口径"], "净包装量")
+        self.assertEqual(by_line["B线"].fields["产量口径"], "净包装量")
+        self.assertEqual(by_line["C线"].fields["产量口径"], "包装量")
+        self.assertTrue(all(record.batch_id == "" for record in by_line.values()))
+
+    async def test_parse_production_output_skips_zero_placeholder_packaging_rows(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "6月30日\nE线包装量（吨）\n0\n实际总包装量（吨）\n303.6",
+            "2026-06-30 23:50:00",
+        )
+
+        self.assertEqual([record for record in records if record.scenario == "production_output"], [])
+
+    async def test_parse_production_output_does_not_treat_feeding_or_cage_as_output(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "6月30日\n"
+            "A线实际投料量（吨）\n"
+            "96\n"
+            "B线实际进笼量（吨）\n"
+            "137.796\n"
+            "合计投料量（吨）\n"
+            "192",
+            "2026-06-30 23:50:00",
+        )
+
+        self.assertEqual([record for record in records if record.scenario == "production_output"], [])
+
+    async def test_parse_production_output_does_not_cross_bind_packaging_labels_to_left_table_values(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "6月30日\n"
+            "小计总包装量\n"
+            "A线净包装量（吨）\n"
+            "103.45\n"
+            "A线掺料、垫底量（吨）\n"
+            "A线实际投料量（吨）\n"
+            "96\n"
+            "A线掺料、垫底量（吨）\n"
+            "7.75\n"
+            "A线重烧料（吨）\n"
+            "一期合计投料量（吨）\n"
+            "192\n"
+            "A线重烧料（吨）\n"
+            "4.8\n"
+            "B线净包装量（吨）\n"
+            "104.45\n"
+            "B线掺料、垫底量（吨）\n"
+            "6.75\n"
+            "B线重烧料（吨）\n"
+            "4.8\n"
+            "D线包装量（吨）\n"
+            "一期合计投料量（吨）\n"
+            "192\n"
+            "E线包装量（吨）\n"
+            "A线实际进笼量（吨）\n"
+            "135.682\n"
+            "C线包装量（吨）\n"
+            "C线刮刀磨损，加水10吨洗机\n"
+            "55.6\n"
+            "D线包装量（吨）\n"
+            "16\n"
+            "E线包装量（吨）\n"
+            "0\n"
+            "实际总包装量（吨）\n"
+            "303.6\n",
+            "2026-06-30 23:50:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(set(by_line), {"A线", "B线", "C线", "D线"})
+        self.assertEqual(by_line["A线"].fields["产量"], 103.45)
+        self.assertEqual(by_line["B线"].fields["产量"], 104.45)
+        self.assertEqual(by_line["C线"].fields["产量"], 55.6)
+        self.assertEqual(by_line["D线"].fields["产量"], 16.0)
+        self.assertNotIn("E线", by_line)
+        self.assertEqual(round(sum(record.fields["产量"] for record in by_line.values()), 3), 279.5)
+
+    async def test_parse_production_output_pairs_label_column_with_value_column(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "6月30日\n"
+            "A线净包装量（吨）\n"
+            "B线净包装量（吨）\n"
+            "C线包装量（吨）\n"
+            "D线包装量（吨）\n"
+            "E线包装量（吨）\n"
+            "103.45\n"
+            "104.45\n"
+            "55.6\n"
+            "16\n"
+            "0\n"
+            "一期合计投料量（吨）\n"
+            "192\n"
+            "A线实际进笼量（吨）\n"
+            "135.682\n"
+            "二期其它事项\n"
+            "C线加水10吨洗机。\n",
+            "2026-06-30 23:50:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(set(by_line), {"A线", "B线", "C线", "D线"})
+        self.assertEqual(by_line["A线"].fields["产量"], 103.45)
+        self.assertEqual(by_line["B线"].fields["产量"], 104.45)
+        self.assertEqual(by_line["C线"].fields["产量"], 55.6)
+        self.assertEqual(by_line["D线"].fields["产量"], 16.0)
+        self.assertNotIn("E线", by_line)
+        self.assertEqual(round(sum(record.fields["产量"] for record in by_line.values()), 3), 279.5)
+
+    async def test_parse_production_output_repairs_real_feishu_ocr_interleaved_rows(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "小计总包\n"
+            "时间\n"
+            "6月30日\n"
+            "班次\n"
+            "白夜班\n"
+            "装量\n"
+            "一期\n"
+            "二期\n"
+            "计划投料量(吨)\n"
+            "A线净包装量(吨)\n"
+            "103.45\n"
+            "16\n"
+            "155\n"
+            "96\n"
+            "7.75\n"
+            "A线实际投料量(吨)\n"
+            "A线参料、垫底量(吨)\n"
+            "96\n"
+            "4.8\n"
+            "232\n"
+            "B线实际投料量(吨)\n"
+            "A线重烧料(吨)\n"
+            "192\n"
+            "一期合计投料量(吨)\n"
+            "B线净包装量(吨)\n"
+            "104.45\n"
+            "0\n"
+            "6.75\n"
+            "C线实际投料量(吨)\n"
+            "B线参料、垫底量(吨)\n"
+            "0\n"
+            "4.8\n"
+            "D线实际投料量(吨)\n"
+            "B线重烧料(吨)\n"
+            "0\n"
+            "55.6\n"
+            "E线实际投料量(吨)\n"
+            "C线包装量(吨)\n"
+            "0\n"
+            "16\n"
+            "投入与产出情况\n"
+            "71.6\n"
+            "二期合计投料量(吨)\n"
+            "D线包装量(吨)\n"
+            "192\n"
+            "0\n"
+            "合计(吨)\n"
+            "E线包装量(吨)\n"
+            "A线实际进窑量(吨)\n"
+            "135.682\n"
+            "一期合计净包装量(吨)\n"
+            "207.9\n"
+            "71.6\n"
+            "B线实际进窑量(吨)\n"
+            "137.796\n"
+            "二期合计净包装量(吨)\n"
+            "实际总包装量(吨)\n"
+            "303.6\n"
+            "合计实际进窑量(吨)\n"
+            "273.478\n"
+            "C线已加水10吨洗机。\n",
+            "2026-06-30 23:50:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(set(by_line), {"A线", "B线", "C线", "D线"})
+        self.assertEqual(by_line["A线"].fields["产量"], 103.45)
+        self.assertEqual(by_line["B线"].fields["产量"], 104.45)
+        self.assertEqual(by_line["C线"].fields["产量"], 55.6)
+        self.assertEqual(by_line["D线"].fields["产量"], 16.0)
+        self.assertNotIn("E线", by_line)
+        self.assertEqual(round(sum(record.fields["产量"] for record in by_line.values()), 3), 279.5)
+
+    async def test_parse_production_output_repairs_june_29_interleaved_rows(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "小计总包\n"
+            "时间\n"
+            "班次\n"
+            "白夜班\n"
+            "6月29日\n"
+            "装量\n"
+            "一期\n"
+            "二期\n"
+            "计划投料量(吨)\n"
+            "A线净包装量(吨)\n"
+            "105.2\n"
+            "155\n"
+            "16\n"
+            "96\n"
+            "9\n"
+            "A线实际投料量(吨)\n"
+            "A线参料、垫底量(吨)\n"
+            "112\n"
+            "4.8\n"
+            "233.5\n"
+            "B线实际投料量(吨)\n"
+            "A线重烧料(吨)\n"
+            "208\n"
+            "101.7\n"
+            "一期合计投料量(吨)\n"
+            "B线净包装量(吨)\n"
+            "32\n"
+            "8\n"
+            "C线实际投料量(吨)\n"
+            "B线参料、垫底量(吨)\n"
+            "0\n"
+            "4.8\n"
+            "D线实际投料量(吨)\n"
+            "B线重烧料(吨)\n"
+            "0\n"
+            "C线包装量(吨)\n"
+            "26.58\n"
+            "E线实际投料量(吨)\n"
+            "投入与产出情况\n"
+            "32\n"
+            "40.34\n"
+            "74.92\n"
+            "二期合计投料量(吨)\n"
+            "D线包装量(吨)\n"
+            "合计(吨)\n"
+            "240\n"
+            "8\n"
+            "E线包装量(吨)\n"
+            "A线实际进窑量(吨)\n"
+            "135.639\n"
+            "一期合计净包装量(吨)\n"
+            "206.9\n"
+            "二期合计净包装量(吨)\n"
+            "74.92\n"
+            "实际总包装量(吨)\n"
+            "308.42\n",
+            "2026-06-29 23:50:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(set(by_line), {"A线", "B线", "C线", "D线", "E线"})
+        self.assertEqual(by_line["A线"].fields["产量"], 105.2)
+        self.assertEqual(by_line["B线"].fields["产量"], 101.7)
+        self.assertEqual(by_line["C线"].fields["产量"], 26.58)
+        self.assertEqual(by_line["D线"].fields["产量"], 40.34)
+        self.assertEqual(by_line["E线"].fields["产量"], 8.0)
+        self.assertEqual(round(sum(record.fields["产量"] for record in by_line.values()), 3), 281.82)
+
+    async def test_parse_production_output_repairs_july_1_interleaved_rows(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "小计总包\n"
+            "班次\n"
+            "白班\n"
+            "时间\n"
+            "7月1日\n"
+            "装量\n"
+            "一期\n"
+            "二期\n"
+            "计划投料量(吨)\n"
+            "A线净包装量(吨)\n"
+            "52.1\n"
+            "94\n"
+            "0\n"
+            "48\n"
+            "2.5\n"
+            "A线实际投料量(吨)\n"
+            "A线掺料、垫底量(吨)\n"
+            "2.4\n"
+            "48\n"
+            "117\n"
+            "B线实际投料量(吨)\n"
+            "A线重烧料(吨)\n"
+            "96\n"
+            "52.6\n"
+            "一期合计投料量(吨)\n"
+            "B线净包装量(吨)\n"
+            "5\n"
+            "0\n"
+            "C线实际投料量(吨)\n"
+            "B线掺料、垫底量(吨)\n"
+            "0\n"
+            "2.4\n"
+            "D线实际投料量(吨)\n"
+            "B线重烧料(吨)\n"
+            "0\n"
+            "16.8\n"
+            "C线包装量(吨)\n"
+            "E线实际投料量(吨)\n"
+            "投入与产出情况\n"
+            "0\n"
+            "14.8\n"
+            "31.6\n"
+            "二期合计投料量(吨)\n"
+            "D线包装量(吨)\n"
+            "96\n"
+            "0\n"
+            "合计(吨)\n"
+            "E线包装量(吨)\n"
+            "A线实际进窑量(吨)\n"
+            "68.16\n"
+            "一期合计净包装量(吨)\n"
+            "104.7\n"
+            "二期合计净包装量(吨)\n"
+            "31.6\n"
+            "实际总包装量(吨)\n"
+            "148.6\n",
+            "2026-07-01 23:50:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(set(by_line), {"A线", "B线", "C线", "D线"})
+        self.assertEqual(by_line["A线"].fields["产量"], 52.1)
+        self.assertEqual(by_line["B线"].fields["产量"], 52.6)
+        self.assertEqual(by_line["C线"].fields["产量"], 16.8)
+        self.assertEqual(by_line["D线"].fields["产量"], 14.8)
+        self.assertNotIn("E线", by_line)
+        self.assertEqual(round(sum(record.fields["产量"] for record in by_line.values()), 3), 136.3)
+
+    async def test_parse_production_output_sums_net_packaging_with_rework_and_padding(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "6月30日\n"
+            "A线包装量（吨）\n"
+            "120\n"
+            "A线掺料、垫底量（吨）\n"
+            "7.75\n"
+            "A线重烧料（吨）\n"
+            "4.8\n"
+            "A线净包装量（吨）\n"
+            "103.45\n"
+            "C线包装量（吨）\n"
+            "55.6\n",
+            "2026-06-30 23:50:00",
+        )
+
+        by_line = {record.line: record for record in records if record.scenario == "production_output"}
+        self.assertEqual(by_line["A线"].fields["产量"], 103.45)
+        self.assertEqual(by_line["A线"].fields["产量口径"], "净包装量")
+        self.assertEqual(by_line["A线"].fields["净包装量"], 103.45)
+        self.assertEqual(by_line["A线"].fields["掺料垫底量"], 7.75)
+        self.assertEqual(by_line["A线"].fields["重烧料"], 4.8)
+        self.assertEqual(by_line["C线"].fields["产量"], 55.6)
+        self.assertEqual(by_line["C线"].fields["产量口径"], "包装量")
+
+    async def test_parse_production_output_requires_line_and_output_value(self) -> None:
+        listener = self._build_listener()
+
+        records = listener._parse_records_with_text_priority(
+            "",
+            "2026.07.01\n今日产量统计\n单位：吨\n线别待补充",
+            "2026-07-01 08:15:00",
+        )
+
+        self.assertEqual(records, [])
+
+    async def test_production_output_upsert_matches_date_and_line(self) -> None:
+        listener = self._build_listener()
+
+        match_fields = listener._build_upsert_match_fields(
+            {
+                "业务类型": "production_output",
+                "路由": "production_output",
+                "日期": "2026-07-01",
+                "线别": "S18-C线",
+                "源消息ID": "om_123",
+                "产量": 12.5,
+            }
+        )
+
+        self.assertEqual(
+            match_fields,
+            {
+                "日期": "2026-07-01",
+                "线别": "S18-C线",
+            },
+        )
 
     async def test_parse_product_normalizes_ocr_battery_rate_variants(self) -> None:
         listener = self._build_listener()

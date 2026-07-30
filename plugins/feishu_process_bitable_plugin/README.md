@@ -39,6 +39,7 @@
   - 同一主成品批次出现 `-1/-2/-3` 等多个样品时逐条记录，不取均值；`批次号` 写完整样品号，`成品批次` 保留主批次
   - 兼容表格截图里的无段位样品批号，例如 `S18-DA2605-085-CS`，并记录 `样品批号`、`检测日期`
 - `sintering`：烧结（A/B/C/D/E线，批次 + 样品值 + 自动均值）
+  - 支持压实简写 `S18-SC-DC2607-182-C1：2.357`；简写点位按单次测量写入 `C1-1` 和 `C1-均值`，同批次的 `C1/C2` 合并到一行
 - `crushing`：粉碎压实（A/B/C/D/E线，批次 + 样品值 + 频率）
 - `pure_water`：纯水（PH + 批次）
 - 产线批次主编码支持 `A/B/C/D/E`，例如 `S20-DA2604-001`、`S20-DC2604-001`、`S20-DE2604-001`
@@ -59,7 +60,7 @@
 - `table_name_routing_json`：路由 -> 表名（用于自动建表）
 - `auto_create_fields`：缺列自动创建（生产默认 `false`）
 - `enable_ocr_for_images`
-- `process_switch_json`（默认包含 `product=true`）
+- `process_switch_json`（默认包含 `product=true`、`production_output=true`）
 - `kiln_batch_io_row_mode`：`segment|slot`（默认 `segment`）
 - `merge_particle_size_to_stage_tables`：粒度数据归并到工序汇总表（默认 `true`）
 - `upsert_by_batch`：按批次优先更新已有行（默认 `true`，避免同批次拆成多行）
@@ -78,6 +79,20 @@
 - `pending_confirmation_table_id` / `pending_confirmation_table_name`：待确认池表配置
 - `auto_create_pending_confirmation_table`：只允许自动创建待确认池表，不影响业务表自动建表策略（默认 `false`）
 - `pending_default_status`：待确认记录默认状态（默认 `待确认`）
+
+## 生产产量截图
+
+群内产量截图由飞书 OCR 后进入 `production_output` 解析，写入默认表 `生产产量汇总表`。该数据只按日期和线别汇总，不绑定批次号，也不使用投料量或出窑量估算；投料量仍由投料数据链路独立计算。
+
+识别字段：
+
+- `日期`：优先使用 OCR 中的日期；只有 `6月30日` 这类日期时，用消息时间补年份；缺日期时用消息时间日期。
+- `线别`：支持 `S20-A线`、`S18-C线`，也支持现场日报截图里的 `A线`、`B线`、`C线`、`D线`、`E线`。
+- `产量`：支持 `产量`、`日产`、`生产量`、`净包装量`、`包装量` 等标签，单位固定写 `吨`。
+- `产量口径`：写入 `净包装量`、`包装量`、`产量` 等口径；同一线别同时出现 `包装量` 和 `净包装量` 时优先保留 `净包装量`。
+- `解析状态`：自动写 `已解析`。
+
+飞书 OCR 可能把表格拆成错行或乱序，解析器会优先用“线别 + 产量标签 + 邻近数值”绑定，例如 `C线包装量（吨）` 下一行的 `55.6` 会写为 `C线` 当日产量 `55.6吨`。A/B 线当前已有掺料、垫底、重烧动作时会优先取 `净包装量`；C/D/E 线当前只有 `包装量` 时先取包装量，后续出现 `净包装量` 后自动切换到净包装量。同一 `日期 + 线别` 使用 upsert 去重。
 
 ## 现场待确认池
 
@@ -107,6 +122,7 @@
   "product.S18": "tblProductS18xxxx",
   "product.S20": "tblProductS20yyyy",
   "product.S006": "tblProductS006xxxx",
+  "production_output": "tblProductionOutput",
   "feeding.A": "tblAxxxx",
   "feeding.C": "tblCxxxx",
   "feeding.E": "tblExxxx",
@@ -153,6 +169,7 @@
   - `product.S18` -> `S18成品数据汇总`
   - `product.S20` -> `S20成品数据汇总`
   - 其他成品系列默认 -> `<系列>成品数据汇总`
+  - `production_output` -> `生产产量汇总表`
   - `sintering.A` -> `A线烧结汇总`
   - `sintering.B` -> `B线烧结汇总`
   - `sintering.C` -> `C线烧结汇总`
