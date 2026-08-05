@@ -596,6 +596,16 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
     def _submit_ws_message(self, event_loop: asyncio.AbstractEventLoop, data: dict) -> None:
         asyncio.run_coroutine_threadsafe(self.ws_message(data), event_loop)
 
+    def _submit_ws_payload(self, event_loop: asyncio.AbstractEventLoop, data: dict) -> None:
+        messages = data.get('AddMsgs')
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict):
+                    self._submit_ws_message(event_loop, message)
+            return
+
+        self._submit_ws_message(event_loop, data)
+
     async def _handle_message(self, message: platform_message.MessageChain, target_id: str):
         """统一消息处理核心逻辑"""
         content_list = await self.message_converter.yiri2target(message)
@@ -745,7 +755,7 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
             def on_message(ws, message):
                 try:
                     data = json.loads(message)
-                    self._submit_ws_message(event_loop, data)
+                    self._submit_ws_payload(event_loop, data)
                 except json.JSONDecodeError:
                     self.logger.error(f'Non-JSON message: {message[:100]}...')
 

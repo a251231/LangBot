@@ -2,11 +2,11 @@
 
 ## Goal
 
-修复 WeChatPadPro v861 中来自群聊的好友申请未实际通过、但 LangBot 误记成功的问题，并保持非群聊来源的现有行为兼容。
+修复 WeChatPadPro v861 中来自群聊的好友申请未实际通过、但 LangBot 误记成功的问题，并确保 WebSocket 同步包中的 `AddMsgs` 会逐条进入现有消息处理链，同时保持非群聊来源的现有行为兼容。
 
 ## Architecture
 
-好友申请 XML 仍由 `wechatpad_friend_request.py` 解析；该模块把 `scene`、`V3`、`V4` 和可选的 `chatroomusername` 交给 `WeChatPadClient`，再由 `FriendApi` 映射为 v861 `VerifyUserRequestModel`。不新增第二个解析器或兼容入口。
+WebSocket 传输边界在 `wechatpad.py` 展开 v861 同步包的 `AddMsgs`，每个内部事件继续进入现有 `ws_message`；好友申请 XML 仍由 `wechatpad_friend_request.py` 解析，该模块把 `scene`、`V3`、`V4` 和可选的 `chatroomusername` 交给 `WeChatPadClient`，再由 `FriendApi` 映射为 v861 `VerifyUserRequestModel`。不新增第二个解析器或兼容入口。
 
 ## Tech Stack
 
@@ -30,6 +30,8 @@
 - 非群聊来源缺少该字段时仍发送空字符串。
 - `scene`、`V3`、`V4`、`OpCode=3` 和 `VerifyContent=''` 保持原样。
 - 外层 `Code=200` 继续兼容；响应存在 v861 的 `Data.base_response.ret` 时，只有 `ret=0` 视为业务成功。
+- v861 WebSocket 返回带 `AddMsgs` 的同步包时逐条派发内部字典；原有单条事件载荷仍直接派发。
+- `/friend/AgreeAdd` 保持 `OpCode=3`；Swagger 中该值明确定义为“同意好友/通过好友验证”，示例值 `2` 仅用于“添加好友/发送验证申请”。
 - 只重建 `langbot`，其他 Docker 容器 ID 必须保持不变。
 
 ## Verification
@@ -51,6 +53,8 @@ D:\code\LangBot\.venv\Scripts\python.exe -m ruff check `
 - Fact：当前 `FriendApi` 固定发送 `ChatRoomUserName=''`。
 - Fact：v861 Swagger 明确要求通过群添加时传群 ID。
 - Fact：重放旧申请得到外层 `Code=200`、内层 `Data.base_response.ret=-24`，旧票据已经失效。
+- Fact：生产 AOF 中 2026-08-03 10:20:25 的真实申请位于 `AddMsgs`，`scene=14`，群 ID、V3、V4 均存在；同期 LangBot 好友申请处理日志为 0。
+- Fact：生产 WebSocket 在该申请时间窗口保持 `101` 连接并持续传输数据，当前 `on_message` 却把整个同步包当作单条事件提交，顶层不含 `msg_type`，因此被消息守卫忽略。
 - Unknown：新鲜好友申请的成功响应尚待下一条真实申请验证。
 
 ### Ripple Signal Triage
@@ -99,6 +103,35 @@ D:\code\LangBot\.venv\Scripts\python.exe -m ruff check `
 - 仅执行 `docker compose ... up -d --no-deps --force-recreate langbot`。
 - 核对其他容器 ID、HTTP 200、启动日志、镜像内文件哈希和机器人开关。
 - 使用 Redis 中保留的当前 `scene=14` 申请数据调用修复后的接口，验证业务响应；不输出申请人或令牌信息。
+
+## Task 3: 展开 WebSocket 同步包并恢复真实事件派发
+
+**Files:** modify `src/langbot/pkg/platform/sources/wechatpad.py`, `tests/unit_tests/platform/test_wechatpad.py`
+
+**Why:** v861 `/ws/GetSyncMsg` 返回的顶层对象是同步包，真实好友申请位于 `AddMsgs`。当前代码把同步包直接交给只识别单条消息的守卫，导致所有内部事件在进入自动同意处理器前被忽略。
+
+**Impact/Compatibility:** 只在 WebSocket 传输边界展开同步包；已有单条字典载荷保持原派发方式，空或非法 `AddMsgs` 不产生伪事件。`ws_message`、好友申请解析和 API 请求合同不变。
+
+**Verification:** 先运行 `-k sync_envelope` 观察测试因缺少 `_submit_ws_payload` 失败，再运行完整 WeChatPad 测试与 Ruff，预期退出码均为 `0`。
+
+- [x] 在 `test_wechatpad.py` 新增 `test_sync_envelope_submits_each_add_msg_to_main_loop`，构造包含 `msg_type=37` 与 `msg_type=1` 的 `AddMsgs`，断言两条内部事件按顺序提交。
+- [x] 运行 `D:\code\LangBot\.venv\Scripts\python.exe -m pytest tests\unit_tests\platform\test_wechatpad.py -k sync_envelope -q`，记录因 `_submit_ws_payload` 尚不存在而失败的 RED。
+- [x] 在 `WeChatPadAdapter` 增加 `_submit_ws_payload`：`AddMsgs` 为列表时逐条调用 `_submit_ws_message`，否则保持原单条派发；让 WebSocket `on_message` 调用该方法。
+- [x] 运行完整 `test_wechatpad.py` 和计划顶部 Ruff 命令，确认同步包、单条载荷及既有好友申请合同全部通过。
+- [ ] 提交 `fix(wechatpad): dispatch messages from sync envelopes`，推送并仅重建生产 `langbot`。
+
+### Repair Track
+
+- Root cause：WebSocket 传输层未展开 v861 同步包，`AddMsgs` 中的真实事件从未进入消息守卫与好友申请处理器。
+- Canonical owner：`WeChatPadAdapter` 的 WebSocket `on_message` 边界。
+- Minimal change：新增一个同步包派发方法并替换一处直接提交调用。
+- Verification：同步包单测、完整适配器回归、生产新申请日志与好友关系确认。
+
+### Retirement Track
+
+- Retired logic：把所有 WebSocket JSON 都视为单条消息的直接提交路径。
+- Retained boundary：不含列表型 `AddMsgs` 的单条事件仍按原路径派发。
+- Retirement trigger：本次提交立即替换直接提交，不保留并行 owner 或 fallback。
 
 ## Risks
 

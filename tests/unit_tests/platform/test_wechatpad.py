@@ -326,6 +326,40 @@ def test_text_message_is_converted_and_dispatched_once():
     asyncio.run(scenario())
 
 
+def test_sync_envelope_submits_each_add_msg_to_main_loop():
+    adapter = _build_adapter()
+    event_loop = MagicMock()
+    submit_message = MagicMock()
+    object.__setattr__(adapter, '_submit_ws_message', submit_message)
+    friend_request = {'msg_type': 37, 'new_msg_id': 123}
+    text_message = {'msg_type': 1, 'new_msg_id': 456}
+
+    adapter._submit_ws_payload(
+        event_loop,
+        {
+            'Type': 10001,
+            'AddMsgs': [friend_request, text_message],
+        },
+    )
+
+    assert [call.args for call in submit_message.call_args_list] == [
+        (event_loop, friend_request),
+        (event_loop, text_message),
+    ]
+
+
+def test_single_websocket_message_is_submitted_unchanged():
+    adapter = _build_adapter()
+    event_loop = MagicMock()
+    submit_message = MagicMock()
+    object.__setattr__(adapter, '_submit_ws_message', submit_message)
+    message = {'msg_type': 1, 'new_msg_id': 123}
+
+    adapter._submit_ws_payload(event_loop, message)
+
+    submit_message.assert_called_once_with(event_loop, message)
+
+
 def test_worker_thread_submits_message_to_main_event_loop_without_waiting():
     async def scenario():
         adapter = _build_adapter()
