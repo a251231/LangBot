@@ -118,7 +118,7 @@ D:\code\LangBot\.venv\Scripts\python.exe -m ruff check `
 - [x] 运行 `D:\code\LangBot\.venv\Scripts\python.exe -m pytest tests\unit_tests\platform\test_wechatpad.py -k sync_envelope -q`，记录因 `_submit_ws_payload` 尚不存在而失败的 RED。
 - [x] 在 `WeChatPadAdapter` 增加 `_submit_ws_payload`：`AddMsgs` 为列表时逐条调用 `_submit_ws_message`，否则保持原单条派发；让 WebSocket `on_message` 调用该方法。
 - [x] 运行完整 `test_wechatpad.py` 和计划顶部 Ruff 命令，确认同步包、单条载荷及既有好友申请合同全部通过。
-- [ ] 提交 `fix(wechatpad): dispatch messages from sync envelopes`，推送并仅重建生产 `langbot`。
+- [x] 提交 `fix(wechatpad): dispatch messages from sync envelopes`，推送并仅重建生产 `langbot`。
 
 ### Repair Track
 
@@ -135,7 +135,7 @@ D:\code\LangBot\.venv\Scripts\python.exe -m ruff check `
 
 ## Risks
 
-- 当前申请可能已过期；此时未来申请链路仍可通过新事件验证，当前重放会返回可诊断业务状态。
+- 2026-08-03 的申请已由用户手动同意，之后的 `ret=-2` 只反映请求状态已变化，不作为票据有效性或参数正确性的判据；端到端成功仍以新的真实申请为准。
 - WeChatPadPro 响应结构缺少正式 schema，因此只对实际存在的内层 `Ret` 加强判断，不猜测其他字段。
 
 ## Repair Track
