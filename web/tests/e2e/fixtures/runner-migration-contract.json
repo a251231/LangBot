@@ -1,5 +1,5 @@
 {
-  "planner_version": "4",
+  "planner_version": "5",
   "fixture_only": true,
   "legacy_sections": {
     "local-agent": {
