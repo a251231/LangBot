@@ -1,6 +1,6 @@
 # 上游同步与 Fork 兼容规则
 
-本仓库以 `langbot-app/LangBot` 的 `master` 为上游。2026-10-01 同步基点为 `41820cd1`，产品版本为 `4.11.0-beta.3`，Plugin SDK 为 `0.7.6`。运行链路和权限边界以 `ARCHITECTURE.md` 为准。
+本仓库以 `langbot-app/LangBot` 的 `master` 为上游。2026-10-01 同步基点为 `41820cd1`（上游版本 `4.11.0-beta.3`），本 Fork 的发布版本为 `4.11.0`，Plugin SDK 为 `0.7.6`。运行链路和权限边界以 `ARCHITECTURE.md` 为准。
 
 ## 当前兼容行为
 
@@ -13,6 +13,8 @@
 - Docker 保留中文字体；镜像发布到 Fork 配置的 Docker 用户仓库。预发布版本创建为 GitHub prerelease，避免触发稳定版镜像标签发布。
 - 仓库插件和打包发布 workflow 继续保留，主工作区开发中的插件内容独立于本次同步。
 - CLA 签名 workflow 只在上游仓库运行；Fork 的合并检查不向上游 CLA 仓库写入签名。
+- 本 Fork 的稳定版 GitHub Release 标记为 Latest，发布版本镜像和 `latest` 标签；`master` 标签继续跟随主分支构建。界面查询本仓库 Release，优先提示稳定版；Compose 中 Watchtower 跟踪容器当前使用的镜像标签。
+- PyPI 发布 workflow 只在上游仓库运行；本 Fork 通过 GitHub Release 和自己的 Docker 仓库分发。
 
 ## 数据库升级
 
