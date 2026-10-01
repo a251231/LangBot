@@ -2,18 +2,6 @@ name: Build Plugins
 
 on:
   workflow_dispatch:
-    inputs:
-      upload_to_release:
-        description: 'Upload built plugin packages to GitHub Releases'
-        required: false
-        type: boolean
-        default: false
-      release_tag:
-        description: 'Release tag to upload to when upload_to_release is true'
-        required: false
-        type: string
-  release:
-    types: [published]
   pull_request:
     paths:
       - 'plugins/feishu_keyword_report_plugin/**'
@@ -79,53 +67,6 @@ jobs:
           name: plugin-package-${{ matrix.plugin }}
           path: plugins/${{ matrix.plugin }}/dist/*.lbpkg
           if-no-files-found: error
-
-      - name: Resolve release tag
-        id: release
-        if: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/master' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release) }}
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            release_tag="${{ github.event.release.tag_name }}"
-          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            release_tag="${GITHUB_REF#refs/tags/}"
-          elif [[ "$GITHUB_REF" == refs/heads/master ]]; then
-            version="$(python - <<'PY'
-          import pathlib
-          import tomllib
-
-          text = pathlib.Path('pyproject.toml').read_text(encoding='utf-8')
-          print(tomllib.loads(text)['project']['version'])
-          PY
-          )"
-            release_tag="v${version#v}"
-          else
-            release_tag="${{ inputs.release_tag }}"
-          fi
-
-          if [ -z "$release_tag" ]; then
-            echo "release_tag is required when uploading plugin packages to a release."
-            exit 1
-          fi
-
-          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
-
-      - name: Upload plugin package to GitHub Release
-        if: ${{ steps.release.outputs.tag != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Automated release for $RELEASE_TAG" || true
-          fi
-          for attempt in 1 2 3 4 5; do
-            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 3
-          done
-          gh release upload "$RELEASE_TAG" plugins/${{ matrix.plugin }}/dist/*.lbpkg --clobber
 
   publish-plugin-dist:
     name: Publish plugin packages to repository

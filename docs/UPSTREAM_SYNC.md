@@ -11,7 +11,7 @@
 - 微信消息去重、群提及解析和飞书监控显示名继续保留。
 - 监控会话更新沿用上游的用户 ID 归一化规则：数字 ID 转为字符串，字符串 ID 保持原值，兼容 PostgreSQL 严格参数类型。
 - Docker 保留中文字体；镜像发布到 Fork 配置的 Docker 用户仓库。预发布版本创建为 GitHub prerelease，避免触发稳定版镜像标签发布。
-- 仓库插件和打包发布 workflow 继续保留，主工作区开发中的插件内容独立于本次同步。
+- 仓库插件及打包 workflow 继续保留；插件包通过 CI artifact 和仓库 `dist` 分发，GitHub Release 仅提供 LangBot 前端包及 fnOS 安装包。插件 workflow 不监听 Release 发布事件，也不向 Release 上传插件附件。主工作区开发中的插件内容独立于本次同步。
 - CLA 签名 workflow 只在上游仓库运行；Fork 的合并检查不向上游 CLA 仓库写入签名。
 - 本 Fork 的稳定版 GitHub Release 标记为 Latest，发布版本镜像和 `latest` 标签；`master` 标签继续跟随主分支构建。界面查询本仓库 Release，优先提示稳定版；Compose 中 Watchtower 跟踪容器当前使用的镜像标签。
 - PyPI 发布 workflow 只在上游仓库运行；本 Fork 通过 GitHub Release 和自己的 Docker 仓库分发。
