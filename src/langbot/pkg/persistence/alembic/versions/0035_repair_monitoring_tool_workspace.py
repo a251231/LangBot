@@ -15,17 +15,19 @@ def upgrade() -> None:
     conn = op.get_bind()
     table = 'monitoring_tool_calls'
     inspector = sa.inspect(conn)
-    if table not in inspector.get_table_names():
+    tables = set(inspector.get_table_names())
+    if table not in tables or 'workspaces' not in tables:
         return
     if 'workspace_uuid' in {c['name'] for c in inspector.get_columns(table)}:
         return
     op.add_column(table, sa.Column('workspace_uuid', sa.String(36), nullable=True))
-    op.execute(
-        sa.text(
-            'UPDATE monitoring_tool_calls SET workspace_uuid = '
-            '(SELECT workspace_uuid FROM bots WHERE bots.uuid = monitoring_tool_calls.bot_id)'
+    if 'bots' in tables:
+        op.execute(
+            sa.text(
+                'UPDATE monitoring_tool_calls SET workspace_uuid = '
+                '(SELECT workspace_uuid FROM bots WHERE bots.uuid = monitoring_tool_calls.bot_id)'
+            )
         )
-    )
     remaining = conn.execute(
         sa.text('SELECT count(*) FROM monitoring_tool_calls WHERE workspace_uuid IS NULL')
     ).scalar()
