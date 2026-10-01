@@ -166,9 +166,7 @@ def test_friend_request_is_ignored_when_auto_accept_is_disabled():
                 'from_user_name': {'str': 'fmessage'},
                 'msg_type': 37,
                 'new_msg_id': 123,
-                'content': {
-                    'str': '<msg encryptusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'
-                },
+                'content': {'str': '<msg encryptusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'},
             }
         )
 
@@ -216,9 +214,7 @@ def test_friend_request_uses_fromusername_as_v3_fallback():
                 'from_user_name': {'str': 'fmessage'},
                 'msg_type': 37,
                 'new_msg_id': 123,
-                'content': {
-                    'str': '<msg fromusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'
-                },
+                'content': {'str': '<msg fromusername="v3_requester@stranger" ticket="v4_ticket" scene="30" />'},
             }
         )
 
@@ -429,9 +425,7 @@ def test_main_loop_follow_up_task_is_not_cancelled_after_dispatch():
 def test_outbound_send_does_not_block_main_event_loop():
     async def scenario():
         adapter = _build_adapter()
-        adapter.message_converter.yiri2target = AsyncMock(
-            return_value=[{'type': 'text', 'content': 'reply'}]
-        )
+        adapter.message_converter.yiri2target = AsyncMock(return_value=[{'type': 'text', 'content': 'reply'}])
         release = threading.Event()
 
         def blocking_send(**kwargs):
