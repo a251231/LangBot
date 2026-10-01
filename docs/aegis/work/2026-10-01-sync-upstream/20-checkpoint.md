@@ -36,3 +36,14 @@
 - evidence-bundle-draft-linux-ci-initial.json
 - Blocked on: none
 - Next step: 推送修复，等待最终CI并合并PR4到master
+
+## Checkpoint Update
+
+- Current todo: 上游整合及功能验收通过
+- Active slice: 主分支归入与交接
+- Completed todos:
+- 21冲突解决；全部Linux功能CI通过；首次双架构镜像通过；保留主工作区
+- Evidence refs:
+- evidence-bundle-draft-final-ci.json
+- Blocked on: none
+- Next step: 主分支最终状态通过 https://github.com/a251231/LangBot/pull/4 核对；无剩余代码修改

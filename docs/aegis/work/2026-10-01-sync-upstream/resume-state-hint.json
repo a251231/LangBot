@@ -2,9 +2,9 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-10-01-sync-upstream",
   "lastCheckpointRef": "docs/aegis/work/2026-10-01-sync-upstream/todo-checkpoint-draft.json",
-  "resumeInstruction": "读取PR4最新head检查结果；保留主工作区未提交改动",
+  "resumeInstruction": "以PR4合并状态和origin/master为最终来源，真实IM及自有插件需部署环境验收",
   "knownPartialWork": [
-    "Linux全部Python矩阵、快速集成、Box、启动及前端检查通过；修复PostgreSQL数字ID更新回归"
+    "21冲突解决；全部Linux功能CI通过；首次双架构镜像通过；保留主工作区"
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-10-01-sync-upstream/10-intent.md",
@@ -12,6 +12,6 @@
     "docs/aegis/work/2026-10-01-sync-upstream/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "不得将旧head绿检查作为最终head验证"
+    "分支最新镜像构建仍在后台，主工作区仍为用户开发分支"
   ]
 }

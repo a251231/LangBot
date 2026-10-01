@@ -24,3 +24,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-sync-upstream/proof-bundle.md | 2026-10-01-sync-upstream proof bundle |
 | 2026-10-01 | artifact | docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-initial.json | 2026-10-01-sync-upstream evidence linux-ci-initial |
 | 2026-10-01 | artifact | docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-postgres.json | 2026-10-01-sync-upstream evidence linux-ci-postgres |
+| 2026-10-01 | artifact | docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-final-ci.json | 2026-10-01-sync-upstream evidence final-ci |

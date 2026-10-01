@@ -25,3 +25,11 @@ No evidence has been recorded yet.
 - Source: GitHub Actions 36871080957 / 25fcfd8b
 - Summary: PostgreSQL迁移、监控RLS、向量库、发布迁移及插件身份场景66项全部通过；SQLite通过。GitHub Actions 36871081156 三组Python全量单测、快速集成、Box和启动全部通过。最终覆盖率和前端端到端待PR4检查，CLA旧base缺上游PAT与Fork功能无关。
 - Verifier: Codex
+
+## EvidenceBundleDraft
+
+- Artifact key: final-ci
+- Type: command
+- Source: GitHub Actions PR4 / a6c84061；Docker build 36869828804 / 6cbb2f26
+- Summary: a6c84061：Python3.11/3.12/3.13 全量单测、覆盖率、快速集成、Box、启动、SQLite/PostgreSQL迁移、Lint、Playwright全部通过。6cbb2f26双架构镜像构建并推送成功，最终Dockerfile未变化；最新head镜像重建后台进行中。CLA旧base失败原因已确认且新guard限上游。
+- Verifier: Codex

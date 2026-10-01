@@ -9,4 +9,5 @@
 - 文档：AGENTS.md 和 docs/UPSTREAM_SYNC.md 已同步当前依赖、行为、发布与迁移规则。ADR 保留既有责任边界，未新增独立架构决策。
 - Linux 验证：Python 3.11/3.12/3.13 全量单测、快速集成、Box、启动、Lint、SQLite 迁移通过；PostgreSQL 66 项通过。会话更新复用上游用户 ID 归一化函数，补充写入边界回归。
 - 发布约束：Fork 的 CLA workflow 限定上游仓库运行；当前 PR 的旧 base workflow 会继续报告缺少上游签名仓库凭据，合并后新 guard 生效。
-- 剩余验证：最终提交的覆盖率、前端端到端及镜像构建状态以 PR4 的 GitHub Actions 为准；真实 IM 和自有插件运行实例未在本次测试中连接。
+- 最终功能验收：`a6c84061` 的覆盖率、Playwright、三组 Python 全量单测、Lint、集成、启动及两种数据库检查全部通过。`6cbb2f26` 的双架构 Docker 镜像构建成功，最终 Dockerfile 未变化；后续 head 的镜像重建继续由 Actions 执行。
+- 剩余验证：真实 IM 和自有插件运行实例未在本次测试中连接；最终主分支合并状态及后续镜像构建状态以 [PR4](https://github.com/a251231/LangBot/pull/4) 为准。

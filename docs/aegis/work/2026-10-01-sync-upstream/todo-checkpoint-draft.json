@@ -1,15 +1,15 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-10-01-sync-upstream",
-  "currentTodo": "复验最终合并分支",
+  "currentTodo": "上游整合及功能验收通过",
   "completedTodos": [
-    "Linux全部Python矩阵、快速集成、Box、启动及前端检查通过；修复PostgreSQL数字ID更新回归"
+    "21冲突解决；全部Linux功能CI通过；首次双架构镜像通过；保留主工作区"
   ],
-  "activeSlice": "Linux CI 收尾",
+  "activeSlice": "主分支归入与交接",
   "evidenceRefs": [
-    "evidence-bundle-draft-linux-ci-initial.json"
+    "evidence-bundle-draft-final-ci.json"
   ],
   "blockedOn": null,
-  "nextStep": "推送修复，等待最终CI并合并PR4到master",
+  "nextStep": "主分支最终状态通过 https://github.com/a251231/LangBot/pull/4 核对；无剩余代码修改",
   "updatedAt": "2026-10-01"
 }
