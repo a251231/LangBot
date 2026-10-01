@@ -22,3 +22,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-01 | artifact | docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-local-validation.json | 2026-10-01-sync-upstream evidence local-validation |
 | 2026-10-01 | artifact | docs/aegis/work/2026-10-01-sync-upstream/gate-input-pack.json | 2026-10-01-sync-upstream gate input pack |
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-sync-upstream/proof-bundle.md | 2026-10-01-sync-upstream proof bundle |
+| 2026-10-01 | artifact | docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-initial.json | 2026-10-01-sync-upstream evidence linux-ci-initial |
+| 2026-10-01 | artifact | docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-postgres.json | 2026-10-01-sync-upstream evidence linux-ci-postgres |

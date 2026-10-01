@@ -8,6 +8,7 @@
   "retirementPlan": "旧会话列表实现已由上游索引取代，保留手动清理入口",
   "evidenceBundle": [
     "docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-initial.json",
+    "docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-postgres.json",
     "docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-local-validation.json"
   ]
 }

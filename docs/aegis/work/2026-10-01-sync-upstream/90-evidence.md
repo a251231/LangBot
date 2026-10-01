@@ -17,3 +17,11 @@ No evidence has been recorded yet.
 - Source: GitHub Actions PR4 / 6cbb2f26
 - Summary: Linux Python3.11/3.12/3.13 全量单测、快速集成、Box、启动、前端端到端、Lint、SQLite迁移通过。PostgreSQL64通过2失败，定位会话更新数字ID遗漏归一化；新本地回归先3失败再23通过1跳过。CLA上游专属凭据配置已加Fork guard，最后head复验待运行。
 - Verifier: Codex
+
+## EvidenceBundleDraft
+
+- Artifact key: linux-ci-postgres
+- Type: command
+- Source: GitHub Actions 36871080957 / 25fcfd8b
+- Summary: PostgreSQL迁移、监控RLS、向量库、发布迁移及插件身份场景66项全部通过；SQLite通过。GitHub Actions 36871081156 三组Python全量单测、快速集成、Box和启动全部通过。最终覆盖率和前端端到端待PR4检查，CLA旧base缺上游PAT与Fork功能无关。
+- Verifier: Codex
