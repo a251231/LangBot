@@ -17,6 +17,7 @@ This proof bundle is an advisory Aegis Method Pack record. It does not determine
 
 ## Evidence Bundle Refs
 
+- docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-initial.json
 - docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-local-validation.json
 
 ## Drift Check

@@ -25,3 +25,14 @@
 - New risk signals:
 - none
 - Advisory decision: needs-verification
+
+## Checkpoint Update
+
+- Current todo: 复验最终合并分支
+- Active slice: Linux CI 收尾
+- Completed todos:
+- Linux全部Python矩阵、快速集成、Box、启动及前端检查通过；修复PostgreSQL数字ID更新回归
+- Evidence refs:
+- evidence-bundle-draft-linux-ci-initial.json
+- Blocked on: none
+- Next step: 推送修复，等待最终CI并合并PR4到master

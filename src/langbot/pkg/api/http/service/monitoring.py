@@ -698,7 +698,7 @@ class MonitoringService:
         pipeline_id: str | None = None,
         pipeline_name: str | None = None,
         platform: str | None = None,
-        user_id: str | None = None,
+        user_id: str | int | None = None,
         user_name: str | None = None,
         bot_id: str | None = None,
     ) -> bool:
@@ -726,7 +726,7 @@ class MonitoringService:
         if platform is not None:
             update_values['platform'] = platform
         if user_id is not None:
-            update_values['user_id'] = user_id
+            update_values['user_id'] = _normalize_user_id(user_id)
         if user_name is not None:
             update_values['user_name'] = user_name
 

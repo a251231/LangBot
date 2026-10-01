@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   CLAAssistant:
+    if: github.repository == 'langbot-app/LangBot'
     runs-on: ubuntu-latest
     steps:
       - name: "CLA Assistant"

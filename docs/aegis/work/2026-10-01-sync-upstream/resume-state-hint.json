@@ -2,14 +2,16 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-10-01-sync-upstream",
   "lastCheckpointRef": "docs/aegis/work/2026-10-01-sync-upstream/todo-checkpoint-draft.json",
-  "resumeInstruction": "读取证据和当前 Git 状态；保持 D:/code/LangBot 未提交插件改动",
+  "resumeInstruction": "读取PR4最新head检查结果；保留主工作区未提交改动",
   "knownPartialWork": [
-    "21 个冲突解决、前端构建及 189 单测、59 兼容回归、18 SQLite 迁移通过"
+    "Linux全部Python矩阵、快速集成、Box、启动及前端检查通过；修复PostgreSQL数字ID更新回归"
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-10-01-sync-upstream/10-intent.md",
     "docs/aegis/work/2026-10-01-sync-upstream/20-checkpoint.md",
     "docs/aegis/work/2026-10-01-sync-upstream/todo-checkpoint-draft.json"
   ],
-  "unsafeToAssume": []
+  "unsafeToAssume": [
+    "不得将旧head绿检查作为最终head验证"
+  ]
 }

@@ -1,15 +1,15 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-10-01-sync-upstream",
-  "currentTodo": "完成历史资源迁移及 Linux 验证",
+  "currentTodo": "复验最终合并分支",
   "completedTodos": [
-    "21 个冲突解决、前端构建及 189 单测、59 兼容回归、18 SQLite 迁移通过"
+    "Linux全部Python矩阵、快速集成、Box、启动及前端检查通过；修复PostgreSQL数字ID更新回归"
   ],
-  "activeSlice": "迁移闭环与跨平台验证",
+  "activeSlice": "Linux CI 收尾",
   "evidenceRefs": [
-    "docs/UPSTREAM_SYNC.md"
+    "evidence-bundle-draft-linux-ci-initial.json"
   ],
   "blockedOn": null,
-  "nextStep": "推送合并分支并执行 Linux CI",
+  "nextStep": "推送修复，等待最终CI并合并PR4到master",
   "updatedAt": "2026-10-01"
 }
