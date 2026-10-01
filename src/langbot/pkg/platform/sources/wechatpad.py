@@ -3,9 +3,11 @@ import websocket
 import json
 
 from langbot.libs.wechatpad_api.client import WeChatPadClient
+from langbot.pkg.platform.sources.wechatpad_friend_request import handle_wechatpad_friend_request
 from langbot.pkg.platform.sources.wechatpad_message_guard import (
     WeChatPadMessageDeduplicator,
-    is_wechatpad_message,
+    is_wechatpad_friend_request,
+    is_wechatpad_text_message,
 )
 
 import typing
@@ -600,7 +602,15 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
     async def ws_message(self, data):
         """处理接收到的消息"""
 
-        if not is_wechatpad_message(data):
+        if is_wechatpad_friend_request(data):
+            if not self.config.get('auto_accept_friend', False):
+                return 'ok'
+            if self._message_deduplicator.is_duplicate(data):
+                return 'ok'
+            await handle_wechatpad_friend_request(self.bot, self.logger, data)
+            return 'ok'
+
+        if not is_wechatpad_text_message(data):
             return 'ok'
         if self._message_deduplicator.is_duplicate(data):
             return 'ok'
@@ -672,6 +682,15 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
             else:
                 await self.logger.warning(f'未处理的消息类型: {msg["type"]}')
                 continue
+
+    def _schedule_ws_payload(self, data: dict) -> None:
+        messages = data.get('AddMsgs')
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict):
+                    self._schedule_ws_message(message)
+            return
+        self._schedule_ws_message(data)
 
     def _schedule_ws_message(self, data: dict) -> None:
         loop = self._event_loop
@@ -782,7 +801,7 @@ class WeChatPadAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
                         logging.getLogger(__name__).warning('WeChatPad WebSocket message exceeds the size limit')
                         return
                     data = json.loads(message)
-                    self._schedule_ws_message(data)
+                    self._schedule_ws_payload(data)
                 except json.JSONDecodeError:
                     logging.getLogger(__name__).warning('WeChatPad received a non-JSON message')
 
