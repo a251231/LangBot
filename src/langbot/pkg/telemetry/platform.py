@@ -117,5 +117,6 @@ def observe_adapter(ap, context, adapter):
 
             return wrapped
 
-        setattr(adapter, name, make_wrapper(original, name))
-    setattr(adapter, '_execution_observed', True)
+        # Instrumentation wraps methods, not Pydantic configuration fields.
+        object.__setattr__(adapter, name, make_wrapper(original, name))
+    object.__setattr__(adapter, '_execution_observed', True)
