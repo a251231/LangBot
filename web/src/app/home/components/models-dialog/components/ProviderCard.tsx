@@ -9,7 +9,11 @@ import {
   Radar,
 } from 'lucide-react';
 import { httpClient, systemInfo } from '@/app/infra/http/HttpClient';
-import { ModelProvider } from '@/app/infra/entities/api';
+import {
+  LangBotModelAvailabilityItem,
+  ModelProvider,
+  ReasoningConfig,
+} from '@/app/infra/entities/api';
 import { Button } from '@/components/ui/button';
 import {
   Collapsible,
@@ -34,17 +38,22 @@ import {
   ProviderModels,
 } from '../types';
 import ModelItem from './ModelItem';
+import { sortModelsByCatalog } from '../../model-availability/sort-models';
 import AddModelPopover from './AddModelPopover';
 
 interface ProviderCardProps {
   provider: ModelProvider;
+  canManage: boolean;
   isLangBotModels?: boolean;
   supportTypes?: string[];
   isExpanded: boolean;
   isLoading: boolean;
   models?: ProviderModels;
-  accountType: 'local' | 'space';
+  isWorkspaceOwner: boolean;
+  ownerSpaceBound: boolean;
   spaceCredits: number | null;
+  modelMetadata: Record<string, LangBotModelAvailabilityItem>;
+  modelAvailabilityLoaded: boolean;
   // Popover states
   addModelPopoverOpen: string | null;
   editModelPopoverOpen: string | null;
@@ -61,6 +70,7 @@ interface ProviderCardProps {
     name: string,
     abilities: string[],
     extraArgs: ExtraArg[],
+    reasoningConfig: ReasoningConfig,
     contextLength?: number | null,
   ) => Promise<void>;
   onScanModels: (modelType?: ModelType) => Promise<ScanModelsResult>;
@@ -76,6 +86,7 @@ interface ProviderCardProps {
     name: string,
     abilities: string[],
     extraArgs: ExtraArg[],
+    reasoningConfig: ReasoningConfig,
     contextLength?: number | null,
   ) => Promise<void>;
   onOpenDeleteConfirm: (modelId: string) => void;
@@ -86,6 +97,7 @@ interface ProviderCardProps {
     modelType: ModelType,
     abilities: string[],
     extraArgs: ExtraArg[],
+    reasoningConfig: ReasoningConfig,
   ) => Promise<void>;
   isSubmitting: boolean;
   isTesting: boolean;
@@ -101,13 +113,17 @@ function maskApiKey(key: string): string {
 
 export default function ProviderCard({
   provider,
+  canManage,
   isLangBotModels = false,
   supportTypes,
   isExpanded,
   isLoading,
   models,
-  accountType,
+  isWorkspaceOwner,
+  ownerSpaceBound,
   spaceCredits,
+  modelMetadata,
+  modelAvailabilityLoaded,
   addModelPopoverOpen,
   editModelPopoverOpen,
   deleteConfirmOpen,
@@ -196,7 +212,7 @@ export default function ProviderCard({
               </div>
             </div>
             <div className="flex items-center gap-1 ml-2 shrink-0">
-              {isLangBotModels && accountType !== 'space' && (
+              {isLangBotModels && isWorkspaceOwner && !ownerSpaceBound && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -206,16 +222,15 @@ export default function ProviderCard({
                   }}
                 >
                   <LogIn className="h-4 w-4 mr-1" />
-                  {t('models.loginWithSpace')}
+                  {t('models.ownerMustBindSpace')}
                 </Button>
               )}
-              {isLangBotModels &&
-                accountType === 'space' &&
-                spaceCredits !== null && (
-                  <div className="flex items-center gap-1 border rounded-md px-2 h-8 text-sm mr-2">
-                    <span>
-                      {(spaceCredits / 5000).toFixed(2)} {t('models.credits')}
-                    </span>
+              {isLangBotModels && ownerSpaceBound && spaceCredits !== null && (
+                <div className="flex items-center gap-1 border rounded-md px-2 h-8 text-sm mr-2">
+                  <span>
+                    {(spaceCredits / 5000).toFixed(2)} {t('models.credits')}
+                  </span>
+                  {isWorkspaceOwner && (
                     <Button
                       variant="ghost"
                       size="icon"
@@ -230,9 +245,20 @@ export default function ProviderCard({
                     >
                       <Plus className="h-3 w-3" />
                     </Button>
-                  </div>
-                )}
-              {!isLangBotModels && (
+                  )}
+                </div>
+              )}
+              {isLangBotModels && !isWorkspaceOwner && ownerSpaceBound && (
+                <span className="text-xs text-muted-foreground">
+                  {t('models.usesOwnerSpaceBilling')}
+                </span>
+              )}
+              {isLangBotModels && !isWorkspaceOwner && !ownerSpaceBound && (
+                <span className="text-xs text-muted-foreground">
+                  {t('models.ownerMustBindSpace')}
+                </span>
+              )}
+              {canManage && !isLangBotModels && (
                 <>
                   <Button
                     variant="ghost"
@@ -317,7 +343,7 @@ export default function ProviderCard({
             ) : (
               <div />
             )}
-            {!isLangBotModels && (
+            {canManage && !isLangBotModels && (
               <div className="flex items-center gap-1">
                 <AddModelPopover
                   isOpen={
@@ -400,12 +426,20 @@ export default function ProviderCard({
               </p>
             ) : models ? (
               <div className="space-y-2">
-                {models.llm.map((model) => (
+                {(isLangBotModels
+                  ? sortModelsByCatalog(models.llm, modelMetadata)
+                  : models.llm
+                ).map((model) => (
                   <ModelItem
                     key={model.uuid}
                     model={model}
+                    canManage={canManage}
                     modelType="llm"
                     isLangBotModels={isLangBotModels}
+                    metadata={
+                      modelMetadata[model.uuid] ?? modelMetadata[model.name]
+                    }
+                    availabilityLoaded={modelAvailabilityLoaded}
                     editModelPopoverOpen={editModelPopoverOpen}
                     deleteConfirmOpen={deleteConfirmOpen}
                     onOpenEditModel={onOpenEditModel}
@@ -417,6 +451,7 @@ export default function ProviderCard({
                       name,
                       abilities,
                       extraArgs,
+                      reasoningConfig,
                       contextLength,
                     ) =>
                       onUpdateModel(
@@ -425,11 +460,23 @@ export default function ProviderCard({
                         name,
                         abilities,
                         extraArgs,
+                        reasoningConfig,
                         contextLength,
                       )
                     }
-                    onTestModel={(name, abilities, extraArgs) =>
-                      onTestModel(name, 'llm', abilities, extraArgs)
+                    onTestModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
+                      onTestModel(
+                        name,
+                        'llm',
+                        abilities,
+                        extraArgs,
+                        reasoningConfig,
+                      )
                     }
                     isSubmitting={isSubmitting}
                     isTesting={isTesting}
@@ -437,12 +484,20 @@ export default function ProviderCard({
                     onResetTestResult={onResetTestResult}
                   />
                 ))}
-                {models.embedding.map((model) => (
+                {(isLangBotModels
+                  ? sortModelsByCatalog(models.embedding, modelMetadata)
+                  : models.embedding
+                ).map((model) => (
                   <ModelItem
                     key={model.uuid}
                     model={model}
+                    canManage={canManage}
                     modelType="embedding"
                     isLangBotModels={isLangBotModels}
+                    metadata={
+                      modelMetadata[model.uuid] ?? modelMetadata[model.name]
+                    }
+                    availabilityLoaded={modelAvailabilityLoaded}
                     editModelPopoverOpen={editModelPopoverOpen}
                     deleteConfirmOpen={deleteConfirmOpen}
                     onOpenEditModel={onOpenEditModel}
@@ -450,17 +505,34 @@ export default function ProviderCard({
                     onOpenDeleteConfirm={onOpenDeleteConfirm}
                     onCloseDeleteConfirm={onCloseDeleteConfirm}
                     onDeleteModel={() => onDeleteModel(model.uuid, 'embedding')}
-                    onUpdateModel={(name, abilities, extraArgs) =>
+                    onUpdateModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
                       onUpdateModel(
                         model.uuid,
                         'embedding',
                         name,
                         abilities,
                         extraArgs,
+                        reasoningConfig,
                       )
                     }
-                    onTestModel={(name, abilities, extraArgs) =>
-                      onTestModel(name, 'embedding', abilities, extraArgs)
+                    onTestModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
+                      onTestModel(
+                        name,
+                        'embedding',
+                        abilities,
+                        extraArgs,
+                        reasoningConfig,
+                      )
                     }
                     isSubmitting={isSubmitting}
                     isTesting={isTesting}
@@ -468,12 +540,20 @@ export default function ProviderCard({
                     onResetTestResult={onResetTestResult}
                   />
                 ))}
-                {models.rerank.map((model) => (
+                {(isLangBotModels
+                  ? sortModelsByCatalog(models.rerank, modelMetadata)
+                  : models.rerank
+                ).map((model) => (
                   <ModelItem
                     key={model.uuid}
                     model={model}
+                    canManage={canManage}
                     modelType="rerank"
                     isLangBotModels={isLangBotModels}
+                    metadata={
+                      modelMetadata[model.uuid] ?? modelMetadata[model.name]
+                    }
+                    availabilityLoaded={modelAvailabilityLoaded}
                     editModelPopoverOpen={editModelPopoverOpen}
                     deleteConfirmOpen={deleteConfirmOpen}
                     onOpenEditModel={onOpenEditModel}
@@ -481,17 +561,34 @@ export default function ProviderCard({
                     onOpenDeleteConfirm={onOpenDeleteConfirm}
                     onCloseDeleteConfirm={onCloseDeleteConfirm}
                     onDeleteModel={() => onDeleteModel(model.uuid, 'rerank')}
-                    onUpdateModel={(name, abilities, extraArgs) =>
+                    onUpdateModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
                       onUpdateModel(
                         model.uuid,
                         'rerank',
                         name,
                         abilities,
                         extraArgs,
+                        reasoningConfig,
                       )
                     }
-                    onTestModel={(name, abilities, extraArgs) =>
-                      onTestModel(name, 'rerank', abilities, extraArgs)
+                    onTestModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
+                      onTestModel(
+                        name,
+                        'rerank',
+                        abilities,
+                        extraArgs,
+                        reasoningConfig,
+                      )
                     }
                     isSubmitting={isSubmitting}
                     isTesting={isTesting}

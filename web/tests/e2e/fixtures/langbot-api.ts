@@ -17,6 +17,7 @@ interface PipelineMock {
   description: string;
   config: JsonRecord;
   emoji: string;
+  kind: 'agent' | 'pipeline';
   is_default: boolean;
   updated_at: string;
 }
@@ -29,6 +30,7 @@ interface KnowledgeBaseMock {
   knowledge_engine_plugin_id: string;
   creation_settings: JsonRecord;
   retrieval_settings: JsonRecord;
+  initialized: boolean;
   knowledge_engine: {
     plugin_id: string;
     name: {
@@ -62,18 +64,53 @@ interface BotMock {
   adapter: string;
   adapter_config: JsonRecord;
   use_pipeline_uuid?: string;
+  event_bindings: unknown[];
+  plugin_processors: unknown[];
   pipeline_routing_rules: unknown[];
   adapter_runtime_values: JsonRecord;
   updated_at: string;
 }
 
+export interface WorkspaceEntryMock {
+  workspace: {
+    uuid: string;
+    instance_uuid: string;
+    name: string;
+    slug: string;
+    type: 'personal' | 'team';
+    status: 'active';
+    source: 'local' | 'cloud_projection';
+  };
+  membership: {
+    uuid: string;
+    workspace_uuid: string;
+    account_uuid: string;
+    display_name: string;
+    email: string;
+    role: 'owner' | 'admin' | 'developer' | 'operator' | 'viewer';
+    status: 'active';
+    joined_at: string;
+    created_at: string;
+  };
+  permissions: string[];
+  placement_generation: number;
+}
+
 interface LangBotApiMockState {
+  authenticated: boolean;
   bots: BotMock[];
   counters: Record<string, number>;
   knowledgeBases: KnowledgeBaseMock[];
   mcpServers: MCPServerMock[];
+  monitoringData: unknown;
+  monitoringSessions: unknown[];
   pipelines: PipelineMock[];
+  sessionAnalyses: Record<string, unknown>;
+  sessionMessages: Record<string, unknown[]>;
   skills: SkillMock[];
+  withAdapterEvents: boolean;
+  withRunnerToolSelector: boolean;
+  workspaces: WorkspaceEntryMock[];
 }
 
 function ok(data: unknown) {
@@ -105,6 +142,59 @@ function now() {
   return new Date().toISOString();
 }
 
+export function makeWorkspaceEntry(
+  uuid: string,
+  name: string,
+  source: 'local' | 'cloud_projection' = 'cloud_projection',
+): WorkspaceEntryMock {
+  const createdAt = now();
+  return {
+    workspace: {
+      uuid,
+      instance_uuid: 'instance-playwright',
+      name,
+      slug: uuid,
+      type: 'team',
+      status: 'active',
+      source,
+    },
+    membership: {
+      uuid: `membership-${uuid}`,
+      workspace_uuid: uuid,
+      account_uuid: 'account-playwright',
+      display_name: 'Playwright Admin',
+      email: 'admin@example.com',
+      role: 'owner',
+      status: 'active',
+      joined_at: createdAt,
+      created_at: createdAt,
+    },
+    permissions: [
+      'api_key.manage',
+      'audit.view',
+      'data.export',
+      'member.invite',
+      'member.remove',
+      'member.update_role',
+      'member.view',
+      'provider_secret.manage',
+      'resource.manage',
+      'resource.view',
+      'runtime.operate',
+      'workspace.view',
+    ],
+    placement_generation: 1,
+  };
+}
+
+function defaultWorkspaceEntry(): WorkspaceEntryMock {
+  return makeWorkspaceEntry(
+    'workspace-playwright',
+    'Playwright Workspace',
+    'local',
+  );
+}
+
 function nextId(state: LangBotApiMockState, prefix: string) {
   state.counters[prefix] = (state.counters[prefix] || 0) + 1;
   return `${prefix}-${state.counters[prefix]}`;
@@ -122,12 +212,14 @@ function emptyMonitoringData() {
     },
     messages: [],
     llmCalls: [],
+    toolCalls: [],
     embeddingCalls: [],
     sessions: [],
     errors: [],
     totalCount: {
       messages: 0,
       llmCalls: 0,
+      toolCalls: 0,
       embeddingCalls: 0,
       sessions: 0,
       errors: 0,
@@ -172,19 +264,171 @@ function makePipeline(
   data: JsonRecord,
   uuid = nextId(state, 'pipeline'),
 ): PipelineMock {
+  const kind =
+    data.kind === 'agent' || uuid.startsWith('agent-') ? 'agent' : 'pipeline';
+  const runnerId = 'plugin:langbot-team/LocalAgent/default';
+  const runnerConfig = {
+    model: {
+      primary: 'llm-valid',
+      fallbacks: [],
+    },
+    'enable-all-tools': false,
+    tools: ['unavailable_plugin_tool'],
+  };
+  const defaultConfig =
+    kind === 'agent'
+      ? {
+          runner: { id: runnerId, 'expire-time': 0 },
+          runner_config: { [runnerId]: runnerConfig },
+        }
+      : {
+          ai: {
+            runner: { id: runnerId, 'expire-time': 0 },
+            runner_config: { [runnerId]: runnerConfig },
+          },
+          trigger: {},
+          safety: {},
+          output: {},
+        };
   return {
     uuid,
     name: String(data.name || ''),
     description: String(data.description || ''),
-    config: (data.config as JsonRecord | undefined) || {
-      ai: {},
-      trigger: {},
-      safety: {},
-      output: {},
-    },
+    config: (data.config as JsonRecord | undefined) || defaultConfig,
     emoji: String(data.emoji || '⚙️'),
+    kind,
     is_default: false,
     updated_at: now(),
+  };
+}
+
+export function pipelineMetadata(withRunnerToolSelector = false) {
+  const runnerId = 'plugin:langbot-team/LocalAgent/default';
+  return {
+    configs: [
+      {
+        name: 'ai',
+        label: {
+          en_US: 'AI Feature',
+          zh_Hans: 'AI 能力',
+        },
+        stages: [
+          {
+            name: 'runner',
+            label: {
+              en_US: 'Runtime',
+              zh_Hans: '运行方式',
+            },
+            config: [
+              {
+                name: 'id',
+                label: {
+                  en_US: 'Runner',
+                  zh_Hans: '运行器',
+                },
+                type: 'select',
+                required: true,
+                default: runnerId,
+                options: [
+                  {
+                    name: runnerId,
+                    label: {
+                      en_US: 'Local Agent',
+                      zh_Hans: '本地 Agent',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: runnerId,
+            label: {
+              en_US: 'Local Agent',
+              zh_Hans: '本地 Agent',
+            },
+            config: [
+              {
+                id: 'model',
+                name: 'model',
+                label: {
+                  en_US: 'Model',
+                  zh_Hans: '模型',
+                },
+                type: 'model-fallback-selector',
+                required: true,
+                default: {
+                  primary: 'llm-valid',
+                  fallbacks: [],
+                },
+              },
+              ...(withRunnerToolSelector
+                ? [
+                    {
+                      id: 'plugin:langbot-team/LocalAgent/default.tools',
+                      name: 'tools',
+                      label: {
+                        en_US: 'Tools',
+                        zh_Hans: '工具',
+                      },
+                      type: 'rich-tools-selector',
+                      required: false,
+                      default: [],
+                    },
+                  ]
+                : []),
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function agentMetadata(withRunnerToolSelector = false) {
+  const metadata = pipelineMetadata(withRunnerToolSelector);
+  return {
+    runner_config: metadata.configs[0],
+    kinds: [
+      {
+        name: 'agent',
+        supported_event_patterns: ['*'],
+        message_only: false,
+      },
+      {
+        name: 'pipeline',
+        supported_event_patterns: ['message.*'],
+        message_only: true,
+      },
+    ],
+  };
+}
+
+function providerModelList() {
+  return {
+    models: [
+      {
+        uuid: '',
+        name: 'Broken Empty UUID Model',
+        provider_uuid: 'provider-empty',
+        provider: {
+          uuid: 'provider-empty',
+          name: 'Broken Provider',
+          requester: 'mock-provider',
+        },
+      },
+      {
+        uuid: 'llm-valid',
+        name: 'Valid Mock Model',
+        provider_uuid: 'provider-valid',
+        provider: {
+          uuid: 'provider-valid',
+          name: 'Mock Provider',
+          requester: 'mock-provider',
+        },
+        abilities: ['func_call'],
+      },
+    ],
   };
 }
 
@@ -222,6 +466,10 @@ function makeKnowledgeBase(
     creation_settings: (data.creation_settings as JsonRecord | undefined) || {},
     retrieval_settings:
       (data.retrieval_settings as JsonRecord | undefined) || {},
+    initialized:
+      data.initialized === false || data.defer_initialization === true
+        ? false
+        : true,
     knowledge_engine: {
       plugin_id: engine.plugin_id,
       name: engine.name,
@@ -262,6 +510,8 @@ function makeBot(
     use_pipeline_uuid: data.use_pipeline_uuid
       ? String(data.use_pipeline_uuid)
       : undefined,
+    event_bindings: (data.event_bindings as unknown[] | undefined) || [],
+    plugin_processors: (data.plugin_processors as unknown[] | undefined) || [],
     pipeline_routing_rules:
       (data.pipeline_routing_rules as unknown[] | undefined) || [],
     adapter_runtime_values: {
@@ -272,7 +522,7 @@ function makeBot(
   };
 }
 
-function mockAdapters() {
+function mockAdapters(withAdapterEvents = false) {
   return [
     {
       name: 'playwright-adapter',
@@ -286,6 +536,17 @@ function mockAdapters() {
       },
       spec: {
         categories: ['testing'],
+        ...(withAdapterEvents
+          ? {
+              supported_events: [
+                'message.received',
+                'message.edited',
+                'group.member_joined',
+                'group.member_left',
+                'feedback.received',
+              ],
+            }
+          : {}),
         config: [],
       },
     },
@@ -321,21 +582,35 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
   if (path === '/api/v1/user/account-info') {
     return fulfillJson(route, {
       initialized: true,
-      account_type: 'local',
-      has_password: true,
+      authenticated_invitation_acceptance_enabled: false,
+      invitation_registration_enabled: true,
+      password_login_enabled: true,
+      space_login_enabled: false,
     });
   }
 
   if (path === '/api/v1/user/check-token') {
-    return fulfillJson(route, { token: '' });
+    return fulfillJson(route, {
+      token: state.authenticated ? 'playwright-token' : '',
+    });
   }
 
   if (path === '/api/v1/user/auth') {
+    state.authenticated = true;
     return fulfillJson(route, { token: 'playwright-token' });
+  }
+
+  if (path === '/api/v1/user/space/callback') {
+    state.authenticated = true;
+    return fulfillJson(route, {
+      token: 'playwright-space-token',
+      user: 'admin@example.com',
+    });
   }
 
   if (path === '/api/v1/user/info') {
     return fulfillJson(route, {
+      account_uuid: 'account-playwright',
       user: 'admin@example.com',
       account_type: 'local',
       has_password: true,
@@ -346,8 +621,28 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
     return fulfillJson(route, { credits: null });
   }
 
+  if (path === '/api/v1/workspaces/bootstrap') {
+    return fulfillJson(route, { workspaces: state.workspaces });
+  }
+
+  if (path === '/api/v1/workspaces/current') {
+    const selectedWorkspaceUuid = request.headers()['x-workspace-id'];
+    const entry = state.workspaces.find(
+      (item) => item.workspace.uuid === selectedWorkspaceUuid,
+    );
+    return fulfillJson(route, entry || state.workspaces[0]);
+  }
+
+  if (path === '/api/v1/workspaces') {
+    return fulfillJson(route, {
+      workspaces: state.workspaces.map((entry) => entry.workspace),
+    });
+  }
+
   if (path === '/api/v1/platform/adapters') {
-    return fulfillJson(route, { adapters: mockAdapters() });
+    return fulfillJson(route, {
+      adapters: mockAdapters(state.withAdapterEvents),
+    });
   }
 
   if (path === '/api/v1/platform/bots') {
@@ -365,7 +660,7 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
 
   const botLogsMatch = path.match(/^\/api\/v1\/platform\/bots\/([^/]+)\/logs$/);
   if (botLogsMatch) {
-    return fulfillJson(route, { logs: [], total: 0 });
+    return fulfillJson(route, { logs: [], total_count: 0 });
   }
 
   const botMatch = path.match(/^\/api\/v1\/platform\/bots\/([^/]+)$/);
@@ -373,7 +668,12 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
     const botId = decodeURIComponent(botMatch[1]);
 
     if (method === 'PUT') {
-      const bot = makeBot(state, parseJsonBody(route), botId);
+      const current = state.bots.find((item) => item.uuid === botId);
+      const bot = makeBot(
+        state,
+        { ...(current || {}), ...parseJsonBody(route) },
+        botId,
+      );
       state.bots = [...state.bots.filter((item) => item.uuid !== botId), bot];
       return fulfillJson(route, {});
     }
@@ -389,8 +689,117 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
     });
   }
 
+  if (path === '/api/v1/provider/models/llm') {
+    return fulfillJson(route, providerModelList());
+  }
+
+  if (path === '/api/v1/provider/models/embedding') {
+    return fulfillJson(route, { models: [] });
+  }
+
+  if (path === '/api/v1/provider/models/rerank') {
+    return fulfillJson(route, { models: [] });
+  }
+
+  if (path === '/api/v1/tools') {
+    return fulfillJson(route, {
+      tools: [
+        {
+          name: 'available_plugin_tool',
+          human_desc: 'Available plugin tool for frontend E2E tests.',
+          source: 'plugin',
+          source_id: 'qa/plugin-smoke',
+          source_name: 'qa/plugin-smoke',
+        },
+      ],
+    });
+  }
+
+  if (path === '/api/v1/agents/_/metadata') {
+    return fulfillJson(route, agentMetadata(true));
+  }
+
+  if (path === '/api/v1/agents') {
+    if (method === 'POST') {
+      const agent = makePipeline(state, parseJsonBody(route));
+      state.pipelines = [
+        ...state.pipelines.filter((item) => item.uuid !== agent.uuid),
+        agent,
+      ];
+      return fulfillJson(route, { uuid: agent.uuid, kind: agent.kind });
+    }
+
+    return fulfillJson(route, { agents: state.pipelines });
+  }
+
+  const agentDebugMatch = path.match(
+    /^\/api\/v1\/agents\/([^/]+)\/debug(?:\/stream)?$/,
+  );
+  if (agentDebugMatch) {
+    const payload = parseJsonBody(route);
+    const result = {
+      event_id: nextId(state, 'event'),
+      event_type: String(payload.event_type || 'message.received'),
+      conversation_id: String(payload.conversation_id || 'debug-session'),
+      final_text: 'Mock Agent response',
+      outputs: [
+        {
+          kind: 'message',
+          role: 'assistant',
+          text: 'Mock Agent response',
+        },
+      ],
+    };
+    if (path.endsWith('/stream')) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/x-ndjson',
+        body: JSON.stringify({ kind: 'completed', data: result }) + '\n',
+      });
+    }
+    return fulfillJson(route, result);
+  }
+
+  const agentMatch = path.match(/^\/api\/v1\/agents\/([^/]+)$/);
+  if (agentMatch) {
+    const agentId = decodeURIComponent(agentMatch[1]);
+
+    if (method === 'PUT') {
+      const current = state.pipelines.find((item) => item.uuid === agentId);
+      const agent = makePipeline(
+        state,
+        { ...(current || {}), ...parseJsonBody(route) },
+        agentId,
+      );
+      state.pipelines = [
+        ...state.pipelines.filter((item) => item.uuid !== agentId),
+        agent,
+      ];
+      return fulfillJson(route, {});
+    }
+
+    if (method === 'DELETE') {
+      state.pipelines = state.pipelines.filter((item) => item.uuid !== agentId);
+      return fulfillJson(route, {});
+    }
+
+    const agent = state.pipelines.find((item) => item.uuid === agentId);
+    return fulfillJson(route, {
+      agent:
+        agent ||
+        makePipeline(
+          state,
+          {
+            name: agentId,
+            kind: agentId.startsWith('agent-') ? 'agent' : 'pipeline',
+          },
+          agentId,
+        ),
+    });
+  }
+
   if (path === '/api/v1/pipelines/_/metadata') {
-    return fulfillJson(route, { configs: [] });
+    return fulfillJson(route, pipelineMetadata(state.withRunnerToolSelector));
   }
 
   if (path === '/api/v1/pipelines') {
@@ -406,12 +815,27 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
     return fulfillJson(route, { pipelines: state.pipelines });
   }
 
+  if (
+    /^\/api\/v1\/pipelines\/[^/]+\/ws\/messages\/(person|group)$/.test(path)
+  ) {
+    return fulfillJson(route, { messages: [] });
+  }
+
+  if (/^\/api\/v1\/pipelines\/[^/]+\/ws\/reset\/(person|group)$/.test(path)) {
+    return fulfillJson(route, { message: 'reset' });
+  }
+
   const pipelineMatch = path.match(/^\/api\/v1\/pipelines\/([^/]+)$/);
   if (pipelineMatch) {
     const pipelineId = decodeURIComponent(pipelineMatch[1]);
 
     if (method === 'PUT') {
-      const pipeline = makePipeline(state, parseJsonBody(route), pipelineId);
+      const current = state.pipelines.find((item) => item.uuid === pipelineId);
+      const pipeline = makePipeline(
+        state,
+        { ...(current || {}), ...parseJsonBody(route) },
+        pipelineId,
+      );
       state.pipelines = [
         ...state.pipelines.filter((item) => item.uuid !== pipelineId),
         pipeline,
@@ -477,7 +901,18 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
     const baseId = decodeURIComponent(knowledgeBaseMatch[1]);
 
     if (method === 'PUT') {
-      const base = makeKnowledgeBase(state, parseJsonBody(route), baseId);
+      const current = state.knowledgeBases.find((item) => item.uuid === baseId);
+      const payload = parseJsonBody(route);
+      const base = makeKnowledgeBase(
+        state,
+        {
+          ...(current || {}),
+          ...payload,
+          initialized:
+            payload.initialize_engine === true ? true : current?.initialized,
+        },
+        baseId,
+      );
       state.knowledgeBases = [
         ...state.knowledgeBases.filter((item) => item.uuid !== baseId),
         base,
@@ -689,11 +1124,43 @@ async function handleBackendApi(route: Route, state: LangBotApiMockState) {
   }
 
   if (path === '/api/v1/monitoring/data') {
-    return fulfillJson(route, emptyMonitoringData());
+    return fulfillJson(route, state.monitoringData);
+  }
+
+  if (path === '/api/v1/monitoring/sessions') {
+    return fulfillJson(route, {
+      sessions: state.monitoringSessions,
+      total: state.monitoringSessions.length,
+    });
+  }
+
+  if (path === '/api/v1/monitoring/messages') {
+    const sessionId = url.searchParams.get('sessionId') || '';
+    const messages = state.sessionMessages[sessionId] || [];
+    return fulfillJson(route, {
+      messages,
+      total: messages.length,
+    });
+  }
+
+  const sessionAnalysisMatch = path.match(
+    /^\/api\/v1\/monitoring\/sessions\/([^/]+)\/analysis$/,
+  );
+  if (sessionAnalysisMatch) {
+    const sessionId = decodeURIComponent(sessionAnalysisMatch[1]);
+    return fulfillJson(
+      route,
+      state.sessionAnalyses[sessionId] || {
+        session_id: sessionId,
+        found: true,
+        tool_calls: [],
+      },
+    );
   }
 
   if (path === '/api/v1/monitoring/overview') {
-    return fulfillJson(route, emptyMonitoringData().overview);
+    const data = state.monitoringData as { overview?: unknown };
+    return fulfillJson(route, data.overview || emptyMonitoringData().overview);
   }
 
   if (path === '/api/v1/monitoring/token-statistics') {
@@ -798,22 +1265,67 @@ async function handleCloudApi(route: Route) {
 
 export async function installLangBotApiMocks(
   page: Page,
-  options: { authenticated?: boolean; storage?: JsonRecord } = {},
+  options: {
+    authenticated?: boolean;
+    language?: string;
+    monitoringData?: unknown;
+    monitoringSessions?: unknown[];
+    sessionAnalyses?: Record<string, unknown>;
+    sessionMessages?: Record<string, unknown[]>;
+    storage?: JsonRecord;
+    withAdapterEvents?: boolean;
+    withRunnerToolSelector?: boolean;
+    workspaces?: WorkspaceEntryMock[];
+  } = {},
 ) {
-  const { authenticated = false, storage = {} } = options;
+  const {
+    authenticated = false,
+    language = 'en-US',
+    monitoringData,
+    monitoringSessions,
+    sessionAnalyses,
+    sessionMessages,
+    storage = {},
+    withAdapterEvents = false,
+    withRunnerToolSelector = false,
+    workspaces = [defaultWorkspaceEntry()],
+  } = options;
   const state: LangBotApiMockState = {
+    authenticated,
     bots: [],
     counters: {},
     knowledgeBases: [],
     mcpServers: [],
+    monitoringData: monitoringData || emptyMonitoringData(),
+    monitoringSessions: monitoringSessions || [],
     pipelines: [],
+    sessionAnalyses: sessionAnalyses || {},
+    sessionMessages: sessionMessages || {},
     skills: [],
+    withAdapterEvents,
+    withRunnerToolSelector,
+    workspaces,
   };
 
   await page.addInitScript(
-    ({ authenticated, storage }) => {
-      localStorage.setItem('langbot_language', 'en-US');
+    ({ authenticated, language, storage }) => {
+      localStorage.setItem('langbot_language', language);
       localStorage.setItem('extensions_group_by_type', 'false');
+      if (!Object.hasOwn(storage, 'langbot_sidebar_guide_v1')) {
+        localStorage.setItem('langbot_sidebar_guide_v1', 'completed');
+      }
+      const contextualGuides = [
+        'langbot_bot_detail_guide_v1',
+        'langbot_runner_setup_guide_v1',
+        'langbot_knowledge_detail_guide_v1',
+        'langbot_pipeline_setup_guide_v1',
+        'langbot_plugin_processor_setup_guide_v1',
+      ];
+      for (const guideKey of contextualGuides) {
+        if (!Object.hasOwn(storage, guideKey)) {
+          localStorage.setItem(guideKey, 'completed');
+        }
+      }
 
       if (authenticated) {
         localStorage.setItem('token', 'playwright-token');
@@ -827,7 +1339,7 @@ export async function installLangBotApiMocks(
         localStorage.setItem(key, String(value));
       }
     },
-    { authenticated, storage },
+    { authenticated, language, storage },
   );
 
   await page.route('**/api/v1/**', (route) => handleBackendApi(route, state));

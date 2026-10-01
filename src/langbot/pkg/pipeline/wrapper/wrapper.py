@@ -140,8 +140,8 @@ class ResponseWrapper(stage.PipelineStage):
                                 reply_chain = result.get_content_platform_message_chain()
                                 is_plugin_reply = False
 
-                            # Attach files the agent produced in the sandbox
-                            # outbox, but only on the terminal assistant message.
+                            # Only collect Box outbox files for a terminal assistant
+                            # response; also accept provider final chunks here.
                             if self._is_final_assistant_message(result):
                                 await self._append_outbound_attachments(query, reply_chain)
 
@@ -158,17 +158,34 @@ class ResponseWrapper(stage.PipelineStage):
                                 result_type=entities.ResultType.CONTINUE,
                                 new_query=query,
                             )
+                    elif (
+                        isinstance(result, provider_message.MessageChunk) and result.is_final and not result.tool_calls
+                    ):
+                        # A blank final chunk may carry Box outbox files, but do not
+                        # send an empty chain: streaming adapters treat it as final.
+                        reply_chain = platform_message.MessageChain([])
+                        await self._append_outbound_attachments(query, reply_chain)
+                        if len(reply_chain) > 0:
+                            query.resp_message_chain.append(reply_chain)
+                            yield entities.StageProcessResult(
+                                result_type=entities.ResultType.CONTINUE,
+                                new_query=query,
+                            )
 
                     if result.tool_calls is not None and len(result.tool_calls) > 0:  # 有函数调用
                         function_names = [tc.function.name for tc in result.tool_calls]
 
                         reply_text = f'Call {".".join(function_names)}...'
 
-                        query.resp_message_chain.append(
-                            platform_message.MessageChain([platform_message.Plain(text=reply_text)])
-                        )
-
+                        # Only surface the tool-call notice when the pipeline option
+                        # is enabled. Emitting it unconditionally would become the
+                        # final streaming chunk, closing the stream early and pushing
+                        # the real answer into a separate message.
                         if query.pipeline_config['output']['misc']['track-function-calls']:
+                            query.resp_message_chain.append(
+                                platform_message.MessageChain([platform_message.Plain(text=reply_text)])
+                            )
+
                             event = events.NormalMessageResponded(
                                 launcher_type=query.launcher_type.value,
                                 launcher_id=query.launcher_id,

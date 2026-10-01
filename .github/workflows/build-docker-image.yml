@@ -42,15 +42,14 @@ jobs:
 
       - name: Build for Release
         if: ${{ github.event.release.prerelease == false }}
-        run: |
-          docker buildx build --platform linux/arm64,linux/amd64 \
-            -t ${IMAGE_REPO}:${{ steps.check_version.outputs.version }} \
-            -t ${IMAGE_REPO}:latest \
-            . --push
-
-      - name: Build for Pre-release
+        run: docker buildx build --build-arg LANGBOT_BUILD_REVISION=${{ github.sha }} --platform linux/arm64,linux/amd64 -t ${IMAGE_REPO}:${{ steps.check_version.outputs.version }} -t ${IMAGE_REPO}:latest . --push
+      - name: Build for Pre-release # no update for latest tag
         if: ${{ github.event.release.prerelease == true }}
+        env:
+          RELEASE_VERSION: ${{ steps.check_version.outputs.version }}
         run: |
-          docker buildx build --platform linux/arm64,linux/amd64 \
-            -t ${IMAGE_REPO}:${{ steps.check_version.outputs.version }} \
-            . --push
+          tags=(-t "${IMAGE_REPO}:$RELEASE_VERSION")
+          if [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+            tags+=(-t ${IMAGE_REPO}:beta)
+          fi
+          docker buildx build --build-arg LANGBOT_BUILD_REVISION=${{ github.sha }} --platform linux/arm64,linux/amd64 "${tags[@]}" . --push

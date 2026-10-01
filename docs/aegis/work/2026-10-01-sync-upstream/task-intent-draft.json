@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "将 upstream/master 41820cd1 合并到用户仓库 master 并保留本地定制",
+  "goal": "将 upstream/master 41820cd1 合并到用户仓库 master 并保留本地定制",
+  "successEvidence": [],
+  "stopCondition": "Stop when success evidence is satisfied or a blocker/risk requires pause.",
+  "nonGoals": [
+    "当前主工作区未提交插件改动"
+  ],
+  "scope": "核心、前端、迁移、发布流程的冲突整合及验证",
+  "changeKinds": [
+    "merge"
+  ],
+  "riskHints": []
+}

@@ -1,4 +1,293 @@
+import pipelineMigration from './pipeline-migration/ru-RU';
 const ruRU = {
+  assistant: {
+    modelHint: 'Сменить модель ассистента для следующего сообщения',
+    details: 'Показать исходные данные',
+    found: 'Найдено элементов: {{count}}',
+    completed: 'Готово',
+    failed: 'Ошибка',
+    denied: 'Не выполнено',
+    partial: 'Частичный результат',
+    operationFailed:
+      'Операция не удалась. Проверьте подробности и состояние ресурсов, прежде чем повторять изменение.',
+    operationDenied: 'Отклонено. Ничего из этого пакета не выполнено.',
+    openResource: 'Открыть ресурс',
+    sendUnconfirmed:
+      'Доставка не подтверждена. Проверьте соединение и откройте диалог заново.',
+    draftPlaceholder: 'Черновик следующего сообщения, пока идёт ответ…',
+    operations: {
+      create_pipeline: 'Создать Pipeline',
+      configure_pipeline: 'Настроить Pipeline',
+      create_knowledge_base: 'Создать базу знаний',
+      get_pipeline: 'Посмотреть Pipeline',
+      get_knowledge_schema: 'Посмотреть схему движка знаний',
+      list_operation_logs: 'Просмотр журнала операций',
+    },
+    resources: {
+      models: 'Найти чат-модели',
+      embedding_models: 'Найти модели эмбеддингов',
+      pipelines: 'Найти Pipelines',
+      knowledge_bases: 'Найти базы знаний',
+      knowledge_engines: 'Найти движки знаний',
+    },
+    title: 'Ассистент рабочего пространства',
+    subtitle: 'Создавайте приложения и управляйте ими',
+    newChat: 'Новый диалог',
+    close: 'Закрыть',
+    welcome:
+      'Расскажите, что вы хотите создать. Я изучу это рабочее пространство и предложу изменения для базы знаний и Pipeline, которые вы подтвердите.',
+    discover: 'Какие модели, базы знаний и Pipelines доступны?',
+    build: 'Помогите создать приложение для ответов на вопросы по базе знаний.',
+    toolResult: 'Результат операции',
+    review: 'Проверьте точные операции перед выполнением',
+    confirm: 'Подтвердить и выполнить',
+    decline: 'Отклонить',
+    working: 'Обработка…',
+    modelUnavailable:
+      'Модель недоступна. Проверьте её настройки и доступ, затем начните новый диалог.',
+    error:
+      'Этот ход не завершён. Проверьте результаты ресурсов перед новым диалогом; изменения не повторяются автоматически.',
+    running:
+      'Этот ход ещё выполняется или был прерван до сохранения результата. Откройте ассистента заново для обновления; проверьте ресурсы перед повтором.',
+    placeholder: 'Опишите ваше приложение…',
+    send: 'Отправить',
+  },
+  sidebarGuide: {
+    steps: {
+      monitoring: {
+        title: 'Проверьте активность',
+        description:
+          'Просматривайте активность ботов, использование моделей, объём сообщений и производительность системы.',
+      },
+      bots: {
+        title: 'Подключите платформы чата',
+        description:
+          'Подключайте LangBot к платформам чата и управляйте подключениями ботов.',
+      },
+      pipelines: {
+        title: 'Настройте обработчики',
+        description:
+          'Создавайте переиспользуемые конвейеры, Agents и конфигурации обработчиков плагинов, затем подключайте их к ботам.',
+      },
+      knowledge: {
+        title: 'Управляйте базами знаний',
+        description:
+          'Управляйте документами и внешними источниками знаний для улучшения ответов моделей.',
+      },
+      plugins: {
+        title: 'Управляйте расширениями',
+        description:
+          'Управляйте установленными плагинами, серверами MCP и навыками, включая их состояние.',
+      },
+      'add-extension': {
+        title: 'Добавьте расширения',
+        description:
+          'Устанавливайте расширения из магазина, GitHub или локального пакета.',
+      },
+      models: {
+        title: 'Настройте модели',
+        description:
+          'Настройте поставщиков и выберите языковые модели, модели эмбеддингов и другие модели LangBot.',
+      },
+      'api-integration': {
+        title: 'Настройте доступ к API',
+        description:
+          'Создавайте ключи API и настраивайте внешний доступ к сервисам LangBot и MCP.',
+      },
+    },
+  },
+  guidedTour: {
+    eventDebugDescription:
+      'Выберите поддерживаемое событие, введите тестовые данные и проверьте вывод и результаты инструментов. Действия платформы имитируются; модели и другие инструменты выполняются согласно настройкам.',
+    pipeline: {
+      trigger: {
+        title: 'Выберите сообщения для ответа',
+        description:
+          'Конвейер обрабатывает события сообщений и автоматически отвечает с помощью ИИ. Здесь задаются условия в группах, правила личных чатов и фильтры сообщений.',
+      },
+      ai: {
+        title: 'Настройте возможности ИИ',
+        description:
+          'Выберите локальный исполнитель или исполнитель внешней платформы, затем настройте модель, инструкции, базы знаний и другие параметры.',
+      },
+      output: {
+        title: 'Настройте ответы',
+        description:
+          'Задайте правила вывода, например обработку длинного текста, чтобы определить способ доставки ответов.',
+      },
+      safety: {
+        title: 'Настройте защиту',
+        description:
+          'При необходимости включите фильтрацию содержимого и ограничения частоты обработки.',
+      },
+      extensions: {
+        title: 'Выберите расширения',
+        description:
+          'Выберите плагины, серверы MCP и навыки, доступные этому конвейеру для обработки сообщений и работы с инструментами.',
+      },
+      basic: {
+        title: 'Управляйте конвейером',
+        description:
+          'Скопируйте конвейер для создания другой конфигурации или удалите ненужный конвейер.',
+      },
+      debug: {
+        title: 'Протестируйте диалог',
+        description:
+          'Отправьте тестовые сообщения, чтобы проверить условия запуска, ответы ИИ и обработку вывода. Изменения сохраняются перед тестом.',
+      },
+      monitoring: {
+        title: 'Посмотрите историю запусков',
+        description:
+          'На вкладке рядом с заголовком доступны прошлые диалоги, этапы обработки и ошибки для диагностики отсутствующих или неожиданных ответов.',
+      },
+      save: {
+        title: 'Сохраните и подключите бота',
+        description:
+          'Сохраните настройки, затем направьте события получения сообщений в этот конвейер на странице бота.',
+      },
+    },
+    pluginProcessor: {
+      select: {
+        title: 'Выберите исполнитель плагина',
+        description:
+          'Выберите исполнитель с поддержкой обработки событий. Автор плагина определяет поддерживаемые события и логику их обработки.',
+      },
+      parameters: {
+        title: 'Настройте параметры плагина',
+        description:
+          'Заполните настройки плагина. Для разных ботов и задач можно сохранить несколько конфигураций одного плагина.',
+      },
+      debug: {
+        title: 'Протестируйте обработку событий',
+      },
+      logs: {
+        title: 'Проверьте результаты',
+        description:
+          'Просмотрите состояние запуска, входное событие, журналы плагина и результаты вызовов, чтобы выяснить причины ошибок.',
+      },
+      save: {
+        title: 'Сохраните и привяжите к боту',
+        description:
+          'После сохранения добавьте конфигурацию в раздел обработчиков плагинов на странице бота. Заявленные события поступают автоматически, без настройки отдельных маршрутов.',
+      },
+    },
+    previous: 'Назад',
+    label: 'Руководство',
+    progress: 'Шаг {{current}} из {{total}}',
+    next: 'Далее',
+    finish: 'Завершить руководство',
+    skip: 'Пропустить',
+    bot: {
+      connection: {
+        title: 'Выберите способ подключения',
+        description:
+          'Выберите способ подключения, поддерживаемый адаптером. Его параметры обновятся автоматически.',
+      },
+      basic: {
+        title: 'Задайте имя бота',
+        description:
+          'Задайте понятное имя, чтобы находить подключение в маршрутах и журналах.',
+      },
+      adapter: {
+        title: 'Выберите адаптер платформы',
+        description:
+          'Выберите адаптер бота. Способ подключения и параметры платформы настраиваются после создания.',
+      },
+      parameters: {
+        title: 'Настройте платформу',
+        description:
+          'Введите учётные данные и параметры платформы. Настройки на стороне платформы описаны в документации адаптера.',
+        action: 'Открыть документацию адаптера',
+      },
+      routing: {
+        title: 'Настройте маршруты входящих событий',
+        description:
+          'Выберите обработчик для каждого события, получаемого ботом.',
+      },
+      save: {
+        title: 'Сохраните настройки бота',
+        description:
+          'Проверьте параметры подключения и маршруты событий, затем сохраните настройки. После этого можно включить бота.',
+      },
+      submit: {
+        title: 'Создайте бота',
+        description:
+          'Создайте выключенного бота, затем настройте подключение и параметры платформы на его странице.',
+      },
+    },
+    processorCreate: {
+      type: {
+        title: 'Выберите тип обработчика',
+        description:
+          'Конвейеры обрабатывают сообщения по заданному сценарию, агенты принимают решения с помощью моделей и инструментов, а обработчики плагинов обрабатывают заявленные события платформы.',
+      },
+      basic: {
+        title: 'Назовите обработчик',
+        description:
+          'Укажите понятное имя. Исполнитель и события настраиваются после создания.',
+      },
+      submit: {
+        title: 'Создайте и продолжите настройку',
+        description:
+          'После создания настройте исполнителя, параметры, события и инструменты для выбранного типа обработчика.',
+      },
+    },
+    runner: {
+      debug: {
+        title: 'Проверьте обработку событий',
+      },
+      select: {
+        title: 'Выберите или установите исполнителя',
+        description:
+          'Выберите установленного исполнителя или установите его прямо из списка магазина в этом поле.',
+        action: 'Открыть магазин исполнителей',
+      },
+      parameters: {
+        title: 'Настройте параметры исполнителя',
+        description:
+          'Укажите модель, учётные данные, URL сервиса и другие параметры выбранного исполнителя.',
+      },
+      events: {
+        title: 'Настройте события и инструменты',
+        description:
+          'Откройте вкладку событий и инструментов, чтобы выбрать события для агента и разрешённые инструменты платформы или LangBot.',
+      },
+    },
+    knowledge: {
+      basic: {
+        title: 'Опишите базу знаний',
+        description:
+          'Задайте понятное имя и необязательное описание перед выбором движка хранения и поиска.',
+      },
+      engine: {
+        title: 'Проверьте движок знаний',
+        description:
+          'Проверьте движок этой базы знаний. Его параметры и настройки поиска задаются ниже.',
+        action: 'Открыть магазин движков знаний',
+      },
+      parameters: {
+        title: 'Настройте параметры движка',
+        description:
+          'Заполните требуемые движком настройки хранения, модели, учётных данных или внешнего сервиса.',
+      },
+      retrieval: {
+        title: 'Настройте поиск',
+        description:
+          'Определите, как движок ищет и возвращает подходящий контент обработчикам.',
+      },
+      save: {
+        title: 'Сохраните настройки базы знаний',
+        description:
+          'Проверьте параметры движка и поиска, затем сохраните настройки.',
+      },
+      submit: {
+        title: 'Создайте базу знаний',
+        description:
+          'Создайте базу знаний, затем добавьте документы или подключите источники, поддерживаемые движком.',
+      },
+    },
+  },
+  pipelineMigration,
   sidebar: {
     home: 'Главная',
     extensions: 'Расширения',
@@ -15,6 +304,11 @@ const ruRU = {
     editionCloud: 'Cloud',
   },
   common: {
+    customValue: 'Свой вариант',
+    loadFailed: 'Не удалось загрузить. Попробуйте ещё раз.',
+    search: 'Поиск',
+    previous: 'Назад',
+    next: 'Далее',
     login: 'Войти',
     logout: 'Выйти',
     accountOptions: 'Настройки',
@@ -30,6 +324,8 @@ const ruRU = {
     loginLoadErrorDesc:
       'Не удалось подключиться к серверу LangBot. Убедитесь, что сервис запущен, и повторите попытку.',
     retry: 'Повторить',
+    showSecret: 'Показать секрет',
+    hideSecret: 'Скрыть секрет',
     enterEmail: 'Введите адрес электронной почты',
     enterPassword: 'Введите пароль',
     invalidEmail: 'Пожалуйста, введите корректный адрес электронной почты',
@@ -41,9 +337,14 @@ const ruRU = {
     joinDiscord: 'Присоединиться к Discord',
     create: 'Создать',
     edit: 'Редактировать',
+    editBasicInfo: 'Изменить основные сведения',
+    editBasicInfoDescription: 'Измените имя, описание и значок.',
+    editBasicInfoDescriptionNoIcon: 'Измените имя и описание.',
+    management: 'Управление',
     delete: 'Удалить',
     add: 'Добавить',
     select: 'Выбрать',
+    clear: 'Очистить',
     skill: 'Навык',
     cancel: 'Отмена',
     submit: 'Отправить',
@@ -68,35 +369,56 @@ const ruRU = {
     deleteError: 'Ошибка удаления: ',
     addRound: 'Добавить раунд',
     copy: 'Копировать',
+    download: 'Скачать',
     copySuccess: 'Скопировано',
     copyFailed: 'Ошибка копирования',
     test: 'Тест',
     forgotPassword: 'Забыли пароль?',
     agreementNotice: 'Продолжая, вы соглашаетесь с нашей',
+    termsOfService: 'Условия обслуживания',
     privacyPolicy: 'Политикой конфиденциальности',
     and: 'и',
     dataCollectionPolicy: 'Политикой сбора данных',
-    dataCollectionPolicyUrl: 'https://link.langbot.app/en/docs/data-policy',
+    dataCollectionPolicyUrl:
+      'https://langbot.app/docs/en/insight/data-collection-policy',
     loading: 'Загрузка...',
     fieldRequired: 'Это поле обязательно для заполнения',
     or: 'или',
-    loginWithSpace: 'Войти через Space',
+    loginWithSpace: 'Войти с аккаунтом LangBot',
     spaceLoginRecommended:
       'Рекомендуется: Используйте официальные стабильные API моделей и облачные сервисы',
     loginLocal: 'Войти с локальной учётной записью',
     loginWithPassword: 'Войти с паролем',
-    spaceLoginTitle: 'Войти через Space',
+    loginWithPasskey: 'Войти с помощью Passkey',
+    passkeyLoginSuccess: 'Passkey успешно подтверждён, вход...',
+    passkeyLoginFailed: 'Не удалось войти с помощью Passkey',
+    passkeyNotSupported:
+      'Passkey не поддерживается в этом браузере или на устройстве',
+    verify: 'Подтвердить',
+    back: 'Назад',
+    totpChallengeTitle: 'Двухфакторная проверка',
+    totpChallengeDesc:
+      'Введите 6-значный код из приложения-аутентификатора, чтобы продолжить',
+    totpUseRecoveryCode:
+      'Введите один из одноразовых кодов восстановления, чтобы продолжить',
+    enterTotpCode: 'Введите 6-значный код',
+    enterRecoveryCode: 'Введите код восстановления',
+    useRecoveryCode: 'Использовать код восстановления',
+    useTotpCode: 'Использовать код аутентификатора',
+    totpInvalidCode: 'Код неверный или уже использован, попробуйте снова',
+    totpVerifyFailed: 'Двухфакторная проверка не удалась, попробуйте снова',
+    spaceLoginTitle: 'Войти с аккаунтом LangBot',
     spaceLoginDescription:
       'Отсканируйте QR-код или перейдите по ссылке ниже для авторизации',
     spaceLoginUserCode: 'Ваш код',
     spaceLoginExpires: 'Код истекает через {{seconds}} секунд',
     spaceLoginWaiting: 'Ожидание авторизации...',
     spaceLoginSuccess: 'Авторизация успешна',
-    spaceLoginFailed: 'Ошибка входа через Space',
+    spaceLoginFailed: 'Ошибка входа с аккаунтом LangBot',
     spaceLoginExpired: 'Код авторизации истёк, попробуйте снова',
     spaceLoginCancel: 'Отмена',
     spaceLoginVisitLink: 'Перейти по ссылке',
-    spaceLoginProcessing: 'Вход через Space',
+    spaceLoginProcessing: 'Вход с аккаунтом LangBot',
     spaceLoginProcessingDescription:
       'Пожалуйста, подождите, пока мы завершим вход...',
     spaceLoginSuccessDescription: 'Перенаправление в LangBot...',
@@ -105,7 +427,7 @@ const ruRU = {
     backToLogin: 'Вернуться к входу',
     backToHome: 'На главную',
     spaceAccountCannotChangePassword:
-      'Для аккаунтов Space невозможно изменить пароль здесь',
+      'Для аккаунтов LangBot невозможно изменить пароль здесь',
     theme: 'Тема',
     changePassword: 'Изменить пароль',
     currentPassword: 'Текущий пароль',
@@ -167,11 +489,11 @@ const ruRU = {
     actions: 'Действия',
     apiKeyCreatedMessage:
       'Пожалуйста, скопируйте этот API-ключ. Если кнопка не работает, скопируйте вручную.',
+    apiKeyStoredSecurely: 'Secret shown only when created',
     none: 'Нет',
     more: 'Ещё ({{count}})',
     less: 'Свернуть',
     noItems: 'Нет элементов',
-    termsOfService: 'Условия обслуживания',
   },
   notFound: {
     title: 'Страница не найдена',
@@ -181,6 +503,37 @@ const ruRU = {
     help: 'Помощь',
   },
   models: {
+    codex: {
+      account: 'Подписка ChatGPT',
+      description:
+        'Войдите в аккаунт ChatGPT. Подписка не связана с оплатой API OpenAI; доступные модели и лимиты зависят от тарифа.',
+      disconnected: 'Не подключено',
+      loading: 'Проверка подключения…',
+      starting: 'Начало входа…',
+      pending: 'Ожидание авторизации',
+      connected: 'Подключено',
+      expired: 'Срок входа истёк. Получите новый код.',
+      error: 'Не удалось войти. Проверьте подключение и повторите попытку.',
+      canceling: 'Отмена входа…',
+      saveAndSignIn: 'Сохранить и войти',
+      done: 'Готово',
+      instructions:
+        'Введите этот код на странице OpenAI. Не закрывайте это окно до завершения входа.',
+      copyCode: 'Копировать код',
+      copied: 'Скопировано',
+      copyManually: 'Выделите и скопируйте код вручную.',
+      continueAtOpenAI: 'Продолжить в OpenAI',
+      expiresAt: 'Код действителен до {{time}}.',
+      retrying: 'Соединение прервано. Автоматическая повторная попытка…',
+      cancelSignIn: 'Отменить вход',
+      tryAgain: 'Повторить',
+      signIn: 'Войти',
+      reconnect: 'Переподключить',
+      disconnect: 'Отключить',
+      disconnectConfirm:
+        'Отключить этого провайдера? Его модели перестанут работать до повторного входа. Подписка ChatGPT не будет отменена.',
+      confirmDisconnect: 'Подтвердить отключение',
+    },
     title: 'Модели',
     description: 'Настройка и управление моделями, используемыми в конвейерах',
     createModel: 'Создать модель',
@@ -215,6 +568,19 @@ const ruRU = {
     selectModelAbilities: 'Выберите возможности модели',
     visionAbility: 'Распознавание изображений',
     functionCallAbility: 'Вызов функций',
+    reasoningAbility: 'Рассуждение',
+    reasoningLevel: 'Уровень рассуждений',
+    reasoningLevels: {
+      providerDefault: 'Использовать настройки поставщика',
+      disabled: 'Выключено',
+      enabled: 'Включено',
+      minimal: 'Минимальный',
+      low: 'Низкий',
+      medium: 'Средний',
+      high: 'Высокий',
+      xhigh: 'Очень высокий',
+      max: 'Максимальный',
+    },
     contextLength: 'Контекстное окно',
     contextLengthPlaceholder: 'Неизвестно',
     contextLengthInvalid:
@@ -244,9 +610,9 @@ const ruRU = {
     localProvider: 'Локальный',
     localProviderDescription: 'Модели, настроенные и управляемые локально',
     spaceProviderDescription:
-      'Модели, синхронизированные из вашего аккаунта Space',
+      'Модели, синхронизированные из вашего аккаунта LangBot',
     spaceDisabledForLocalAccount:
-      'Войдите через Space, чтобы использовать облачные модели',
+      'Войдите с аккаунтом LangBot, чтобы использовать облачные модели',
     syncModels: 'Синхронизировать',
     syncSuccess:
       'Синхронизация завершена: {{created}} создано, {{updated}} обновлено',
@@ -284,12 +650,31 @@ const ruRU = {
     searchProviders: 'Поиск провайдеров...',
     langbotModelsDescription: 'Облачные модели на базе LangBot Space',
     credits: 'Кредиты',
-    loginWithSpace: 'Войти через Space',
-    loginToUseModels: 'Войдите через Space, чтобы использовать облачные модели',
+    loginWithSpace: 'Войти с аккаунтом LangBot',
+    loginToUseModels:
+      'Войдите с аккаунтом LangBot, чтобы использовать облачные модели',
+    ownerMustBindSpace:
+      'The Workspace owner must connect a LangBot Account for LangBot Models.',
+    usesOwnerSpaceBilling:
+      "Uses the Workspace owner's LangBot Account billing and credits.",
     noModels: 'Модели не настроены',
+    availability: {
+      available: 'Доступна при последней проверке',
+      unavailable: 'Недоступна при последней проверке',
+      notChecked: 'Нет результата проверки',
+      lastChecked: 'Проверено {{time}}',
+    },
+    pricing: {
+      compact: '{{input}} / {{output}}',
+      inline: 'Ввод {{input}} · вывод {{output}}',
+      title: 'Кредиты за 1 млн токенов',
+      input: 'Ввод: {{credits}} кредитов',
+      output: 'Вывод: {{credits}} кредитов',
+      unavailable: 'Цена не найдена. Возможно, модель была удалена.',
+    },
     langbotModels: 'Модели LangBot',
     spaceTrialTooltip:
-      'Доступны бесплатные пробные кредиты! Войдите через Space, чтобы получить доступ к облачным моделям без настройки.',
+      'Доступны бесплатные пробные кредиты! Войдите с аккаунтом LangBot, чтобы получить доступ к облачным моделям без настройки.',
     unlockModels: 'Войдите для использования',
     editProvider: 'Редактировать провайдера',
     addProvider: 'Добавить провайдера',
@@ -305,6 +690,8 @@ const ruRU = {
     providerSaveError: 'Ошибка сохранения провайдера: ',
     providerDeleted: 'Провайдер удалён',
     providerDeleteError: 'Ошибка удаления провайдера: ',
+    deleteProviderCascadeConfirmation:
+      'Удалить этого провайдера и ВСЕ содержащиеся в нём модели? Это действие необратимо, его нельзя отменить.',
     deleteProviderConfirmation:
       'Вы уверены, что хотите удалить этого провайдера?',
     loadError: 'Не удалось загрузить данные',
@@ -325,6 +712,30 @@ const ruRU = {
     },
   },
   bots: {
+    pluginSubscriptions: {
+      incompleteEvents:
+        'Этот бот поддерживает только часть отслеживаемых событий ({{events}}). Обработчик может работать не во всех случаях так, как ожидается.',
+      description:
+        'Автоматически получает события, объявленные плагином, независимо от маршрутов выше.',
+      empty: 'Обработчики плагинов не привязаны.',
+      add: 'Добавить обработчик плагина',
+      existing: 'Выбрать конфигурацию',
+      new: 'Новая конфигурация',
+      noExisting: 'Нет доступных конфигураций. Создайте новую.',
+      shared:
+        'Боты с общей конфигурацией используют общие настройки и состояние выполнения.',
+      saveHint: 'Сохраните бота, чтобы активировать привязку.',
+      createAndBind: 'Создать и привязать',
+      created: 'Конфигурация создана. Сохраните бота для активации привязки.',
+      enable: 'Включить {{name}}',
+      remove: 'Отвязать {{name}}',
+      configure: 'Настроить',
+      logs: 'Журнал',
+    },
+    applyFailed: 'Настройки сохранены, но не применены',
+    internalErrorHint:
+      'Внутренняя ошибка. Проверьте журналы сервера по указанному идентификатору.',
+    errorReference: 'Идентификатор ошибки: {{id}}',
     title: 'Боты',
     description:
       'Создание и управление ботами — точками входа LangBot для подключения к различным платформам',
@@ -337,18 +748,32 @@ const ruRU = {
     botNameRequired: 'Имя бота не может быть пустым',
     botDescriptionRequired: 'Описание бота не может быть пустым',
     adapterRequired: 'Адаптер не может быть пустым',
+    connectionMode: 'Способ подключения',
+    connectionModeDescription:
+      'Выберите способ подключения, поддерживаемый адаптером.',
+    connectionWebhook: 'Webhook',
+    connectionWebhookDescription:
+      'Платформа отправляет события на URL, созданный LangBot.',
+    connectionPersistent: 'Постоянное соединение',
+    connectionPersistentDescription:
+      'LangBot поддерживает исходящее сокетное или потоковое соединение.',
+    noAdaptersForConnectionMode:
+      'Ни один установленный адаптер не поддерживает этот способ подключения.',
     defaultDescription: 'Бот',
     getBotConfigError: 'Не удалось получить конфигурацию бота: ',
     saveSuccess: 'Успешно сохранено',
     saveError: 'Ошибка сохранения: ',
-    createSuccess:
-      'Успешно создано. Пожалуйста, включите или измените привязанный конвейер',
+    createSuccess: 'Успешно создано. Настройте маршрутизацию событий',
     createError: 'Ошибка создания: ',
     deleteSuccess: 'Успешно удалено',
     deleteError: 'Ошибка удаления: ',
     deleteConfirmation: 'Вы уверены, что хотите удалить этого бота?',
     platformAdapter: 'Выбор платформы/адаптера',
     selectAdapter: 'Выберите адаптер',
+    legacyAdapters: 'Устаревшие адаптеры',
+    legacyAdapterBadge: 'Устаревший',
+    legacyAdaptersHint:
+      'У этих адаптеров есть новые событийные версии.\nОни сохранены только для существующих конфигураций и не рекомендуются для новых ботов.',
     adapterConfig: 'Настройка адаптера',
     viewAdapterDocs: 'Документация',
     bindPipeline: 'Привязать конвейер',
@@ -369,6 +794,224 @@ const ruRU = {
     routingConnection: 'Маршрутизация и подключение',
     routingConnectionDescription:
       'Привяжите конвейер, обрабатывающий сообщения для этого бота',
+    eventRouting: 'Маршрутизация событий',
+    eventRoutingDescription:
+      'Выберите обработчик для каждого события бота. Изменяйте логику в настройках соответствующего Agent или Pipeline. Pipeline поддерживает только события сообщений.',
+    eventBindings: 'Маршруты событий',
+    addEventBinding: 'Добавить маршрут',
+    addBehavior: 'Добавить поведение',
+    commonScenarios: 'Типовые сценарии',
+    dragEventRoute: 'Перетащить маршрут {{index}}',
+    behaviorReplyMessages: 'Отвечать на сообщения',
+    behaviorReplyMessagesDescription:
+      'Передавайте входящие сообщения обработчику.',
+    behaviorWelcomeMembers: 'Приветствовать новых участников',
+    behaviorWelcomeMembersDescription:
+      'Запускайте обработчик при вступлении участника в группу.',
+    behaviorHandleDepartures: 'Обрабатывать выход участников',
+    behaviorHandleDeparturesDescription:
+      'Запускайте обработчик при выходе или удалении участника.',
+    behaviorReviewFriendRequests: 'Проверять заявки в друзья',
+    behaviorReviewFriendRequestsDescription:
+      'Передавайте новые заявки в друзья обработчику.',
+    behaviorHandleModeration: 'Обрабатывать события модерации',
+    behaviorHandleModerationDescription:
+      'Запускайте обработчик при ограничении участника группы.',
+    behaviorCustom: 'Настроить другое событие',
+    behaviorCustomDescription:
+      'Добавьте маршрут и выберите событие из поддерживаемых адаптером.',
+    eventPattern: 'Событие',
+    eventPatternPlaceholder: 'Выберите событие',
+    targetType: 'Тип назначения',
+    target: 'Обработчик',
+    targetAgent: 'Agent',
+    targetPipeline: 'Конвейер',
+    targetDiscard: 'Отбросить',
+    selectTarget: 'Выберите обработчик',
+    searchTarget: 'Поиск обработчиков…',
+    noTargetFound: 'Совместимые обработчики не найдены',
+    priority: 'Приоритет',
+    enabled: 'Включено',
+    eventBindingDescriptionPlaceholder: 'Описание правила',
+    noEventBindings: 'Нет маршрутов событий',
+    unsupportedPipelineEvent: 'Конвейеры поддерживают только события message.*',
+    disable: 'Отключить',
+    enable: 'Включить',
+    disabledBindings: 'Отключено',
+    adapterEventsTitle: 'Поддерживаемые события',
+    adapterEventsDescription: 'Типов событий: {{count}}',
+    adapterEventsMore: 'Ещё {{count}}',
+    advancedEventValues: 'Показать все',
+    eventGroup: 'Группа',
+    eventGroupNames: {
+      bot: 'Состояние бота',
+      feedback: 'Обратная связь',
+      friend: 'Друзья',
+      group: 'Группы',
+      message: 'Сообщения',
+      platform: 'Платформа',
+    },
+    routeConflictTitle: 'Некоторые маршруты пересекаются',
+    routeConflictShadowed:
+      '{{shadowed}} может не запускаться, поскольку {{winner}} обрабатывает те же события раньше.',
+    routeConflictMore: 'Ещё {{count}} конфликтов маршрутов требуют внимания.',
+    routeFallbackCatchAll: '{{route}} — маршрут для всех событий.',
+    routeFallbackIgnored:
+      'События без подходящего маршрута игнорируются. Добавляйте общий маршрут, только если каждое событие требует явного результата.',
+    testRoute: 'Проверить маршрут',
+    adapterEventDebugAction: 'Тест прослушивания',
+    adapterEventDebugTitle: 'Отладка событий платформы',
+    adapterEventDebugDescription:
+      'Вызовите событие в {{platform}}. Оно появится здесь после получения адаптером.',
+    adapterEventObserveOnly:
+      'Это окно только наблюдает за событиями. Входящие события обрабатываются по текущим маршрутам.',
+    adapterEventPreparing: 'Подготовка',
+    adapterEventListening: 'Ожидание событий',
+    adapterEventListenerUnavailable: 'Приём событий прерван',
+    adapterEventLoadFailed:
+      'Не удалось прочитать события платформы. Убедитесь, что бот работает, и повторите попытку.',
+    adapterEventReceivedCount: 'Получено событий: {{count}}',
+    adapterEventClear: 'Очистить',
+    adapterEventEmptyTitle: 'Ожидание события платформы',
+    adapterEventEmptyDescription:
+      'Отправьте сообщение или вызовите событие в {{platform}}.',
+    adapterEventData: 'Показать данные события',
+    adapterEventNeedsSavedBot:
+      'Сохраните бота перед приёмом событий платформы.',
+    adapterEventCurrentPlatform: 'текущей платформе',
+    adapterConfigurationTest: 'Проверка настроек адаптера',
+    adapterConfigurationTestDescription:
+      'Сначала сохраните и включите бота, затем вызовите событие платформы для проверки настроек.',
+    refreshRouteStatus: 'Обновить состояние',
+    routeStatusIdle: 'Ещё не запускался',
+    routeStatusRefreshFailed: 'Не удалось обновить состояние маршрута.',
+    routeStatus: {
+      matched: 'Совпадение',
+      delivered: 'Доставлено',
+      discarded: 'Отброшено',
+      failed: 'Ошибка',
+      not_matched: 'Нет совпадения',
+    },
+    routeStatusDetail: {
+      matched: 'Маршрут соответствует событию.',
+      delivered: 'Обработчик получил событие.',
+      discarded: 'Событие намеренно отброшено.',
+      failed: 'Не удалось завершить обработку маршрута.',
+      not_matched: 'Ни один настроенный маршрут не соответствует событию.',
+    },
+    routeFailure: {
+      binding_disabled: 'Этот маршрут отключён.',
+      event_pattern_mismatch: 'Событие не соответствует маршруту.',
+      filters_mismatch: 'Тестовые данные не соответствуют условиям маршрута.',
+      lower_priority:
+        'Другой подходящий маршрут имеет более высокий приоритет.',
+      route_not_found: 'Для события не найден подходящий маршрут.',
+      processor_incompatible:
+        'Выбранный обработчик не поддерживает это событие.',
+      processor_not_found: 'Выбранный обработчик недоступен.',
+      runner_failed:
+        'Исполнитель Agent завершился с ошибкой при обработке события.',
+      delivery_failed: 'Обработчик завершил работу, но доставка не удалась.',
+    },
+    dryRunTitle: 'Проверка маршрута события',
+    dryRunDescription:
+      'Выберите событие, чтобы определить подходящий маршрут и обработчик.',
+    dryRunEventType: 'Тип события',
+    dryRunSampleReady: 'Пример события готов',
+    dryRunSampleDescription:
+      'LangBot подготовил пример данных для {{event}}. Обычно его можно использовать без изменений.',
+    dryRunEditPayload: 'Тестовые данные',
+    dryRunHidePayload: 'Скрыть данные',
+    dryRunPayload: 'Тестовые данные (JSON)',
+    dryRunPayloadHint: 'Используйте для проверки условий сообщений и диалогов.',
+    dryRunPayloadJsonError: 'Введите корректный JSON.',
+    dryRunPayloadObjectError: 'Данные должны быть объектом JSON.',
+    dryRunNeedsSavedBot: 'Сохраните бота перед проверкой маршрутов.',
+    dryRunFailed: 'Не удалось проверить маршрут. Повторите позже.',
+    dryRunAction: 'Показать совпадение',
+    dryRunRunning: 'Проверка…',
+    dryRunMatched: 'Маршрут найден',
+    dryRunNotMatched: 'Маршрут не найден',
+    dryRunTarget: 'Целевой обработчик',
+    dryRunNoTarget: 'Нет назначения',
+    dryRunMatchedRule: 'Подходящее правило',
+    dryRunRuleIndex: 'Маршрут {{index}}',
+    dryRunNoRule: 'Нет подходящего правила',
+    dryRunDiagnostics: 'Этапы диагностики',
+    dryRunDiagnosticSelected: 'Выбран маршрут {{route}}.',
+    dryRunDiagnosticMatched: '{{route}} соответствует. {{reason}}',
+    dryRunDiagnosticSkipped: '{{route}} пропущен. {{reason}}',
+    eventCustom: 'Пользовательское событие',
+    eventWildcard: 'Все события',
+    eventNamespaceWildcard: '{{namespace}}.*',
+    eventNames: {
+      message_received: 'Получено сообщение',
+      message_edited: 'Сообщение изменено',
+      message_deleted: 'Сообщение удалено',
+      message_reaction: 'Реакция на сообщение',
+      feedback_received: 'Получен отзыв',
+      friend_request_received: 'Получен запрос в друзья',
+      friend_added: 'Друг добавлен',
+      group_member_joined: 'Участник вступил в группу',
+      group_member_left: 'Участник покинул группу',
+      group_member_banned: 'Участник заблокирован',
+      bot_invited_to_group: 'Бот приглашён в группу',
+      bot_removed_from_group: 'Бот удалён из группы',
+      bot_muted: 'Боту запрещено отправлять сообщения',
+      bot_unmuted: 'Боту разрешено отправлять сообщения',
+      platform_specific: 'Событие конкретной платформы',
+    },
+    eventDescriptions: {
+      all: 'Соответствует всем событиям, полученным адаптером.',
+      namespace: 'Соответствует всем событиям {{group}}.',
+      namespace_bot:
+        'Соответствует приглашениям, удалениям, отключению звука бота и другим изменениям состояния.',
+      namespace_feedback:
+        'Соответствует обратной связи от платформы или пользователя.',
+      namespace_friend:
+        'Соответствует заявкам в друзья и изменениям дружеских связей.',
+      namespace_group:
+        'Соответствует вступлениям, выходам, удалениям участников и другим событиям группы.',
+      namespace_message:
+        'Соответствует получению, редактированию, удалению сообщений и реакциям.',
+      namespace_platform:
+        'Соответствует особым событиям платформы, предоставляемым адаптером.',
+      custom: 'Пользовательское событие или событие без описания.',
+      message_received:
+        'Пользователь или группа отправляет новое сообщение боту.',
+      message_edited:
+        'Платформа сообщает об изменении существующего сообщения.',
+      message_deleted: 'Платформа сообщает об удалении сообщения.',
+      message_reaction:
+        'Пользователь добавляет или удаляет реакцию на сообщение.',
+      feedback_received:
+        'Получена обратная связь от платформы или пользователя.',
+      friend_request_received: 'Кто-то отправляет боту заявку в друзья.',
+      friend_added: 'Установлена дружеская связь.',
+      group_member_joined: 'Участник вступает в группу, где есть бот.',
+      group_member_left: 'Участник покидает группу, где есть бот.',
+      group_member_banned: 'Участник группы заблокирован или удалён.',
+      bot_invited_to_group: 'Бот приглашён в группу.',
+      bot_removed_from_group: 'Бот удалён из группы.',
+      bot_muted: 'Боту запрещено отправлять сообщения в группе.',
+      bot_unmuted: 'Боту разрешено отправлять сообщения в группе.',
+      platform_specific: 'Событие платформы, специфичное для адаптера.',
+    },
+    conditions: 'Условия',
+    conditionsDescription:
+      'Для срабатывания должны выполняться все условия. Пустой список означает срабатывание всегда.',
+    conditionsEmpty: 'Нет условий — срабатывает всегда.',
+    addFilter: 'Добавить условие',
+    filterChatType: 'Тип сеанса',
+    filterChatId: 'ID сеанса',
+    filterMessageText: 'Текст сообщения',
+    filterMessageElement: 'Элемент сообщения',
+    operator_eq: 'равно',
+    operator_neq: 'не равно',
+    operator_contains: 'содержит',
+    operator_not_contains: 'не содержит',
+    operator_starts_with: 'начинается с',
+    operator_regex: 'регулярное выражение',
     routingRules: 'Правила условной маршрутизации',
     routingRulesDescription:
       'Правила проверяются по порядку; первое совпадение направляет в соответствующий конвейер. При отсутствии совпадений используется конвейер по умолчанию.',
@@ -453,6 +1096,10 @@ const ruRU = {
       discarded: 'Отклонена',
       userMessage: 'Пользователь',
       botMessage: 'Ассистент',
+      totalSessions: 'Сеансов: {{count}}',
+      userSearch: 'ID или имя пользователя',
+      startDate: 'Дата начала',
+      endDate: 'Дата окончания',
     },
     admins: {
       title: 'Admins',
@@ -470,10 +1117,318 @@ const ruRU = {
       deleteError: 'Failed to remove admin: ',
       noAdmins: 'No admins configured',
       setAdminTitle: 'Set as admin',
-      removeAdminTitle: 'Remove admin',
       adminBadge: 'Admin',
       configureAdmins: 'Manage Admins',
+      removeAdminTitle: 'Remove admin',
     },
+  },
+  agents: {
+    monitoring: {
+      description:
+        'Просмотр события, ответа модели и вызовов инструментов для каждой задачи.',
+      empty:
+        'Запусков пока нет. Вызовите событие платформы или запустите отладку.',
+      input: 'Входные данные',
+      eventData: 'Данные события',
+      execution: 'Ход выполнения',
+      rawEvents: 'Исходные события',
+      inputUnavailable: 'Входные данные этого запуска не записаны.',
+    },
+    eventProcessor: {
+      configurations: 'Конфигурации обработчиков плагинов',
+      configTab: 'Настройки',
+      logsTab: 'Журнал',
+      noSettings: 'Этот обработчик плагина не требует настройки.',
+      createPageTitle: 'Создать обработчик событий',
+      processWithPlugin: 'Обработка кодом плагина',
+      pluginSettings: 'Настройки плагина',
+      pluginSettingsDescription: 'Параметры, объявленные этим плагином.',
+      selectToDebug: 'Выберите плагин выше, чтобы начать отладку.',
+      debugOutput: 'Вывод обработчика',
+      debugDescription:
+        'Входные события, журналы плагина и результаты действий этой проверки.',
+      debugNotice:
+        'Плагин обрабатывает тестовое событие. Действия платформы используют Mock и не отправляют реальные сообщения; остальные инструменты работают согласно настройкам.',
+      create: 'Создать обработчик плагина',
+      type: 'Обработчик плагина',
+      description: 'Обрабатывает события с помощью кода и логики плагина.',
+      component: 'Обработчик плагина',
+      selectComponent: 'Выберите обработчик плагина',
+      unavailable: 'Компонент недоступен',
+      noComponents: 'Плагины с обработчиками не установлены.',
+      installPlugin: 'Установить плагин',
+      loadError: 'Не удалось загрузить данные.',
+      refresh: 'Обновить',
+      runs: 'Запуски',
+      noRuns: 'Запусков пока нет. Привяжите обработчик к боту.',
+      bindBot: 'Привязать к боту',
+      trace: 'Журнал и поток сообщений',
+      selectRun: 'Выберите запуск для просмотра.',
+      input: 'Входящее событие',
+      destination: 'Получатель',
+      loadMore: 'Загрузить ещё',
+      activation:
+        'Установите плагин, создайте конфигурацию обработчика и привяжите бота.',
+      status_timeout: 'Время истекло',
+      status_pending: 'Ожидание',
+      status_running: 'Выполняется',
+      status_completed: 'Завершено',
+      status_failed: 'Ошибка',
+      status_cancelled: 'Отменено',
+      status_queued: 'В очереди',
+      trace_run_completed: 'Выполнение завершено',
+      trace_run_failed: 'Ошибка выполнения',
+      trace_tool_call_started: 'Действие начато',
+      trace_tool_call_completed: 'Результат действия',
+    },
+    debugData: {
+      chatId: 'ID чата',
+      feedbackType: 'Тип отзыва (1: нравится, 2: не нравится, 3: отмена)',
+      title: 'Данные события',
+      form: 'Основные поля',
+      json: 'Полный JSON',
+      groupId: 'ID группы',
+      memberId: 'ID участника',
+      memberName: 'Имя участника',
+      userId: 'ID пользователя',
+      userName: 'Имя пользователя',
+      requesterId: 'ID заявителя',
+      requesterName: 'Имя заявителя',
+      messageId: 'ID сообщения',
+      duration: 'Длительность (секунды)',
+      message: 'Текст сообщения',
+      newMessage: 'Новый текст',
+      verificationMessage: 'Текст заявки',
+      reaction: 'Реакция',
+      groupName: 'Название группы',
+      feedback: 'Отзыв',
+      rating: 'Оценка',
+      eventName: 'Название события',
+      privateChat: 'Пусто для личного чата',
+      sampleUser: 'Тестовый пользователь',
+      sampleMessage: 'Привет',
+      sampleFeedback: 'Очень полезно',
+      invalidField: 'Проверьте {{field}}',
+    },
+    title: 'Обработчики',
+    description:
+      'Создавайте переиспользуемые обработчики и используйте их в маршрутизации событий бота',
+    create: 'Создать обработчик',
+    editAgent: 'Редактировать Agent',
+    selectFromSidebar: 'Выберите обработчик на боковой панели',
+    agentType: 'Agent',
+    agentTypeDescription:
+      'Используйте runner для обработки сообщений, участников групп, друзей, обратной связи и других событий платформы.',
+    pipelineType: 'Конвейер',
+    kindBadgeAgent: 'Agent',
+    kindBadgePipeline: 'Pipeline',
+    groupByKind: 'Группировать по типу',
+    groupByKindShort: 'Группа',
+    pipelineTypeDescription:
+      'Работает по заданному процессу: получить сообщение, вызвать AI и ответить пользователю. Поддерживает настройку баз знаний и плагинов; обрабатывает только события сообщений и подходит для задач с четкими шагами и контролем обработки.',
+    allEvents: 'Поддерживает все события',
+    messageEventsOnly: 'Только события сообщений',
+    chooseType: 'Выберите способ работы',
+    chooseTypeDescription:
+      'Сначала выберите тип обработчика. Остальные настройки доступны после создания.',
+    diagramHint: 'Как это работает',
+    agentDiagramTitle: 'Agent: решения и действия',
+    agentDiagramDescription:
+      'Agent получает разные события платформы, использует модели и инструменты для понимания ситуации и решает, что делать дальше.',
+    pipelineDiagramTitle: 'Конвейер: заданная последовательность',
+    pipelineDiagramDescription:
+      'Конвейер обрабатывает только события сообщений и выполняет шаги в заданном порядке.',
+    pipelineDiagramFlow: 'Сообщения проходят фиксированную последовательность',
+    diagramEvents: 'События платформы',
+    diagramAgentCanUse: 'Доступно Agent',
+    diagramMessages: 'Сообщения',
+    diagramMembers: 'Участники',
+    diagramFeedback: 'Обратная связь',
+    diagramDecide: 'Понять и решить',
+    diagramModel: 'Использовать модель',
+    diagramTools: 'Использовать инструменты',
+    diagramActions: 'Выполнить действие',
+    diagramMessage: 'Сообщение',
+    diagramPreprocess: 'Подготовка',
+    diagramAI: 'ИИ',
+    diagramPostprocess: 'Обработка результата',
+    diagramOutput: 'Вывод',
+    basicInfo: 'Основная информация',
+    basicInfoDescription: 'Задайте имя, иконку и описание',
+    runnerSettings: 'Runner',
+    advanced: 'Дополнительно',
+    eventsAndTools: 'События и инструменты',
+    eventsAndToolsDescription:
+      'Задайте события запуска и доступные инструменты.',
+    bindableEvents: 'Диапазон привязываемых событий',
+    bindableEventsDescription:
+      'Ограничьте, какие маршруты событий бота могут выбирать этот Agent. Обычно достаточно значения по умолчанию.',
+    configuredEvents: 'Добавленные события',
+    configuredEventsCount: 'Всего: {{count}}',
+    addEvent: 'Добавить событие',
+    removeEvent: 'Удалить событие',
+    eventActions: 'Автоматически включённые инструменты',
+    eventToolEnabled: 'Включено',
+    eventToolsEnabledCount: 'Включено инструментов: {{count}}',
+    noEventActions: 'Для этого события нет доступных действий.',
+    noEventsConfigured: 'События не добавлены',
+    noEventsConfiguredDescription:
+      'Ни одно событие не может запустить этот Agent.',
+    noEventsConfiguredBadge: 'Нет событий',
+    apiTools: 'Доступ к инструментам',
+    apiToolsDescription:
+      'Выберите инструменты, которые может вызывать этот Agent.',
+    otherTools: 'Другие инструменты',
+    otherToolsDescription:
+      'Выберите инструменты платформы, песочницы, MCP, плагинов и навыков.',
+    apiToolsSelected: 'Выбрано: {{count}}',
+    apiToolsSecurityHint:
+      'Включайте только необходимые этому Agent инструменты.',
+    apiToolsSearch: 'Поиск инструментов…',
+    eventApiTools: 'Инструменты событий',
+    eventToolUnavailable: 'Недоступно',
+    eventApiToolsDescription:
+      'Цели фиксируются по текущему событию. Agent передаёт только параметры действия.',
+    platformApiTools: 'Инструменты платформы',
+    platformApiToolsDescription:
+      'Agent может выбирать ID пользователей, групп и сообщений. Предоставляйте только необходимые права.',
+    apiToolEvents: 'События',
+    apiToolParameters: 'Параметры Agent',
+    apiToolSource: 'Источник',
+    apiToolNoParameters: 'нет',
+    sandboxTools: 'Песочница',
+    mcpTools: 'MCP',
+    pluginTools: 'Плагины',
+    skillTools: 'Навыки',
+    langbotBuiltIn: 'LangBot',
+    apiToolDetails: 'Подробности',
+    apiToolHideDetails: 'Скрыть',
+    apiToolsNoResults: 'Подходящие API или инструменты не найдены',
+    apiToolsCatalogUnavailable:
+      'Сервер LangBot не вернул каталог инструментов API. Убедитесь, что сервер обновлён и перезапущен. Это не означает отсутствие инструментов у платформы.',
+    hostToolsCatalogUnavailable: 'Каталог инструментов временно недоступен.',
+    apiToolRisk: {
+      read: 'Только чтение',
+      write: 'Действие',
+      dangerous: 'Чувствительное',
+    },
+    supportedEvents: 'Диапазон событий',
+    supportedEventsDescription:
+      'Выберите все события, группу или отдельные события. В маршрутах бота этот Agent будет доступен только для подходящих событий.',
+    searchEvents: 'Поиск событий…',
+    noEventsFound: 'Подходящие события не найдены',
+    nameRequired: 'Имя не может быть пустым',
+    createSuccess: 'Успешно создано',
+    createError: 'Ошибка создания: ',
+    loadError: 'Ошибка загрузки: ',
+    saveSuccess: 'Успешно сохранено',
+    saveError: 'Ошибка сохранения: ',
+    deleteSuccess: 'Успешно удалено',
+    deleteError: 'Ошибка удаления: ',
+    deleteConfirmation: 'Вы уверены, что хотите удалить этот Agent?',
+    dangerZone: 'Опасная зона',
+    dangerZoneDescription: 'Необратимые и деструктивные действия',
+    deleteAgentAction: 'Удалить этот Agent',
+    deleteAgentHint:
+      'После удаления события, привязанные к ней, больше не смогут выполняться.',
+    noRunnerMetadata: 'Метаданные Runner в данный момент недоступны.',
+    runnerStatusLoading: 'Проверка состояния исполнителя',
+    runnerStatusCheckFailed: 'Не удалось проверить состояние исполнителя',
+    runnerStatusCheckFailedDescription:
+      'Повторите проверку. Если ошибка остаётся, проверьте сервер и среду выполнения плагинов.',
+    noRunnersAvailable: 'Нет доступных исполнителей',
+    noRunnersAvailableDescription:
+      'Установите и включите расширение исполнителя перед настройкой Agent.',
+    installedRunners: 'Установленные исполнители',
+    marketplaceRunners: 'Плагины исполнителей в магазине',
+    viewMarketplace: 'Открыть магазин',
+    restoringRunnerInstall:
+      'Восстановление установки плагина и ожидание исполнителя…',
+    noInstalledRunners: 'Расширения исполнителей ещё не установлены.',
+    installingRunner: 'Установка {{runner}}...',
+    runnerInstallSuccess: '{{runner}} установлен и доступен для выбора',
+    selectedRunnerUnavailable: 'Выбранный исполнитель недоступен',
+    selectedRunnerUnavailableDescription:
+      '{{runner}} сейчас не зарегистрирован. Выберите другой исполнитель или восстановите расширение.',
+    noRunnerSelected: 'Исполнитель не выбран',
+    runnerConfigIncomplete: 'Настройка исполнителя не завершена',
+    runnerConfigIncompleteDescription:
+      'Заполните обязательные поля: {{fields}}',
+    runnerReady: 'Исполнитель готов',
+    runnerReadyDescription:
+      '{{runner}} зарегистрирован, среда выполнения плагинов подключена.',
+    debugTab: 'Отладка событий',
+    debugTitle: 'Отладка событий Agent',
+    debugDescription:
+      'Запустите текущий Agent с сообщением или событием платформы и проверьте фактический результат.',
+    debugResetSession: 'Сбросить сеанс',
+    debugEventType: 'Тип события',
+    debugNoEventsTitle: 'Нет событий для отладки',
+    debugNoEventsDescription:
+      'Сначала добавьте событие в разделе «События и инструменты».',
+    debugMessageReceived: 'Получено сообщение',
+    debugGroupMemberJoined: 'Участник вступил в группу',
+    debugGroupMemberLeft: 'Участник покинул группу',
+    debugFriendRequested: 'Получена заявка в друзья',
+    debugFeedbackReceived: 'Получена обратная связь',
+    debugCustomEvent: 'Пользовательское событие',
+    debugCustomEventType: 'Имя пользовательского события',
+    debugMessageInput: 'Ввод диалога',
+    debugEventSummary: 'Сводка события',
+    debugInputPlaceholder: 'Введите задачу для Agent',
+    debugEventPayload: 'Данные события (JSON)',
+    debugSupportedEvents: 'Agent поддерживает',
+    debugRun: 'Запустить тест',
+    debugSaveAndRun: 'Сохранить и запустить',
+    debugRunning: 'Выполняется',
+    debugTranscript: 'Журнал отладки',
+    debugTranscriptDescription:
+      'Входные данные и результаты Agent в текущем сеансе отладки.',
+    debugEmptyTitle: 'Проверьте поведение Agent',
+    debugEmptyTranscript:
+      'Выберите событие, введите тестовые данные и нажмите «Запустить тест». Результаты останутся на странице.',
+    debugAgentOutput: 'Результат Agent',
+    debugReasoning: 'Размышление',
+    debugTextOutput: 'Текстовый вывод',
+    debugPlatformNotice:
+      'Инструменты платформы используют Mock: Agent вызывает инструменты реально, но действия имитируются без отправки сообщений. Остальные инструменты выполняются согласно настройкам.',
+    debugToolSimulated: 'Успешная имитация · Mock',
+    debugStop: 'Остановить отладку',
+    debugMockOptions: 'Сценарий Mock (JSON)',
+    debugInvalidMock: 'Сценарий Mock должен быть корректным объектом JSON.',
+    debugToolMockFailed: 'Имитация ошибки · Mock',
+    debugMockOptionsHelp:
+      'По умолчанию вызовы успешны. Задайте ошибки по именам инструментов в errors, результаты запросов в results и неподдерживаемые API в unsupported_apis. Пример: {"errors":{"event_reply":"Имитация ошибки отправки"}}',
+    debugCancelled:
+      'Отладка остановлена. Предыдущие записи выполнения сохранены.',
+    debugNoToolCalls:
+      'Вызовы инструментов не зарегистрированы. Создание текста не означает отправку сообщения.',
+    debugToolCount:
+      'Зарегистрировано вызовов инструментов: {{count}}. Состояние и результаты приведены ниже.',
+    debugToolRunning: 'Выполняется',
+    debugToolCompleted: 'Завершено',
+    debugToolFailed: 'Ошибка',
+    debugToolInterrupted: 'Результат не получен',
+    debugToolArguments: 'Аргументы',
+    debugToolResult: 'Результат',
+    debugTestInput: 'Тестовый ввод',
+    debugNoTextOutput: 'Выполнение завершилось без текстового вывода.',
+    debugEventTypeRequired: 'Введите тип события',
+    debugInputRequired: 'Введите сообщение для диалога',
+    debugInvalidPayload: 'Данные события должны быть корректным объектом JSON',
+    debugUnsupportedEvent:
+      'Это событие не входит в допустимый набор событий Agent',
+    debugRunnerConfigInvalidDescription:
+      'Настройка исполнителя не завершена: {{message}}',
+    debugRunnerExecutionFailedDescription:
+      'Выполнение завершилось с ошибкой. Проверьте модель и настройки исполнителя и повторите попытку.',
+    debugRunnerTimeoutDescription:
+      'Превышено время выполнения. Повторите позже или измените тайм-аут исполнителя.',
+    debugApiKeyRequired: 'Отсутствует ключ API',
+    debugOpenRunnerConfig: 'Открыть настройки исполнителя',
+    debugReviewRunnerConfig: 'Проверить настройки исполнителя',
+    debugErrorDetails: 'Показать подробности ошибки',
+    debugRunFailed: 'Ошибка отладки Agent',
   },
   plugins: {
     title: 'Расширения',
@@ -503,8 +1458,11 @@ const ruRU = {
     getPluginListError: 'Не удалось получить список плагинов:',
     noPluginInstalled: 'Плагины не установлены',
     noExtensionInstalled: 'Расширения не установлены',
+    searchInstalled: 'Поиск установленных расширений',
+    noMatchingExtensions: 'Нет расширений, соответствующих «{{query}}»',
     loadingExtensions: 'Загрузка расширений...',
     groupByType: 'Группировать по формату',
+    groupByTypeShort: 'Группа',
     pluginConfig: 'Настройка плагина',
     pluginSort: 'Порядок плагинов',
     pluginSortDescription:
@@ -527,9 +1485,9 @@ const ruRU = {
     debugInfoTitle: 'Отладочная информация плагина',
     debugUrl: 'URL для отладки',
     debugKey: 'Ключ отладки',
+    debugKeyExpires: 'Смена в {{time}}; у каждого Workspace свой ключ',
     noDebugKey: '(Не задан)',
-    debugKeyDisabled:
-      'Ключ отладки не задан, аутентификация при отладке плагина не требуется',
+    debugKeyDisabled: 'Учетные данные отладки временно недоступны',
     boxStatusTitle: 'Box Runtime',
     boxStatus: 'Статус',
     boxConnected: 'Подключено',
@@ -569,6 +1527,7 @@ const ruRU = {
       KnowledgeEngine: 'Движок знаний',
       Parser: 'Парсер',
       Page: 'Страница',
+      Runner: 'Исполнитель',
     },
     uploadLocal: 'Загрузить локально',
     debugging: 'Отладка',
@@ -588,6 +1547,7 @@ const ruRU = {
       components: 'Компоненты',
       ready: 'Пакет плагина распакован. Подтвердите, чтобы начать установку.',
     },
+    uploadPluginOnly: 'Поддерживаются только пакеты плагинов .lbpkg',
     dragToUpload: 'Перетащите файл плагина сюда для загрузки',
     unsupportedFileType:
       'Неподдерживаемый тип файла, поддерживаются только файлы .lbpkg и .zip',
@@ -658,10 +1618,18 @@ const ruRU = {
     goToMarketplace: 'Перейти в маркетплейс',
     installProgress: {
       title: 'Установка {{name}}',
+      updateTitle: 'Обновление {{name}}',
       titleGeneric: 'Установка плагина',
+      titlePlugin: 'Установка плагина {{name}}',
+      titleMCP: 'Установка сервера MCP {{name}}',
+      titleSkill: 'Установка навыка {{name}}',
       overallProgress: 'Общий прогресс',
+      checkingUpdate: 'Проверка обновлений',
       downloading: 'Загрузка плагина',
+      validating: 'Проверка пакета',
       installingDeps: 'Установка зависимостей',
+      applyingUpdate: 'Применение обновления',
+      activating: 'Запуск и обновление компонентов',
       initializing: 'Инициализация настроек',
       launching: 'Запуск плагина',
       completed: 'Завершено',
@@ -671,21 +1639,27 @@ const ruRU = {
       depsProgress:
         '{{installed}}/{{total}} установлено · {{remaining}} осталось',
       installComplete: 'Плагин успешно установлен',
+      updateComplete: 'Плагин успешно обновлён',
+      installCompletePlugin: 'Плагин успешно установлен',
+      installCompleteMCP: 'Сервер MCP успешно установлен',
+      installCompleteSkill: 'Навык успешно установлен',
       dismiss: 'Закрыть',
       background: 'В фоновом режиме',
       taskQueue: 'Задачи установки',
       clearCompleted: 'Очистить завершённые',
       noTasks: 'Нет задач установки',
-      titlePlugin: 'Установка плагина {{name}}',
-      titleMCP: 'Установка сервера MCP {{name}}',
-      titleSkill: 'Установка навыка {{name}}',
-      installCompletePlugin: 'Плагин успешно установлен',
-      installCompleteMCP: 'Сервер MCP успешно установлен',
-      installCompleteSkill: 'Навык успешно установлен',
     },
-    uploadPluginOnly: 'Поддерживаются только пакеты плагинов .lbpkg',
   },
   market: {
+    certifiedPlugin: 'Сертифицированный плагин',
+    certificationTooltip:
+      'Эта версия прошла проверку изоляции данных и совместимости с общей средой выполнения. Пакет подписан.',
+    certificationLearnMore: 'О сертификации',
+
+    runnerUsage: 'Назначение исполнителя',
+    runnerUsageAll: 'Все',
+    runnerUsageAgent: 'Agent / Конвейер',
+    runnerUsageEvent: 'Обработчик плагина',
     searchPlaceholder: 'Поиск плагинов...',
     searchPlaceholderCount:
       'Поиск среди {{count}} расширений, возможностей или сценариев...',
@@ -698,6 +1672,10 @@ const ruRU = {
     allLoaded: 'Все плагины отображены',
     allLoadedCount: 'Показаны все {{count}} расширений',
     install: 'Установить',
+    installCard: 'Установить {{name}}',
+    installedCard: '{{name}} установлен',
+    installed: 'Установлено',
+    updateAvailable: 'Доступно обновление',
     installConfirm:
       'Вы уверены, что хотите установить плагин "{{name}}" ({{version}})?',
     downloadComplete: 'Плагин "{{name}}" загружен',
@@ -711,6 +1689,7 @@ const ruRU = {
     notFound: 'Информация о плагине не найдена',
     sortBy: 'Сортировать по',
     sort: {
+      hottest: 'По популярности',
       recentlyAdded: 'Недавно добавленные',
       recentlyUpdated: 'Недавно обновлённые',
       mostDownloads: 'Больше всего загрузок',
@@ -718,6 +1697,9 @@ const ruRU = {
     },
     downloads: 'загрузок',
     download: 'Скачать',
+    like: 'Нравится',
+    unlike: 'Убрать отметку',
+    likeFailed: 'Не удалось обновить отметку. Повторите попытку.',
     repository: 'Репозиторий',
     downloadFailed: 'Ошибка загрузки',
     noReadme: 'Этот плагин не предоставляет документацию README',
@@ -745,6 +1727,7 @@ const ruRU = {
       KnowledgeEngine: 'Движок знаний',
       Parser: 'Парсер',
       Page: 'Страница',
+      Runner: 'Исполнитель',
     },
     filterByType: 'Тип',
     allTypes: 'Все типы',
@@ -771,7 +1754,6 @@ const ruRU = {
       clearAll: 'Очистить всё',
       noTags: 'Нет доступных тегов',
     },
-    installCard: 'Установить {{name}}',
   },
   mcp: {
     title: 'MCP',
@@ -808,6 +1790,9 @@ const ruRU = {
     url: 'URL',
     headers: 'Заголовки',
     timeout: 'Таймаут',
+    toolCallTimeout: 'Таймаут вызова инструмента (секунды)',
+    toolCallTimeoutDescription:
+      'Максимальное ожидание одного вызова. 0 отключает ограничение. По умолчанию 300 секунд.',
     addArgument: 'Добавить аргумент',
     addEnvVar: 'Добавить переменную окружения',
     addHeader: 'Добавить заголовок',
@@ -823,6 +1808,15 @@ const ruRU = {
     connectionSuccess: 'Подключение успешно',
     connectionFailed: 'Не удалось подключиться, проверьте URL',
     connectionFailedStatus: 'Ошибка подключения',
+    connectionUnreachable:
+      'Сервер MCP недоступен. Проверьте, запущен ли он и доступен ли по сети.',
+    connectionTimeout:
+      'Время ожидания ответа MCP истекло. Проверьте сервис или увеличьте тайм-аут.',
+    connectionHttpError:
+      'Сервер MCP вернул HTTP {{status}}. Проверьте требования доступа и журналы сервера.',
+    oauthAuthorizationRequired: 'Требуется авторизация OAuth',
+    oauthAuthorizationRequiredSuggestion:
+      'Для этого MCP-сервера требуется вход через OAuth. OAuth-вход пока не поддерживается; если сервер это позволяет, добавьте заголовок Authorization вручную.',
     boxDisabledStdioRefused:
       'MCP-серверы в режиме stdio требуют песочницу Box, которая отключена в конфигурации (box.enabled = false).',
     boxUnavailableStdioRefused:
@@ -830,6 +1824,9 @@ const ruRU = {
     boxStdioRefusedSuggestion:
       'Включите Box (box.enabled = true) и убедитесь, что среда работает, либо переключите этот сервер в режим http/sse.',
     boxRequired: 'требуется Box',
+    disabledByPolicy: 'отключено политикой',
+    stdioDisabledByPolicy:
+      'Stdio MCP отключён в этом развёртывании. Используйте удалённый MCP-сервер.',
     stdioBlockedByBoxToast:
       'Сохранить MCP в режиме stdio нельзя: песочница Box отключена или недоступна. Включите Box либо выберите режим http/sse.',
     toolsFound: 'инструментов',
@@ -839,6 +1836,12 @@ const ruRU = {
     tabTools: 'Инструменты',
     tabResources: 'Ресурсы',
     tabDocs: 'Документация',
+    tabLogs: 'Журнал',
+    logsLevelAll: 'Все уровни',
+    logsRefresh: 'Обновить',
+    logsAutoRefresh: 'Автообновление',
+    logsEmpty:
+      'Журналов пока нет. Здесь будут отображаться журналы выполнения MCP-сервера.',
     noReadme: 'Документация отсутствует',
     parseResultFailed: 'Не удалось разобрать результат теста',
     noResultReturned: 'Тест не вернул результат',
@@ -914,6 +1917,7 @@ const ruRU = {
     earliestEdited: 'Давно изменённые',
     basicInfo: 'Основная информация',
     basicInfoDescription: 'Задайте название, иконку и описание конвейера',
+    managementDescription: 'Скопируйте или удалите этот конвейер.',
     aiCapabilities: 'ИИ',
     triggerConditions: 'Триггер',
     safetyControls: 'Безопасность',
@@ -965,9 +1969,9 @@ const ruRU = {
       selectAll: 'Выбрать все',
       enableAllPlugins: 'Включить все плагины',
       enableAllMCPServers: 'Включить все MCP-серверы',
+      enableAllSkills: 'Включить все навыки',
       allPluginsEnabled: 'Все плагины включены',
       allMCPServersEnabled: 'Все MCP-серверы включены',
-      enableAllSkills: 'Включить все навыки',
       allSkillsEnabled: 'Все навыки включены',
       skillsTitle: 'Навыки',
       noSkillsSelected: 'Навыки не выбраны',
@@ -975,14 +1979,14 @@ const ruRU = {
       selectSkills: 'Выбрать навыки',
       noSkillsAvailable: 'Нет доступных навыков',
       mcpServersScopeTooltip:
-        'Здесь задаётся только привязка MCP-серверов к конвейеру. Конкретные MCP-инструменты и ресурсы выбираются в AI Feature > Local Agent.',
+        'Здесь задаётся только привязка MCP-серверов к конвейеру. Конкретные MCP-инструменты и ресурсы выбираются в AI Feature > Runner.',
       enableAllMCPServersTooltip:
         'Если включено, все настроенные и включённые MCP-серверы станут кандидатами для инструментов и ресурсов MCP в AI Feature.',
     },
-    localAgent: {
+    runner: {
       toolsTitle: 'Инструменты',
       toolsDescription:
-        'Выберите инструменты плагинов, MCP и встроенные инструменты для этого Local Agent.',
+        'Выберите инструменты плагинов, MCP и встроенные инструменты для этого Runner.',
       toolsScopeTooltip:
         'MCP-инструменты берутся только из MCP-серверов, привязанных в Расширениях. Чтобы добавить источник, сначала привяжите там сервер.',
       enableAllTools: 'Включить все инструменты',
@@ -1000,7 +2004,7 @@ const ruRU = {
       selectTools: 'Выбрать инструменты',
       resourcesTitle: 'Ресурсы',
       resourcesDescription:
-        'Выберите MCP-ресурсы и базы знаний для этого Local Agent.',
+        'Выберите MCP-ресурсы и базы знаний для этого Runner.',
       knowledgeBases: 'Базы знаний',
       mcpResources: 'MCP-ресурсы',
       mcpResourcesScopeTooltip:
@@ -1018,6 +2022,7 @@ const ruRU = {
       privateChat: 'Личный чат',
       groupChat: 'Групповой чат',
       send: 'Отправить',
+      saveAndSend: 'Сохранить и отправить',
       reset: 'Сбросить диалог',
       inputPlaceholder: 'Отправить {{type}} сообщение...',
       noMessages: 'Нет сообщений',
@@ -1031,8 +2036,8 @@ const ruRU = {
       atTips: 'Упомянуть бота',
       streaming: 'Потоковая передача',
       streamOutput: 'Поток',
-      connected: 'WebSocket подключён',
-      disconnected: 'WebSocket отключён',
+      connected: 'Подключено',
+      disconnected: 'Отключено',
       connectionError: 'Ошибка подключения WebSocket',
       connectionFailed: 'Ошибка подключения WebSocket',
       notConnected: 'WebSocket не подключён, повторите попытку позже',
@@ -1048,7 +2053,8 @@ const ruRU = {
       uploading: 'Загрузка...',
     },
     monitoring: {
-      title: 'Мониторинг',
+      title: 'Журнал выполнения',
+      workbench: 'Настройка и отладка',
       description:
         'Просмотр журналов выполнения и ошибок конвейера (за последние 24 часа)',
       detailedLogs: 'Подробные журналы',
@@ -1133,6 +2139,24 @@ const ruRU = {
     knowledgeEngine: 'Движок знаний',
     knowledgeEngineRequired: 'Движок знаний обязателен',
     selectKnowledgeEngine: 'Выберите движок знаний',
+    installedEngines: 'Установленные движки знаний',
+    noInstalledEngines: 'Плагины движков знаний ещё не установлены.',
+    marketplaceEngines: 'Плагины движков знаний в магазине',
+    noMarketplaceEngines: 'Нет доступных плагинов движков знаний.',
+    loadingEngineCatalog: 'Загрузка плагинов из магазина…',
+    engineCatalogUnavailable:
+      'Магазин временно недоступен. Откройте список выбора заново для повтора.',
+    viewMarketplace: 'Открыть магазин',
+    installingEngine: 'Установка {{engine}}…',
+    engineInstallSuccess: '{{engine}} установлен и доступен для выбора',
+    engineInstallFailed:
+      'Не удалось установить движок знаний. Повторите попытку.',
+    engineVersionUnavailable:
+      'У этого плагина нет доступной для установки версии.',
+    engineInstallTimeout:
+      'Установка продолжается. Обновите страницу для проверки.',
+    engineRegistrationTimeout:
+      'Плагин установлен, но движок знаний ещё не готов.',
     builtInEngine: 'Встроенный движок',
     cannotChangeKnowledgeEngine: 'Движок знаний нельзя изменить после создания',
     basicInfo: 'Основная информация',
@@ -1193,13 +2217,13 @@ const ruRU = {
     adminAccountNote:
       'Указанная учётная запись будет настроена как администратор',
     register: 'Регистрация',
-    initWithSpace: 'Инициализация через Space',
+    initWithSpace: 'Инициализация с аккаунтом LangBot',
     spaceRecommended:
       'Рекомендуется: Используйте официальные стабильные API моделей и облачные сервисы',
     spaceInfoTip1:
       'Space предоставляет единую службу аутентификации без загрузки конфиденциальной информации.',
     spaceInfoTip2:
-      'Вход через Space даёт доступ к моделям LangBot и облачным сервисам, включая бесплатные кредиты для быстрого старта.',
+      'Вход с аккаунтом LangBot даёт доступ к моделям LangBot и облачным сервисам, включая бесплатные кредиты для быстрого старта.',
     spaceInfoTip3:
       'Способ входа не влияет на другие функции. Вы можете настроить модели из других источников в любое время.',
     registerLocal: 'Зарегистрировать локальную учётную запись',
@@ -1223,7 +2247,21 @@ const ruRU = {
     resetting: 'Сброс...',
     resetSuccess: 'Пароль успешно сброшен, пожалуйста, войдите',
     resetFailed: 'Ошибка сброса пароля, проверьте email и ключ восстановления',
+    secondFactorFailed: 'Проверка не удалась, проверьте код и попробуйте снова',
     backToLogin: 'Вернуться к входу',
+    verifyWith: 'Способ проверки',
+    methodRecoveryKey: 'Ключ восстановления',
+    methodTotp: 'Аутентификатор',
+    methodRecoveryCode: 'Код восстановления',
+    totpCode: 'Код аутентификатора',
+    totpCodeDescription: 'Введите 6-значный код из приложения-аутентификатора',
+    totpCodeRequired: 'Код аутентификатора не может быть пустым',
+    enterTotpCode: 'Введите 6-значный код',
+    recoveryCode: 'Код восстановления',
+    recoveryCodeDescription:
+      'Введите один из одноразовых кодов восстановления, сохранённых при включении двухфакторной аутентификации',
+    recoveryCodeRequired: 'Код восстановления не может быть пустым',
+    enterRecoveryCodeValue: 'Введите код восстановления',
   },
   embedding: {
     description: 'Управление моделями Embedding для векторизации текста',
@@ -1284,27 +2322,191 @@ const ruRU = {
     passwordNotSet: 'Не установлен',
     passwordSetDescription:
       'Пароль установлен, вы можете входить с email и паролем',
-    spaceStatus: 'Аккаунт Space',
+    spaceStatus: 'Аккаунт LangBot',
     spaceBound: 'Привязан',
     spaceNotBound: 'Не привязан',
     spaceBoundDescription:
-      'Аккаунт Space привязан, доступны официальные API моделей и облачные сервисы',
-    bindSpace: 'Привязать аккаунт Space',
+      'Аккаунт LangBot привязан, доступны официальные API моделей и облачные сервисы',
+    bindSpace: 'Привязать аккаунт LangBot',
     bindSpaceDescription:
       'Привяжите для использования официальных API моделей и облачных сервисов',
     bindSpaceButton: 'Привязать',
     bindSpaceConfirmTitle: 'Подтверждение привязки',
     bindSpaceConfirmDescription:
-      'Вы собираетесь привязать локальный экземпляр к аккаунту Space',
+      'Вы собираетесь привязать локальный экземпляр к аккаунту LangBot',
     bindSpaceWarning:
-      'После привязки ваш email для входа будет изменён с {{localEmail}} на email аккаунта Space.',
-    bindSpaceSuccess: 'Аккаунт Space успешно привязан',
-    bindSpaceFailed: 'Не удалось привязать аккаунт Space',
+      'После привязки ваш email для входа будет изменён с {{localEmail}} на email аккаунта LangBot.',
+    bindSpaceSuccess: 'Аккаунт LangBot успешно привязан',
+    passkeySectionTitle: 'Ключи доступа (Passkey)',
+    passkeySectionDesc:
+      'Безопасный вход без пароля с помощью биометрии или аппаратного ключа',
+    addPasskey: 'Добавить ключ доступа',
+    passkeyName: 'Название ключа',
+    passkeyNamePlaceholder: 'например, MacBook Touch ID, YubiKey',
+    passkeyCreated: 'Создан {{date}}',
+    passkeyLastUsed: 'Последнее использование: {{date}}',
+    noPasskeys: 'Нет зарегистрированных ключей доступа',
+    deletePasskeyConfirm:
+      'Вы уверены, что хотите удалить этот ключ доступа? Вы больше не сможете использовать его для входа.',
+    passkeyAddedSuccess: 'Ключ доступа успешно добавлен',
+    passkeyDeleteSuccess: 'Ключ доступа удален',
+    passkeyRenameSuccess: 'Ключ доступа успешно переименован',
+    totpSectionTitle: 'Двухфакторная аутентификация',
+    totpSectionDesc:
+      'Добавьте одноразовый пароль на основе времени как второй фактор входа',
+    totpEnabledDesc:
+      'Двухфакторная аутентификация включена · осталось кодов восстановления: {{count}}',
+    enableTotp: 'Включить',
+    manageTotp: 'Управление',
+    totpEnrollTitle: 'Включить двухфакторную аутентификацию',
+    totpEnrollDesc:
+      'Отсканируйте QR-код в приложении-аутентификаторе и подтвердите сгенерированный код',
+    totpStartEnroll: 'Создать секрет',
+    totpGeneratingSecret: 'Создание нового секрета…',
+    totpManageTitle: 'Двухфакторная аутентификация',
+    totpManageDesc:
+      'Перегенерируйте коды восстановления или отключите второй фактор.',
+    totpRegenerateCodes: 'Перегенерировать коды восстановления',
+    totpRegenerateDesc:
+      'Введите текущий код аутентификатора или код восстановления, чтобы получить новый набор.',
+    totpRecoveryCodesRegenerated: 'Новые коды восстановления созданы',
+    totpStatusDisabled: 'Не включено',
+    totpCodesRemaining: 'Осталось кодов восстановления: {{count}}',
+    totpManagerSectionDesc:
+      'Владельцы и администраторы могут просматривать и сбрасывать второй фактор аккаунтов этого рабочего пространства.',
+    revokeTotp: 'Перепривязать',
+    totpAdminResetTitle:
+      'Перепривязать двухфакторную аутентификацию для {{user}}',
+    totpAdminResetDesc:
+      'Попросите аккаунт отсканировать QR-код в приложении-аутентификаторе и ввести ниже 6-значный код для завершения.',
+    totpAdminResetWarning:
+      'После начала перепривязки текущий аутентификатор {{user}} сразу перестанет работать.',
+    totpAdminResetHint:
+      'Если аккаунт сейчас не может войти, он может отсканировать этот QR-код в любом приложении-аутентификаторе.',
+    totpAdminHandOverCodes:
+      'Передайте эти коды восстановления {{user}}. Они показываются только один раз.',
+    revokeTotpConfirm:
+      'Отключить двухфакторную аутентификацию для {{user}}? После этого вход будет возможен только по паролю.',
+    revokeTotpSuccess: 'Двухфакторная аутентификация сброшена',
+    you: 'вы',
+    noAccounts: 'Нет аккаунтов для отображения',
+    totpRefreshSecret: 'Обновить QR-код',
+    totpQrAlt: 'QR-код двухфакторной аутентификации',
+    totpEnterCode: 'Код подтверждения',
+    enterCode: 'Введите код',
+    totpVerifyAndEnable: 'Подтвердить и включить',
+    totpOrRecoveryCode: 'Код аутентификатора или восстановления',
+    totpStatusEnabled: 'Двухфакторная аутентификация включена',
+    totpLastUsed: 'Последняя проверка: {{date}}',
+    totpNeverUsed: 'Ещё не использовалось',
+    disableTotp: 'Отключить двухфакторную аутентификацию',
+    disableTotpDesc:
+      'Введите текущий код аутентификатора или код восстановления, чтобы отключить двухфакторную аутентификацию',
+    totpEnabledSuccess: 'Двухфакторная аутентификация включена',
+    totpDisabledSuccess: 'Двухфакторная аутентификация отключена',
+    totpInvalidCode: 'Неверный код, проверьте и попробуйте снова',
+    totpRecoveryCodesTitle: 'Коды восстановления',
+    totpRecoveryCodesDesc:
+      'Сохраните эти одноразовые коды восстановления в надёжном месте. Они показываются только один раз.',
+    totpRecoveryCodesWarning:
+      'Каждый код работает один раз. Если вы потеряете аутентификатор и эти коды, вы потеряете доступ к входу.',
+    totpSavedCodes: 'Я сохранил эти коды',
+    regenerateRecoveryCodes: 'Перегенерировать коды восстановления',
+    bindSpaceFailed: 'Не удалось привязать аккаунт LangBot',
     bindSpaceInvalidState:
       'Недействительный запрос привязки. Повторите попытку из настроек аккаунта.',
     setPasswordHint: 'Установите пароль для входа с email и паролем',
     spaceEmailMismatch:
-      'Email входа через Space не совпадает с email локальной учётной записи',
+      'Email входа с аккаунтом LangBot не совпадает с email локальной учётной записи',
+    space_account_not_registeredTitle: 'Account not registered',
+    space_account_not_registered:
+      'No local account is registered for this LangBot Account email. Ask the Workspace owner for an invitation.',
+    space_account_binding_requiredTitle: 'LangBot Account connection required',
+    space_account_binding_required:
+      'This local account must connect a LangBot Account from Account settings before using LangBot Account login.',
+  },
+  workspace: {
+    title: 'Workspace',
+    description: 'Manage members, roles, and invitation links',
+    selectTitle: 'Choose a Workspace',
+    selectDescription: 'Select where you want to continue in LangBot.',
+    selectionLoadFailed:
+      'Your Workspaces could not be loaded. Please try again.',
+    switchWorkspace: 'Switch Workspace',
+    settings: 'Workspace Settings',
+    currentPlan: 'Current plan',
+    planUnavailable: 'Unavailable',
+    upgradePlan: 'Change or upgrade plan',
+    ossSingletonDescription:
+      'This self-hosted instance has one Workspace and can include multiple users.',
+    cloudManagedDescription:
+      'This Workspace is hosted by LangBot Cloud. Manage members here; billing opens in Cloud.',
+    loadFailed: 'Failed to load Workspace information',
+    members: 'Members',
+    you: 'You',
+    inviteMember: 'Invite a member',
+    inviteDescription:
+      'Create a one-time link to add another user to this Workspace.',
+    emailPlaceholder: 'member@example.com',
+    createInvitation: 'Create invitation',
+    invitationCreated: 'Invitation created',
+    delivery: {
+      sent: 'Invitation sent',
+      link_only: 'Invitation link created',
+      failed: 'Invitation link created, but email could not be sent',
+    },
+    invitationCreateFailed: 'Failed to create invitation',
+    oneTimeLinkWarning: 'Copy this link now. It is shown only once.',
+    copyInvitation: 'Copy invitation link',
+    invitationCopied: 'Invitation link copied',
+    pendingInvitations: 'Pending invitations',
+    expiresAt: 'Expires {{date}}',
+    revokeInvitation: 'Revoke invitation',
+    invitationRevoked: 'Invitation revoked',
+    invitationRevokeFailed: 'Failed to revoke invitation',
+    acceptInvitation: 'Accept invitation',
+    invitedToWorkspace: 'You were invited to {{workspace}}',
+    checkingInvitation: 'Checking this invitation...',
+    invitationMissing: 'This invitation link is missing required information.',
+    invitationExpired: 'This invitation has expired.',
+    invitationAlreadyRevoked: 'This invitation was revoked.',
+    invitationAlreadyUsed: 'This invitation was already used.',
+    invitationInvalid: 'This invitation is invalid or no longer available.',
+    invitationAccepted: 'Invitation accepted',
+    invitationAcceptFailed: 'Failed to accept invitation',
+    invitationEmailMismatch:
+      'This invitation belongs to a different email address.',
+    existingAccountLoginRequired:
+      'An account already exists for this email. Sign in to continue.',
+    acceptAsCurrentAccount: 'Accept with current account',
+    authenticatedInvitationNotice:
+      'Sign out first, then sign in with the invited account. Your invitation will be preserved.',
+    logoutAndReturn: 'Sign out and return to this invitation',
+    switchAccount: 'Switch account',
+    registerAndAccept: 'Create account and accept',
+    alreadyHaveAccount: 'I already have an account',
+    confirmPassword: 'Confirm password',
+    passwordMinimum: 'Password must contain at least 8 characters.',
+    passwordMismatch: 'The passwords do not match.',
+    backToLogin: 'Back to sign in',
+    memberUpdated: 'Member role updated',
+    memberUpdateFailed: 'Failed to update member role',
+    removeMember: 'Remove member',
+    removeMemberConfirm: 'Remove this member from the Workspace?',
+    memberRemoved: 'Member removed',
+    memberRemoveFailed: 'Failed to remove member',
+    transferOwnership: 'Transfer ownership',
+    types: {
+      personal: 'Personal',
+      team: 'Team',
+    },
+    roles: {
+      owner: 'Owner',
+      admin: 'Admin',
+      developer: 'Developer',
+      operator: 'Operator',
+      viewer: 'Viewer',
+    },
   },
   monitoring: {
     title: 'Мониторинг',
@@ -1368,6 +2570,20 @@ const ruRU = {
       level: 'Уровень',
       runner: 'Обработчик',
       viewConversation: 'Просмотр диалога',
+      turns: '{{count}} диалоговых ходов',
+      userMessage: 'Пользователь',
+      noUserMessage: 'Ввод пользователя не записан',
+      assistantMessage: 'Ассистент',
+      assistantMessageCount: 'Ассистент +{{count}}',
+      noAssistantMessage: 'Ответ ассистента не записан',
+      messageCount: 'Сообщения',
+      conversationTrace: 'Ход диалога',
+      noLlmCalls: 'Вызовы модели не записаны',
+      roles: {
+        user: 'Пользователь',
+        assistant: 'Ассистент',
+        message: 'Сообщение',
+      },
     },
     llmCalls: {
       title: 'Вызовы LLM',
@@ -1381,6 +2597,17 @@ const ruRU = {
       totalTokens: 'Всего токенов',
       avgDuration: 'Средняя длительность',
       calls: 'Вызовы',
+    },
+    toolCalls: {
+      title: 'Вызовы инструментов',
+      totalCalls: 'Вызовы',
+      duration: 'Длительность инструментов',
+      errorCalls: 'Неудачные вызовы',
+      arguments: 'Аргументы',
+      result: 'Результат',
+      noToolCalls: 'Вызовы инструментов не записаны',
+      showDetails: 'Показать детали',
+      hideDetails: 'Скрыть детали',
     },
     tokens: {
       totalTokens: 'Всего токенов',
@@ -1493,7 +2720,16 @@ const ruRU = {
     queryVariables: {
       title: 'Переменные запроса',
     },
+    loadError: 'Не удалось загрузить данные мониторинга',
+    partialMessages:
+      'Показано {{shown}} из {{total}} сообщений. Трассировки диалогов могут быть неполными.',
+    partialModelCalls: 'Показано {{shown}} из {{total}} вызовов модели.',
+    partialToolCalls:
+      'Показано {{shown}} из {{total}} вызовов инструментов. Трассировки диалогов могут быть неполными.',
+    partialErrors: 'Показано {{shown}} из {{total}} ошибок.',
     trafficChart: {
+      unavailable: 'Агрегированные данные трафика недоступны',
+      truncated: 'Диапазон трафика обрезан. Выберите более короткий период.',
       title: 'Обзор трафика',
       messages: 'Сообщения',
       llmCalls: 'Вызовы LLM',
@@ -1535,10 +2771,149 @@ const ruRU = {
   settingsDialog: {
     title: 'Настройки',
     nav: {
+      workspace: 'Workspace',
+      operationTrace: 'Журнал',
       models: 'Модели',
       api: 'API',
       storage: 'Хранилище',
       account: 'Аккаунт',
+    },
+  },
+  operationTrace: {
+    title: 'Журнал операций',
+    description: 'Отслеживание изменений и просмотров администраторов',
+    reset: 'Сбросить',
+    settingsUpdated: 'Настройки сохранены',
+    settingsUpdateFailed: 'Не удалось сохранить настройки',
+    levelBadge: 'Уровень: {{level}}',
+    collectionSettings: 'Настройки сбора',
+    captureLevel: 'Уровень записи',
+    retention: 'Хранение',
+    retentionDays: 'Дней хранения',
+    maxRows: 'Максимум записей',
+    dedupeWindow: 'Окно дедупликации (с)',
+    records: 'Записи операций',
+    changesCount: 'Изменений: {{count}}',
+    hideDetails: 'Скрыть детали',
+    export: 'Скачать журнал',
+    exportFailed: 'Не удалось скачать журнал операций',
+    empty: 'Записей операций пока нет',
+    systemActor: 'Система',
+    pageInfo: '{{from}}-{{to}} из {{total}}',
+    previousPage: 'Предыдущая страница',
+    nextPage: 'Следующая страница',
+    filterAction: 'Действие',
+    filterAllActions: 'Все действия',
+    filterResource: 'Ресурс',
+    filterAllResources: 'Все ресурсы',
+    filterActor: 'Исполнитель',
+    filterAllActors: 'Все исполнители',
+    loadFailed: 'Не удалось загрузить журнал операций',
+    refresh: 'Обновить',
+    save: 'Сохранить',
+    redacted: 'Скрыто',
+    tamperedBadge: 'Возможна подмена',
+    verifiedBadge: 'Проверено',
+    integrityFailedCount: 'Несовпадение хэша: {{count}}',
+    chainFailedCount: 'Разрыв связи: {{count}}',
+    scanTruncated: 'Проверены только последние {{count}}',
+    emptyFiltered: 'По текущим фильтрам нет записей, требующих проверки',
+    mutationsOnly: 'Только изменения',
+    today: 'Сегодня',
+    yesterday: 'Вчера',
+    unknownDay: 'Неизвестное время',
+    showDetails: 'Подробнее',
+    moreChanges: 'ещё {{count}}',
+    elidedValue: '{{count}} символов',
+    levels: {
+      off: {
+        label: 'Журнал выключен',
+      },
+      mutation: {
+        label: 'Только изменения',
+      },
+      read: {
+        label: 'Всё (включая просмотры)',
+      },
+    },
+    levelNames: {
+      off: 'Выкл',
+      mutation: 'Изменения',
+      read: 'Всё',
+    },
+    resourceTypes: {
+      bot: 'Бот',
+      adapter: 'Адаптер',
+      model_provider: 'Провайдер моделей',
+      llm_model: 'Модель',
+      pipeline: 'Конвейер',
+      user: 'Пользователь',
+      workspace: 'Рабочее пространство',
+      monitoring: 'Мониторинг',
+      webhook: 'Webhook',
+      api_key: 'API-ключ',
+      workspace_settings: 'Настройки пространства',
+      member: 'Участник',
+      member_invitation: 'Приглашение участника',
+      operation_log: 'Журнал операций',
+      assistant_conversation: 'Сессия ассистента',
+      agent: 'Агент',
+      file: 'Файл',
+      plugin: 'Расширение',
+      plugin_page: 'Страница расширения',
+      skill: 'Навык',
+      knowledge_base: 'База знаний',
+      mcp_server: 'MCP-сервер',
+      runtime: 'Среда выполнения',
+      system: 'Система',
+      resource: 'Ресурс',
+    },
+    outcomes: {
+      ok: 'Успех',
+      denied: 'Отказано',
+      error: 'Ошибка',
+    },
+    actions: {
+      audit_log_view: 'Просмотр журнала операций',
+      settings_update: 'Изменение настроек трассировки',
+      settings_view: 'Просмотр настроек трассировки',
+      member_invite: 'Приглашение участника',
+      member_role_update: 'Изменение роли участника',
+      member_remove: 'Удаление участника',
+      member_view: 'Просмотр участников',
+      plugin_view: 'Просмотр страниц расширения',
+      plugin_config: 'Изменение настроек расширения',
+      plugin_install: 'Установка расширения',
+      plugin_uninstall: 'Удаление расширения',
+      plugin_upgrade: 'Обновление расширения',
+      page_view: 'Просмотр страницы расширения',
+      skill_view: 'Просмотр навыка',
+      skill_install: 'Установка навыка',
+      skill_uninstall: 'Удаление навыка',
+      knowledge_base_view: 'Просмотр базы знаний',
+      knowledge_base_update: 'Изменение базы знаний',
+      knowledge_base_delete: 'Удаление базы знаний',
+      mcp_view: 'Просмотр сервера MCP',
+      mcp_config: 'Изменение сервера MCP',
+      mcp_delete: 'Удаление сервера MCP',
+      skill_update: 'Изменение навыка',
+      file_view: 'Просмотр файла',
+      ingest: 'Импорт данных',
+      file_delete: 'Удаление файла базы знаний',
+      ingress: 'Внешний приём сообщений',
+      codex_view: 'Просмотр авторизации Codex',
+      codex_authorize: 'Авторизация Codex',
+      embed: 'Встроенная сессия',
+      pipeline_extensions_update: 'Изменение привязок расширений конвейера',
+      export: 'Экспорт данных',
+      execute: 'Выполнение задачи',
+      debug: 'Отладка задачи',
+      publish: 'Публикация ресурса',
+      create: 'Создание ресурса',
+      update: 'Изменение ресурса',
+      delete: 'Удаление ресурса',
+      view: 'Просмотр ресурса',
+      probe: 'Проверка эндпоинта',
     },
   },
   storageAnalysis: {
@@ -1562,6 +2937,44 @@ const ruRU = {
     databaseType: 'Тип базы данных',
     days: 'дн.',
     missing: 'Нет',
+    notCreated: 'Ещё не создано',
+    processStorage: 'Хранилище по процессам',
+    processStorageDescription:
+      'Каждая среда выполнения измеряет свои каталоги. Детализация уже входит в итог родительского каталога.',
+    directory: 'Каталог',
+    size: 'Размер',
+    files: 'Файлы',
+    runtimeUnavailable: 'Статистика хранилища среды выполнения недоступна.',
+    noManagedDirectories: 'Управляемые каталоги не обнаружены.',
+    scanWarnings: 'Недоступно для чтения: {{count}}',
+    boxActivity: 'Сеансов: {{sessions}} · Управляемых процессов: {{processes}}',
+    statusLabels: {
+      available: 'Доступно',
+      unavailable: 'Недоступно',
+      disabled: 'Отключено',
+      not_applicable: 'Не применимо',
+    },
+    sourceLabels: {
+      local_process: 'Измерено процессом LangBot',
+      runtime_rpc: 'Измерено средой выполнения через аутентифицированный RPC',
+    },
+    scopeLabels: {
+      runtime_host: 'Хост среды выполнения',
+      sandbox_sessions: 'Сеансы песочницы',
+    },
+    processNames: {
+      langbot: 'Основной процесс LangBot',
+      plugin_runtime: 'Среда выполнения плагинов',
+      box_runtime: 'Среда выполнения Box',
+    },
+    processDescriptions: {
+      langbot:
+        'База данных приложения, журналы, загруженные файлы, векторные данные и временные файлы.',
+      plugin_runtime:
+        'Пакеты плагинов, проверенные артефакты, окружения зависимостей и закрытые данные установки.',
+      box_runtime:
+        'Рабочие каталоги песочницы и процессов MCP, каталоги обмена вложениями и навыки.',
+    },
     expiredUploads: 'Просроченные загрузки',
     expiredLogs: 'Просроченные журналы',
     noExpiredUploads: 'Нет просроченных загруженных файлов',
@@ -1574,6 +2987,21 @@ const ruRU = {
       plugins: 'Плагины',
       mcp: 'MCP',
       temp: 'Временные файлы',
+      legacy_plugins: 'Старые пакеты плагинов',
+      artifacts: 'Проверенные артефакты плагинов',
+      dependency_environments: 'Окружения зависимостей',
+      installations: 'Данные установки плагинов',
+      staging: 'Промежуточные файлы плагинов',
+      rpc_transfer: 'Файлы передачи RPC среды выполнения',
+      workspace: 'Рабочий каталог песочницы',
+      inbox: 'Входящие вложения',
+      outbox: 'Исходящие вложения',
+      skills: 'Навыки',
+      session_workspaces: 'Рабочие каталоги сеансов песочницы',
+      session_caches: 'Кэш среды выполнения песочницы',
+      session_temp: 'Временные файлы песочницы',
+      managed_process_workspaces:
+        'Рабочие каталоги управляемых процессов (включая MCP)',
     },
   },
   limitation: {
@@ -1583,137 +3011,12 @@ const ruRU = {
       'Достигнуто максимальное количество конвейеров ({{max}}). Удалите существующий конвейер перед созданием нового.',
     maxExtensionsReached:
       'Достигнуто максимальное количество расширений ({{max}}). Удалите существующий MCP-сервер или плагин перед добавлением нового.',
-  },
-  wizard: {
-    sidebarDescription: 'Создать бота с пошаговым руководством',
-    loading: 'Загрузка мастера...',
-    loadError: 'Не удалось загрузить данные мастера',
-    skip: 'Пропустить',
-    skipConfirmMessage:
-      'Вы можете вернуться к мастеру быстрого старта из меню аккаунта позже или создать бота вручную.',
-    skipConfirmOk: 'ОК',
-    prev: 'Назад',
-    next: 'Далее',
-    finish: 'Создать и развернуть',
-    confirmCreateBot: 'Подтвердить, создать бота',
-    createSuccess: 'Конвейер создан и привязан к боту!',
-    botCreateSuccess: 'Бот успешно создан!',
-    botSaveSuccess: 'Конфигурация бота сохранена и включена!',
-    createError: 'Не удалось создать ресурсы',
-    spaceAuthError: 'Не удалось инициировать авторизацию через Space',
-    skipSaveError: 'Не удалось сохранить статус пропуска. Повторите попытку.',
-    completeSaveError:
-      'Не удалось сохранить статус завершения. Повторите попытку.',
-    step: {
-      platform: 'Платформа',
-      botConfig: 'Настройка бота',
-      aiEngine: 'ИИ-движок',
-      done: 'Готово',
-    },
-    platform: {
-      title: 'Выберите платформу',
-      description: 'Выберите мессенджер, к которому подключится ваш бот.',
-    },
-    botConfig: {
-      title: 'Настройте бота',
-      description: 'Настройте бота и проверьте его работу перед продолжением.',
-      saveBot: 'Сохранить и включить бота',
-      resaveBot: 'Пересохранить конфигурацию',
-      botSaved:
-        'Конфигурация бота сохранена и включена. Проверьте журналы для подтверждения подключения.',
-      logsTitle: 'Журналы бота',
-      logsDescription:
-        'Отслеживайте активность бота для проверки подключения к платформе.',
-    },
-    aiEngine: {
-      title: 'Выберите ИИ-движок',
-      description:
-        'Выберите ИИ-движок, который будет управлять интеллектом вашего бота.',
-    },
-    spaceBanner: {
-      message:
-        'Подключитесь к LangBot Space для бесплатных пробных кредитов и мгновенной настройки!',
-      action: 'Авторизация через Space',
-    },
-    config: {
-      botInfo: 'Информация о боте',
-      botNamePlaceholder: 'Введите имя бота',
-      botDescPlaceholder: 'Введите описание бота (необязательно)',
-      platformConfig: 'Настройка {{platform}}',
-      aiConfig: 'Настройка {{engine}}',
-    },
-    done: {
-      title: 'Всё готово!',
-      description:
-        'Ваш бот создан и подключён к конвейеру ИИ. Теперь вы можете управлять им из рабочей панели.',
-      backToWorkbench: 'Вернуться к рабочей панели',
-    },
-  },
-  errorPage: {
-    unexpectedError: 'Что-то пошло не так',
-    unexpectedErrorDescription:
-      'Произошла непредвиденная ошибка. Повторите попытку позже.',
-    notFound: 'Страница не найдена',
-    notFoundDescription:
-      'Страница, которую вы ищете, не существует или была перемещена.',
-    backendUnavailableStatus: 'Бэкенд недоступен',
-    goBack: 'Назад',
-    backToHome: 'На главную',
-    backToLogin: 'Вернуться к входу',
-    retrying: 'Повторяем',
-    retryFailed:
-      'По-прежнему не удается подключиться к бэкенду. Запустите сервис и повторите попытку.',
-  },
-  feishu: {
-    createApp: 'Создать приложение Feishu в один клик',
-    scanQRCode:
-      'Отсканируйте QR-код ниже в Feishu, чтобы авторизоваться и автоматически создать приложение',
-    waitingForScan: 'Ожидание сканирования',
-    createSuccess:
-      'Приложение успешно создано! Учётные данные заполнены автоматически',
-    createFailed: 'Не удалось создать приложение',
-    connecting: 'Подключение к сервису Feishu...',
-    expired: 'Срок действия QR-кода истёк. Повторите попытку',
-    denied: 'Пользователь отклонил авторизацию',
-    connectionLost: 'Соединение потеряно. Повторите попытку',
-    reconnecting: 'Переподключение...',
-    retry: 'Повторить',
-  },
-  weixin: {
-    scanLogin: 'Войти в WeChat по QR-коду',
-    scanQRCode:
-      'Отсканируйте QR-код ниже в WeChat, чтобы авторизоваться и автоматически заполнить токен',
-    loginSuccess: 'Вход выполнен успешно! Токен заполнен автоматически',
-    loginFailed: 'Не удалось выполнить вход',
-  },
-  dingtalk: {
-    createApp: 'Создать приложение DingTalk в один клик',
-    scanQRCode:
-      'Отсканируйте QR-код ниже в DingTalk, чтобы авторизоваться и автоматически создать приложение',
-    waitingForScan: 'Ожидание сканирования',
-    createSuccess:
-      'Приложение успешно создано! Учётные данные заполнены автоматически',
-    createFailed: 'Не удалось создать приложение',
-    connecting: 'Подключение к сервису DingTalk...',
-    retry: 'Повторить',
-    robotCodeNote:
-      'Код робота нельзя получить автоматически. Перейдите в консоль разработчика DingTalk > Настройки робота и скопируйте его вручную. Он нужен для таких функций, как распознавание изображений и загрузка файлов.',
-  },
-  wecombot: {
-    createBot: 'Создать бота WeCom в один клик',
-    scanQRCode:
-      'Отсканируйте QR-код ниже в WeCom, чтобы авторизоваться и автоматически создать бота',
-    waitingForScan: 'Ожидание сканирования',
-    createSuccess: 'Бот успешно создан! Учётные данные заполнены автоматически',
-    createFailed: 'Не удалось создать бота',
-    connecting: 'Подключение к сервису WeCom...',
-    retry: 'Повторить',
-    robotNameNote:
-      'Имя бота нельзя получить автоматически. Пожалуйста, введите его вручную.',
-  },
-  pluginPages: {
-    selectFromSidebar: 'Выберите страницу плагина на боковой панели',
-    invalidPage: 'Недопустимая страница плагина',
+    quotaLoadingTooltip:
+      'Данные об использовании рабочего пространства загружаются. Подождите перед созданием ресурса.',
+    quotaCheckFailed:
+      'Не удалось проверить текущую квоту рабочего пространства. Повторите попытку.',
+    createDisabledTooltip:
+      'Достигнут лимит {{resource}} ({{max}}) для этого рабочего пространства. Удалите существующий ресурс перед созданием нового.',
   },
   skills: {
     title: 'Навыки',
@@ -1808,6 +3111,158 @@ const ruRU = {
     saveFileSuccess: 'Файл успешно сохранён',
     saveFileError: 'Не удалось сохранить файл: ',
   },
+  wizard: {
+    sidebarDescription: 'Создать бота с пошаговым руководством',
+    loading: 'Загрузка мастера...',
+    loadError: 'Не удалось загрузить данные мастера',
+    skip: 'Пропустить',
+    skipConfirmMessage:
+      'Вы можете вернуться к мастеру быстрого старта из меню аккаунта позже или создать бота вручную.',
+    skipConfirmOk: 'ОК',
+    prev: 'Назад',
+    next: 'Далее',
+    finish: 'Создать и развернуть',
+    confirmCreateBot: 'Подтвердить, создать бота',
+    createSuccess: 'Конвейер создан и привязан к боту!',
+    botCreateSuccess: 'Бот успешно создан!',
+    botSaveSuccess: 'Конфигурация бота сохранена и включена!',
+    createError: 'Не удалось создать ресурсы',
+    skipSaveError: 'Не удалось сохранить статус пропуска. Повторите попытку.',
+    completeSaveError:
+      'Не удалось сохранить статус завершения. Повторите попытку.',
+    step: {
+      platform: 'Платформа',
+      botConfig: 'Настройка бота',
+      aiEngine: 'ИИ-движок',
+      done: 'Готово',
+    },
+    platform: {
+      title: 'Выберите платформу',
+      description: 'Выберите мессенджер, к которому подключится ваш бот.',
+    },
+    botConfig: {
+      title: 'Настройте бота',
+      description: 'Настройте бота и проверьте его работу перед продолжением.',
+      saveBot: 'Сохранить и включить бота',
+      resaveBot: 'Пересохранить конфигурацию',
+      botSaved:
+        'Конфигурация бота сохранена и включена. Проверьте журналы для подтверждения подключения.',
+      waitingForMessage:
+        'Бот включён. Отправьте ему сообщение из мессенджера, чтобы продолжить.',
+      messageReceived:
+        'Бот получил сообщение. Можно перейти к следующему шагу.',
+      messageReceivedLocalAccountWarning:
+        'Подключение бота настроено правильно, и сообщение получено. Поскольку вход выполнен не через аккаунт LangBot, вызовы модели могут завершаться ошибкой; перейдите к следующему шагу, чтобы добавить собственную модель.',
+      pageBotPreviewFailed:
+        'Не удалось загрузить тестовый чат. Сохраните настройки ещё раз, чтобы повторить попытку.',
+      pageBotTestPrompt:
+        'Бот для веб-страницы включён. Нажмите на значок чата в правом нижнем углу и отправьте сообщение, чтобы проверить полный сценарий диалога.',
+      pageBotTestNotice:
+        'Только для тестирования. Встройте код в настоящую внешнюю веб-страницу.',
+      webhookTestPrompt:
+        'URL обратного вызова готов. Настройте его на внешней платформе, затем отправьте боту настоящее сообщение.',
+      httpTestPrompt:
+        'HTTP-бот включён. Отправьте сюда настоящее входящее сообщение, чтобы проверить подключение.',
+      httpTestDefaultMessage:
+        'Здравствуйте, это тестовое сообщение подключения.',
+      sendHttpTest: 'Отправить тестовое сообщение',
+      httpTestAccepted:
+        'Тестовое сообщение принято. Оно скоро появится в журнале.',
+      httpTestMissingSecret:
+        'Введите секрет подписи входящих запросов и сначала сохраните конфигурацию.',
+      httpTestFailed: 'Не удалось отправить тестовое сообщение: {{error}}',
+      logsTitle: 'Журналы бота',
+      logsDescription:
+        'Отслеживайте активность бота для проверки подключения к платформе.',
+    },
+    aiEngine: {
+      defaultModelUnavailable:
+        'Модель по умолчанию недоступна. Повторите попытку.',
+      defaultRunnerUnavailable: 'Local Agent ещё не готов. Повторите попытку.',
+      preparingDefault: 'Подготовка ИИ по умолчанию…',
+      title: 'Настройте ИИ-движок',
+      description:
+        'Выберите ИИ-движок, который будет управлять интеллектом вашего бота.',
+      optionalDescription:
+        'ИИ уже настроен. Используйте его или измените способ подключения.',
+      externalTitle: 'Подключить Agent внешней платформы',
+      externalDescription:
+        'Подключите Dify, n8n, Coze или другой внешний Agent через плагин Runner.',
+      ownModelTitle: 'Использовать собственную модель',
+      ownModelDescription:
+        'Добавьте провайдера, затем найдите модель автоматически или укажите её вручную, чтобы завершить настройку.',
+      ownModelSetupTitle: 'Добавьте собственную модель',
+      ownModelSetupDescription:
+        'Добавьте провайдера моделей. Модели чата будут найдены автоматически, либо можно вручную указать ID модели.',
+      addProviderTitle: 'Добавить провайдера',
+      addProviderDescription:
+        'Введите данные провайдера и API-ключ для подключения и поиска моделей.',
+      selectModelTitle: 'Выберите модель',
+      selectScannedModelTitle: 'Выберите модель',
+      selectScannedModelDescription:
+        'Выбранная модель заменит основную модель в пайплайне этого бота.',
+      scanModelMode: 'Найти модели',
+      manualModelMode: 'Добавить вручную',
+      scanningModels: 'Поиск доступных моделей…',
+      noScannedModels:
+        'Доступные модели чата не найдены. Проверьте конфигурацию провайдера.',
+      scanModelsFailed:
+        'Не удалось найти модели. Проверьте URL и API-ключ, затем повторите попытку.',
+      manualFallbackFailed:
+        'Автоматический поиск не удался. Введите ID модели, поддерживаемой провайдером.',
+      manualFallbackEmpty:
+        'Модели не найдены. Введите ID модели, поддерживаемой провайдером.',
+      manualModelId: 'ID модели',
+      manualModelIdPlaceholder: 'Например: gpt-4o',
+      manualModelIdDescription:
+        'Введите параметр модели, используемый в запросах к модели.',
+      manualModelOptions: 'Дополнительные возможности модели',
+      editProvider: 'Изменить провайдера',
+      rescanModels: 'Повторить поиск моделей',
+      moreFeaturesTitle: 'Использовать настройки по умолчанию',
+      moreFeaturesDescription:
+        'Продолжить с Local Agent и рекомендованной моделью. Инструменты и базы знаний можно добавить позже.',
+      runnerDescription:
+        'Выберите Runner для внешнего Agent и настройте подключение.',
+      backToChoices: 'Вернуться к вариантам',
+      backToList: 'Вернуться к списку',
+      createExternal: 'Создать и привязать',
+      finishWithModel: 'Использовать выбранную модель и завершить',
+      openWorkbench: 'Открыть рабочую панель',
+      loadingCatalog: 'Загрузка расширений исполнителей...',
+      catalogUnavailable: 'Каталог исполнителей недоступен',
+      catalogUnavailableDescription:
+        'Установленные исполнители доступны. Повторите загрузку каталога или откройте расширения.',
+      noMarketplaceRunners: 'Нет плагинов исполнителей для этого назначения',
+      noMarketplaceRunnersDescription:
+        'Используйте установленный исполнитель или повторите позже.',
+      browseRunners: 'Открыть расширения исполнителей',
+      installAndContinue: 'Установить и продолжить',
+      installing: 'Установка...',
+      useInstalled: 'Использовать этот исполнитель',
+      installedUnavailable: 'Установлено, исполнитель недоступен',
+      installSuccess: '{{runner}} установлен и выбран',
+      installFailed: 'Не удалось установить расширение исполнителя',
+      versionUnavailable: 'Магазин не вернул доступную для установки версию.',
+      installTimeout:
+        'Время ожидания установки истекло. Проверьте задачу в разделе расширений.',
+      registrationTimeout:
+        'Расширение установлено, но исполнитель не зарегистрирован. Проверьте среду выполнения плагинов и повторите попытку.',
+    },
+    config: {
+      botInfo: 'Информация о боте',
+      botNamePlaceholder: 'Введите имя бота',
+      botDescPlaceholder: 'Введите описание бота (необязательно)',
+      platformConfig: 'Настройка {{platform}}',
+      aiConfig: 'Настройка {{engine}}',
+    },
+    done: {
+      title: 'Всё готово!',
+      description:
+        'Ваш бот создан и подключён к конвейеру ИИ. Теперь вы можете управлять им из рабочей панели.',
+      backToWorkbench: 'Вернуться к рабочей панели',
+    },
+  },
   addExtension: {
     installTitle: 'Установить {{type}}',
     installConfirm: 'Установить {{type}} «{{name}}»?',
@@ -1839,6 +3294,96 @@ const ruRU = {
     unsupportedFileType:
       'Неподдерживаемый тип файла. Поддерживаются только файлы .zip и .lbpkg',
   },
+  errorPage: {
+    unexpectedError: 'Что-то пошло не так',
+    unexpectedErrorDescription:
+      'Произошла непредвиденная ошибка. Повторите попытку позже.',
+    notFound: 'Страница не найдена',
+    notFoundDescription:
+      'Страница, которую вы ищете, не существует или была перемещена.',
+    backendUnavailableStatus: 'Бэкенд недоступен',
+    goBack: 'Назад',
+    backToHome: 'На главную',
+    backToLogin: 'Вернуться к входу',
+    retrying: 'Повторяем',
+    retryFailed:
+      'По-прежнему не удается подключиться к бэкенду. Запустите сервис и повторите попытку.',
+  },
+  feishu: {
+    createApp: 'Создать приложение Feishu в один клик',
+    scanQRCode:
+      'Отсканируйте QR-код ниже в Feishu, чтобы авторизоваться и автоматически создать приложение',
+    waitingForScan: 'Ожидание сканирования',
+    createSuccess:
+      'Приложение успешно создано! Учётные данные заполнены автоматически',
+    createFailed: 'Не удалось создать приложение',
+    connecting: 'Подключение к сервису Feishu...',
+    expired: 'Срок действия QR-кода истёк. Повторите попытку',
+    denied: 'Пользователь отклонил авторизацию',
+    connectionLost: 'Соединение потеряно. Повторите попытку',
+    reconnecting: 'Переподключение...',
+    retry: 'Повторить',
+  },
+  weixin: {
+    scanLogin: 'Войти в WeChat по QR-коду',
+    scanQRCode:
+      'Отсканируйте QR-код ниже в WeChat, чтобы авторизоваться и автоматически заполнить токен',
+    loginSuccess: 'Вход выполнен успешно! Токен заполнен автоматически',
+    loginFailed: 'Не удалось выполнить вход',
+    connecting: 'Подключение к сервису WeChat...',
+    waitingForScan: 'Ожидание сканирования',
+    retry: 'Повторить',
+  },
+  dingtalk: {
+    createApp: 'Создать приложение DingTalk в один клик',
+    scanQRCode:
+      'Отсканируйте QR-код ниже в DingTalk, чтобы авторизоваться и автоматически создать приложение',
+    waitingForScan: 'Ожидание сканирования',
+    createSuccess:
+      'Приложение успешно создано! Учётные данные заполнены автоматически',
+    createFailed: 'Не удалось создать приложение',
+    connecting: 'Подключение к сервису DingTalk...',
+    retry: 'Повторить',
+    robotCodeNote:
+      'Код робота нельзя получить автоматически. Перейдите в консоль разработчика DingTalk > Настройки робота и скопируйте его вручную. Он нужен для таких функций, как распознавание изображений и загрузка файлов.',
+  },
+  wecombot: {
+    createBot: 'Создать бота WeCom в один клик',
+    scanQRCode:
+      'Отсканируйте QR-код ниже в WeCom, чтобы авторизоваться и автоматически создать бота',
+    waitingForScan: 'Ожидание сканирования',
+    createSuccess: 'Бот успешно создан! Учётные данные заполнены автоматически',
+    createFailed: 'Не удалось создать бота',
+    connecting: 'Подключение к сервису WeCom...',
+    retry: 'Повторить',
+    robotNameNote:
+      'Имя бота нельзя получить автоматически. Пожалуйста, введите его вручную.',
+  },
+  qqofficial: {
+    createBinding: 'Привязка официального бота QQ по QR-коду',
+    scanQRCode:
+      'Отсканируйте QR-код ниже мобильным QQ и подтвердите привязку в «QQ Bot Assistant»',
+    waitingForScan: 'Ожидание сканирования',
+    bindSuccess: 'Привязка успешна! AppID и Secret заполнены автоматически',
+    bindFailed: 'Не удалось выполнить привязку',
+    connecting: 'Подключение к сервису QQ...',
+    retry: 'Повторить',
+    tokenNote:
+      'Поле Token не используется текущим адаптером — его можно оставить пустым.',
+    boundBy: 'Привязано пользователем QQ {{openid}}',
+  },
+  pluginPages: {
+    selectFromSidebar: 'Выберите страницу плагина на боковой панели',
+    invalidPage: 'Недопустимая страница плагина',
+  },
+  beta_banner: {
+    message:
+      'Эта среда находится в стадии бета-тестирования. Стабильность сервиса не гарантируется. Рекомендуем использовать',
+    cloud_link: 'LangBot Cloud (выделенная среда)',
+    or: 'или',
+    oss_link: 'версию с открытым исходным кодом на своём сервере',
+    period: '.',
+    dismiss: 'Закрыть',
+  },
 };
-
 export default ruRU;

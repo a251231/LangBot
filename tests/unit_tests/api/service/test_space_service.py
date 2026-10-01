@@ -13,6 +13,10 @@ Source: src/langbot/pkg/api/http/service/space.py
 
 from __future__ import annotations
 
+from collections import OrderedDict
+import json
+from urllib.parse import parse_qs, urlsplit
+
 import pytest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from types import SimpleNamespace
@@ -21,9 +25,27 @@ import time
 
 from langbot.pkg.api.http.service.space import SpaceService
 from langbot.pkg.entity.persistence.user import User
+from langbot.pkg.utils import constants
 
 
 pytestmark = pytest.mark.asyncio
+
+
+def _set_response_body(response: MagicMock, body: dict | str) -> None:
+    """Configure an aiohttp-like streaming body on an HTTP response mock."""
+
+    raw_body = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+
+    class Content:
+        async def iter_chunked(self, _chunk_size: int):
+            midpoint = max(len(raw_body) // 2, 1)
+            yield raw_body[:midpoint]
+            if midpoint < len(raw_body):
+                yield raw_body[midpoint:]
+
+    response.headers = {}
+    response.content = Content()
+    response.charset = 'utf-8'
 
 
 def _create_mock_user(
@@ -73,7 +95,9 @@ class TestSpaceServiceGetOAuthAuthorizeUrl:
         result = service.get_oauth_authorize_url('http://localhost/callback')
 
         # Verify
-        assert 'redirect_uri=http://localhost/callback' in result
+        query = parse_qs(urlsplit(result).query)
+        assert query['redirect_uri'] == ['http://localhost/callback']
+        assert query['code_contract'] == ['redirect-v1']
         assert 'https://space.langbot.app/auth/authorize' in result
 
     def test_get_oauth_authorize_url_with_state(self):
@@ -93,8 +117,9 @@ class TestSpaceServiceGetOAuthAuthorizeUrl:
         result = service.get_oauth_authorize_url('http://localhost/callback', state='random_state')
 
         # Verify
-        assert 'redirect_uri=http://localhost/callback' in result
-        assert 'state=random_state' in result
+        params = parse_qs(urlsplit(result).query)
+        assert params['redirect_uri'] == ['http://localhost/callback']
+        assert params['state'] == ['random_state']
 
     def test_get_oauth_authorize_url_default_config(self):
         """Uses default OAuth URL when config not set."""
@@ -289,6 +314,40 @@ class TestSpaceServiceGetCredits:
         # Verify - returns cached value without API call
         assert result == 100
 
+    async def test_cached_credit_lookup_does_not_scan_all_users(self):
+        ap = SimpleNamespace()
+        ap.instance_config = SimpleNamespace(data={})
+        ap.persistence_mgr = SimpleNamespace()
+        service = SpaceService(ap)
+
+        class AtMostOneStepOrderedDict(OrderedDict):
+            def __iter__(self):
+                iterator = super().__iter__()
+                yielded = False
+
+                def next_entry():
+                    nonlocal yielded
+                    if yielded:
+                        raise AssertionError('credits cache scanned all users')
+                    yielded = True
+                    return next(iterator)
+
+                class AtMostOneStepIterator:
+                    def __iter__(self):
+                        return self
+
+                    def __next__(self):
+                        return next_entry()
+
+                return AtMostOneStepIterator()
+
+        now = time.time()
+        service._credits_cache = AtMostOneStepOrderedDict(
+            (f'user-{index}@example.com', (index, now)) for index in range(512)
+        )
+
+        assert await service.get_credits('user-511@example.com') == 511
+
     async def test_get_credits_cache_expired_refreshes(self):
         """Refreshes expired cache."""
         # Setup
@@ -403,6 +462,7 @@ class TestSpaceServiceRefreshToken:
                 },
             }
         )
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -438,6 +498,7 @@ class TestSpaceServiceRefreshToken:
             }
         )
         mock_response.text = AsyncMock(return_value='{"code":1,"msg":"Invalid refresh token"}')
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -464,6 +525,7 @@ class TestSpaceServiceRefreshToken:
         mock_response = MagicMock()
         mock_response.status = 500
         mock_response.text = AsyncMock(return_value='Internal Server Error')
+        _set_response_body(mock_response, mock_response.text.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -503,6 +565,7 @@ class TestSpaceServiceExchangeOAuthCode:
                 },
             }
         )
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -513,10 +576,22 @@ class TestSpaceServiceExchangeOAuthCode:
             mock_session_obj.post.return_value.__aexit__ = AsyncMock(return_value=None)
 
             # Execute
-            result = await service.exchange_oauth_code('auth_code')
+            result = await service.exchange_oauth_code(
+                'auth_code',
+                ['workspace-1'],
+                {'workspace-1': 1_700_000_000},
+                redirect_uri='https://oss.example/auth/space/callback',
+            )
 
         # Verify
         assert result['access_token'] == 'new_access_token'
+        assert mock_session_obj.post.call_args.kwargs['json'] == {
+            'code': 'auth_code',
+            'redirect_uri': 'https://oss.example/auth/space/callback',
+            'instance_id': constants.instance_id,
+            'workspace_uuids': ['workspace-1'],
+            'workspace_created_ats': {'workspace-1': 1_700_000_000},
+        }
 
     async def test_exchange_oauth_code_api_error(self):
         """Raises ValueError on API error."""
@@ -532,6 +607,7 @@ class TestSpaceServiceExchangeOAuthCode:
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value={'code': 1, 'msg': 'Invalid code'})
         mock_response.text = AsyncMock(return_value='{"code":1,"msg":"Invalid code"}')
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -570,6 +646,7 @@ class TestSpaceServiceGetUserInfoRaw:
                 },
             }
         )
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -600,6 +677,7 @@ class TestSpaceServiceGetUserInfoRaw:
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value={'code': 1, 'msg': 'Unauthorized'})
         mock_response.text = AsyncMock(return_value='{"code":1,"msg":"Unauthorized"}')
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -693,13 +771,14 @@ class TestSpaceServiceGetModels:
                             'uuid': 'uuid-2',
                             'model_id': 'model-2',
                             'provider': 'provider-2',
-                            'category': 'chat',
+                            'category': 'rerank',
                             'status': 'active',
                         },
                     ]
                 },
             }
         )
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -714,6 +793,7 @@ class TestSpaceServiceGetModels:
 
         # Verify
         assert len(result) == 2
+        assert result[1].category == 'rerank'
 
     async def test_get_models_api_error(self):
         """Raises ValueError on API error."""
@@ -729,6 +809,7 @@ class TestSpaceServiceGetModels:
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value={'code': 1, 'msg': 'Unauthorized'})
         mock_response.text = AsyncMock(return_value='{"code":1,"msg":"Unauthorized"}')
+        _set_response_body(mock_response, mock_response.json.return_value)
 
         with patch('langbot.pkg.api.http.service.space.httpclient.get_session') as mock_session:
             mock_session_obj = MagicMock()
@@ -741,6 +822,164 @@ class TestSpaceServiceGetModels:
             # Execute & Verify
             with pytest.raises(ValueError, match='Failed to get models'):
                 await service.get_models()
+
+
+class TestSpaceServiceGetModelSelection:
+    """Tests for availability-ranked model selection."""
+
+    @pytest.mark.parametrize(
+        'response_shape', ['direct', 'models-envelope', 'availability-wrapper', 'legacy-flat-wrapper']
+    )
+    async def test_preserves_selection_order_and_category_query(self, response_shape):
+        ap = SimpleNamespace(instance_config=SimpleNamespace(data={}))
+        service = SpaceService(ap)
+        models = [
+            {
+                'uuid': 'best-model',
+                'model_id': 'best-chat-model',
+                'listed_at': '2026-09-09T19:00:00.000929Z',
+                'provider': 'provider-1',
+                'category': 'chat',
+                'status': 'active',
+            },
+            {
+                'uuid': 'fallback-model',
+                'model_id': 'fallback-chat-model',
+                'provider': 'provider-2',
+                'category': 'chat',
+                'status': 'active',
+            },
+        ]
+        if response_shape == 'models-envelope':
+            data = {'models': models}
+        elif response_shape == 'availability-wrapper':
+            data = [
+                {
+                    'model': model,
+                    'availability': {
+                        'up': True,
+                        'last_probed_at': '2026-09-11T12:01:18Z',
+                        'latency_ms': index + 10,
+                        'http_code': 200,
+                    },
+                }
+                for index, model in enumerate(models)
+            ]
+        elif response_shape == 'legacy-flat-wrapper':
+            data = [{'model': model, 'latency_ms': index + 10, 'http_code': 200} for index, model in enumerate(models)]
+        else:
+            data = models
+        payload = {'code': 0, 'data': data}
+        mock_response = MagicMock(status=200)
+
+        with (
+            patch('langbot.pkg.api.http.service.space.httpclient.get_session') as get_session,
+            patch(
+                'langbot.pkg.api.http.service.space.httpclient.read_json_limited',
+                new=AsyncMock(return_value=payload),
+            ),
+        ):
+            session = MagicMock()
+            session.get.return_value.__aenter__ = AsyncMock(return_value=mock_response)
+            session.get.return_value.__aexit__ = AsyncMock(return_value=None)
+            get_session.return_value = session
+
+            result = await service.get_model_selection('chat')
+
+        assert [model.uuid for model in result] == ['best-model', 'fallback-model']
+        assert result[0].model_dump()['listed_at'] == '2026-09-09T19:00:00.000929Z'
+        assert result[1].listed_at is None
+        if response_shape == 'availability-wrapper':
+            assert result[0].availability.up is True
+            assert result[0].availability.last_probed_at == '2026-09-11T12:01:18Z'
+            assert result[0].availability.latency_ms == 10
+        session.get.assert_called_once_with(
+            'https://space.langbot.app/api/v1/models/selection',
+            params={'category': 'chat'},
+        )
+
+    async def test_selection_without_category_fetches_all_model_statuses(self):
+        ap = SimpleNamespace(instance_config=SimpleNamespace(data={}))
+        service = SpaceService(ap)
+        payload = {
+            'code': 0,
+            'data': {
+                'models': [
+                    {
+                        'model': {
+                            'uuid': 'embedding-model',
+                            'model_id': 'text-embedding',
+                            'category': 'embedding',
+                            'input_credits': 20,
+                            'output_credits': 40,
+                        },
+                        'availability': {'up': None, 'last_probed_at': None},
+                    }
+                ]
+            },
+        }
+        mock_response = MagicMock(status=200)
+
+        with (
+            patch('langbot.pkg.api.http.service.space.httpclient.get_session') as get_session,
+            patch(
+                'langbot.pkg.api.http.service.space.httpclient.read_json_limited',
+                new=AsyncMock(return_value=payload),
+            ),
+        ):
+            session = MagicMock()
+            session.get.return_value.__aenter__ = AsyncMock(return_value=mock_response)
+            session.get.return_value.__aexit__ = AsyncMock(return_value=None)
+            get_session.return_value = session
+
+            result = await service.get_model_selection()
+
+        assert result[0].category == 'embedding'
+        assert result[0].input_credits == 20
+        assert result[0].output_credits == 40
+        assert result[0].availability.up is None
+        session.get.assert_called_once_with(
+            'https://space.langbot.app/api/v1/models/selection',
+            params=None,
+        )
+
+    async def test_recommended_model_uses_first_selection_and_refreshes_once(self):
+        local_model = SimpleNamespace(uuid='local-model-uuid', name='best-chat-model')
+        persistence = SimpleNamespace(
+            execute_async=AsyncMock(
+                side_effect=[
+                    _create_mock_result(first_item=None),
+                    _create_mock_result(first_item=local_model),
+                ]
+            )
+        )
+        model_mgr = SimpleNamespace(sync_new_models_from_space=AsyncMock())
+        ap = SimpleNamespace(
+            instance_config=SimpleNamespace(data={}),
+            persistence_mgr=persistence,
+            model_mgr=model_mgr,
+        )
+        service = SpaceService(ap)
+        service.get_model_selection = AsyncMock(
+            return_value=[
+                SimpleNamespace(uuid='best-upstream-uuid', model_id='best-chat-model'),
+                SimpleNamespace(uuid='fallback-upstream-uuid', model_id='fallback-chat-model'),
+            ]
+        )
+        context = SimpleNamespace(
+            instance_uuid='instance',
+            workspace_uuid='workspace',
+            placement_generation=1,
+            principal=SimpleNamespace(),
+            entitlement_revision=0,
+        )
+
+        result = await service.get_recommended_chat_model(context)
+
+        assert result == {'uuid': 'local-model-uuid', 'name': 'best-chat-model'}
+        service.get_model_selection.assert_awaited_once_with('chat')
+        model_mgr.sync_new_models_from_space.assert_awaited_once()
+        assert persistence.execute_async.await_count == 2
 
 
 class TestSpaceServiceCreditsCache:

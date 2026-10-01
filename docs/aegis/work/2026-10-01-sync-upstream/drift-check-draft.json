@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-01-sync-upstream",
+  "taskIntentRef": "docs/aegis/work/2026-10-01-sync-upstream/task-intent-draft.json",
+  "baselineRefs": [
+    "ARCHITECTURE.md"
+  ],
+  "scopeStatus": "仍为上游合并",
+  "compatStatus": "保留用户定制；历史 RAG 修复限定旧 schema",
+  "retirementStatus": "旧会话列表实现已由上游索引取代，保留手动清理入口",
+  "newRiskSignals": [],
+  "decision": "needs-verification"
+}

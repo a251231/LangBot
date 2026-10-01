@@ -3,7 +3,11 @@ import {
   ApiRespMarketplacePluginDetail,
   ApiRespMarketplacePlugins,
 } from '@/app/infra/entities/api';
-import { PluginV4 } from '@/app/infra/entities/plugin';
+import {
+  PluginV4,
+  RunnerUsage,
+  supportsRunnerUsage,
+} from '@/app/infra/entities/plugin';
 import { I18nObject } from '@/app/infra/entities/common';
 
 const LANGBOT_RELEASES_URL =
@@ -42,6 +46,7 @@ export class CloudServiceClient extends BaseHttpClient {
     component_filter?: string,
     tags_filter?: string[],
     type_filter?: string,
+    runner_usage?: RunnerUsage,
   ): Promise<ApiRespMarketplacePlugins> {
     // Use different endpoints based on type_filter
     if (type_filter === 'mcp') {
@@ -93,6 +98,7 @@ export class CloudServiceClient extends BaseHttpClient {
         sort_by,
         sort_order,
         component_filter,
+        runner_usage,
         tags_filter,
         type_filter,
       },
@@ -107,17 +113,63 @@ export class CloudServiceClient extends BaseHttpClient {
     sort_order?: string;
     type_filter?: string;
     component_filter?: string;
+    runner_usage?: RunnerUsage;
     tags_filter?: string[];
   }): Promise<ApiRespMarketplacePlugins> {
     return this.post<{ extensions: PluginV4[]; total: number }>(
       '/api/v1/marketplace/extensions/search',
       data,
     )
-      .then((resp) => ({
-        plugins: resp?.extensions || [],
-        total: resp?.total || 0,
-      }))
-      .catch(() => this.searchMarketplaceExtensionsLegacy(data));
+      .then((resp) => {
+        const extensions = resp?.extensions || [];
+        // Runner installation needs a concrete version. Older Space
+        // deployments omit it from the unified extension response.
+        if (
+          data.component_filter &&
+          extensions.some((extension) => !extension.latest_version)
+        ) {
+          return this.searchMarketplaceExtensionsLegacy(data);
+        }
+        return {
+          plugins: extensions,
+          total: resp?.total || 0,
+        };
+      })
+      .catch(() => this.searchMarketplaceExtensionsLegacy(data))
+      .then((result) => ({
+        ...result,
+        plugins: data.runner_usage
+          ? result.plugins.filter((plugin) =>
+              supportsRunnerUsage(plugin, data.runner_usage!),
+            )
+          : result.plugins,
+      }));
+  }
+
+  public getMarketplaceLikedExtensions(
+    fingerprint: string,
+  ): Promise<{ extensions: Array<{ type: string; extension_id: string }> }> {
+    return this.post('/api/v1/marketplace/extensions/likes/status', {
+      fingerprint,
+    });
+  }
+
+  public setMarketplaceExtensionLike(
+    type: string,
+    author: string,
+    name: string,
+    fingerprint: string,
+    liked: boolean,
+  ): Promise<{
+    type: string;
+    extension_id: string;
+    liked: boolean;
+    like_count: number;
+  }> {
+    return this.put(
+      `/api/v1/marketplace/extensions/${encodeURIComponent(type)}/${encodeURIComponent(author)}/${encodeURIComponent(name)}/like`,
+      { fingerprint, liked },
+    );
   }
 
   private async searchMarketplaceExtensionsLegacy(data: {
@@ -128,9 +180,12 @@ export class CloudServiceClient extends BaseHttpClient {
     sort_order?: string;
     type_filter?: string;
     component_filter?: string;
+    runner_usage?: RunnerUsage;
     tags_filter?: string[];
   }): Promise<ApiRespMarketplacePlugins> {
     const query = data.query || '';
+    const legacySortBy =
+      data.sort_by === 'hot_score' ? 'install_count' : data.sort_by;
 
     if (
       data.type_filter === 'plugin' ||
@@ -142,11 +197,12 @@ export class CloudServiceClient extends BaseHttpClient {
         query,
         data.page,
         data.page_size,
-        data.sort_by,
+        legacySortBy,
         data.sort_order,
         data.component_filter,
         data.tags_filter,
         data.component_filter ? 'plugin' : data.type_filter,
+        data.runner_usage,
       ).catch((error) => {
         if (data.type_filter === 'mcp' || data.type_filter === 'skill') {
           return { plugins: [], total: 0 };
@@ -160,7 +216,7 @@ export class CloudServiceClient extends BaseHttpClient {
         query,
         data.page,
         data.page_size,
-        data.sort_by,
+        legacySortBy,
         data.sort_order,
         undefined,
         data.tags_filter,
@@ -170,7 +226,7 @@ export class CloudServiceClient extends BaseHttpClient {
         query,
         data.page,
         data.page_size,
-        data.sort_by,
+        legacySortBy,
         data.sort_order,
         undefined,
         data.tags_filter,
@@ -180,7 +236,7 @@ export class CloudServiceClient extends BaseHttpClient {
         query,
         data.page,
         data.page_size,
-        data.sort_by,
+        legacySortBy,
         data.sort_order,
         undefined,
         data.tags_filter,

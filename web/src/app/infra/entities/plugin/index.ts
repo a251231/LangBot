@@ -36,6 +36,7 @@ export enum PluginV4Status {
 }
 
 export interface PluginV4 {
+  certification_status?: string;
   id: number;
   plugin_id: string;
   mcp_id?: string;
@@ -48,10 +49,27 @@ export interface PluginV4 {
   repository: string;
   tags: string[];
   install_count: number;
+  like_count?: number;
+  hot_score?: number;
   latest_version: string;
   components: Record<string, number>;
+  runner_usages?: RunnerUsage[];
   status: PluginV4Status;
   type?: 'plugin' | 'mcp' | 'skill';
   created_at: string;
   updated_at: string;
+}
+
+export type RunnerUsage = 'agent' | 'event';
+
+/** Unknown usage metadata must not become an install recommendation. */
+export function supportsRunnerUsage(
+  plugin: PluginV4,
+  usage: RunnerUsage,
+): boolean {
+  return Boolean(
+    plugin.components?.Runner &&
+    Array.isArray(plugin.runner_usages) &&
+    plugin.runner_usages.includes(usage),
+  );
 }

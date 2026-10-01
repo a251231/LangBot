@@ -1,4 +1,14 @@
-import { BaseHttpClient } from './BaseHttpClient';
+import { BaseHttpClient, type RequestConfig } from './BaseHttpClient';
+import type {
+  PipelineMigrationPreview,
+  PipelineMigrationRequest,
+} from '@/app/infra/entities/api/pipeline-migration';
+import type { DebugExecutionEvent } from '@/app/infra/entities/api/agent-debug';
+import type {
+  CodexAuthStatus,
+  CodexDeviceAuthorization,
+  CodexDevicePoll,
+} from '@/app/infra/entities/codex';
 import {
   ApiRespProviderRequesters,
   ApiRespProviderRequester,
@@ -6,6 +16,9 @@ import {
   ApiRespProviderLLMModel,
   LLMModel,
   ApiRespPipelines,
+  ApiRespAgents,
+  ApiRespAgent,
+  Agent,
   Pipeline,
   ApiRespPlatformAdapters,
   ApiRespPlatformAdapter,
@@ -22,6 +35,7 @@ import {
   ApiRespUserToken,
   GetPipelineResponseData,
   GetPipelineMetadataResponseData,
+  GetAgentMetadataResponseData,
   AsyncTask,
   ApiRespWebChatMessages,
   ApiRespKnowledgeBases,
@@ -55,12 +69,33 @@ import {
   Skill,
   ApiRespSkills,
   ApiRespSkill,
+  BotRouteDryRunRequest,
+  BotRouteDryRunResult,
+  BotEventRouteStatusResponse,
+  ApiRespLangBotModelAvailability,
 } from '@/app/infra/entities/api';
 import { Plugin } from '@/app/infra/entities/plugin';
 import type { PluginLogEntry } from '@/app/infra/entities/plugin';
 import type { I18nObject } from '@/app/infra/entities/common';
 import { GetBotLogsRequest } from '@/app/infra/http/requestParam/bots/GetBotLogsRequest';
 import { GetBotLogsResponse } from '@/app/infra/http/requestParam/bots/GetBotLogsResponse';
+import type {
+  CurrentWorkspace,
+  Workspace,
+  WorkspaceInvitation,
+  WorkspaceInvitationDelivery,
+  WorkspaceMembership,
+  WorkspaceBootstrapResponse,
+  WorkspaceRole,
+  WorkspaceSpaceBilling,
+} from '@/app/infra/entities/workspace';
+import type {
+  OperationGovernance,
+  OperationLevel,
+  OperationLogFilters,
+  OperationLogPage,
+  OperationLogQuery,
+} from '@/app/infra/entities/operation-log';
 
 /**
  * 后端服务客户端
@@ -116,8 +151,52 @@ export class BackendClient extends BaseHttpClient {
     return this.put(`/api/v1/provider/providers/${uuid}`, provider);
   }
 
-  public deleteModelProvider(uuid: string): Promise<object> {
-    return this.delete(`/api/v1/provider/providers/${uuid}`);
+  public deleteModelProvider(uuid: string, cascade = false): Promise<object> {
+    return this.delete(
+      `/api/v1/provider/providers/${uuid}${cascade ? '?cascade=true' : ''}`,
+    );
+  }
+
+  public getCodexAuthStatus(
+    uuid: string,
+    signal?: AbortSignal,
+  ): Promise<CodexAuthStatus> {
+    return this.get(
+      `/api/v1/provider/providers/${uuid}/codex/status`,
+      undefined,
+      { signal },
+    );
+  }
+
+  public startCodexDeviceLogin(
+    uuid: string,
+  ): Promise<CodexDeviceAuthorization> {
+    return this.post(`/api/v1/provider/providers/${uuid}/codex/device`, {});
+  }
+
+  public pollCodexDeviceLogin(
+    uuid: string,
+    authorizationId: string,
+    signal?: AbortSignal,
+  ): Promise<CodexDevicePoll> {
+    return this.post(
+      `/api/v1/provider/providers/${uuid}/codex/device/poll`,
+      { authorization_id: authorizationId },
+      { signal },
+    );
+  }
+
+  public cancelCodexDeviceLogin(
+    uuid: string,
+    authorizationId: string,
+  ): Promise<object> {
+    return this.delete(
+      `/api/v1/provider/providers/${uuid}/codex/device/${encodeURIComponent(authorizationId)}`,
+    );
+  }
+
+  public disconnectCodex(uuid: string): Promise<object> {
+    return this.delete(`/api/v1/provider/providers/${uuid}/codex/auth`);
   }
 
   public scanProviderModels(
@@ -140,7 +219,9 @@ export class BackendClient extends BaseHttpClient {
     return this.get(`/api/v1/provider/models/llm/${uuid}`);
   }
 
-  public createProviderLLMModel(model: LLMModel): Promise<object> {
+  public createProviderLLMModel(
+    model: Omit<LLMModel, 'uuid'>,
+  ): Promise<{ uuid: string }> {
     return this.post('/api/v1/provider/models/llm', model);
   }
 
@@ -229,6 +310,128 @@ export class BackendClient extends BaseHttpClient {
   }
 
   // ============ Pipeline API ============
+  public getAgents(
+    sortBy?: string,
+    sortOrder?: string,
+  ): Promise<ApiRespAgents> {
+    const params = new URLSearchParams();
+    if (sortBy) params.append('sort_by', sortBy);
+    if (sortOrder) params.append('sort_order', sortOrder);
+    const queryString = params.toString();
+    return this.get(`/api/v1/agents${queryString ? `?${queryString}` : ''}`);
+  }
+
+  public getAgent(uuid: string): Promise<ApiRespAgent> {
+    return this.get(`/api/v1/agents/${uuid}`);
+  }
+
+  public getAgentMetadata(): Promise<GetAgentMetadataResponseData> {
+    return this.get('/api/v1/agents/_/metadata');
+  }
+
+  public getProcessorRuns(
+    uuid: string,
+    beforeId?: number,
+  ): Promise<import('../entities/api').ProcessorRunPage> {
+    return this.get(
+      `/api/v1/agents/${encodeURIComponent(uuid)}/runs${beforeId === undefined ? '' : `?before_id=${beforeId}`}`,
+    );
+  }
+
+  public getProcessorRunEvents(
+    uuid: string,
+    runId: string,
+    afterSequence?: number,
+  ): Promise<import('../entities/api').ProcessorRunEventPage> {
+    return this.get(
+      `/api/v1/agents/${encodeURIComponent(uuid)}/runs/${encodeURIComponent(runId)}/events${afterSequence === undefined ? '' : `?after_sequence=${afterSequence}`}`,
+    );
+  }
+
+  public createAgent(agent: Agent): Promise<{ uuid: string; kind: string }> {
+    return this.post('/api/v1/agents', agent);
+  }
+
+  public updateAgent(uuid: string, agent: Partial<Agent>): Promise<object> {
+    return this.put(`/api/v1/agents/${uuid}`, agent);
+  }
+
+  public deleteAgent(uuid: string): Promise<object> {
+    return this.delete(`/api/v1/agents/${uuid}`);
+  }
+
+  public debugAgent(
+    uuid: string,
+    payload: {
+      event_type: string;
+      text?: string;
+      data?: Record<string, unknown>;
+      conversation_id?: string;
+      actor?: Record<string, unknown>;
+      subject?: Record<string, unknown>;
+      mock?: Record<string, unknown>;
+    },
+  ): Promise<{
+    event_id: string;
+    event_type: string;
+    conversation_id: string;
+    final_text: string;
+    outputs: Array<{
+      kind: string;
+      role: string;
+      text: string;
+    }>;
+  }> {
+    return this.post(`/api/v1/agents/${uuid}/debug`, payload);
+  }
+
+  public async streamDebugAgent(
+    uuid: string,
+    payload: Parameters<BackendClient['debugAgent']>[1],
+    onResult: (event: DebugExecutionEvent) => void,
+    signal: AbortSignal,
+  ): ReturnType<BackendClient['debugAgent']> {
+    let offset = 0;
+    let result: Awaited<ReturnType<BackendClient['debugAgent']>> | undefined;
+    let failure: { code: string; msg: string } | undefined;
+    const consume = (text: string) => {
+      let end: number;
+      while ((end = text.indexOf('\n', offset)) !== -1) {
+        const line = text.slice(offset, end).trim();
+        offset = end + 1;
+        if (!line) continue;
+        const frame = JSON.parse(line);
+        if (frame.kind === 'result') onResult(frame.data);
+        else if (frame.kind === 'completed') result = frame.data;
+        else if (frame.kind === 'error') failure = frame;
+      }
+    };
+    const response = await this.instance.post<string>(
+      `/api/v1/agents/${uuid}/debug/stream`,
+      payload,
+      {
+        adapter: 'xhr',
+        responseType: 'text',
+        timeout: 0,
+        signal,
+        headers: { Accept: 'application/x-ndjson' },
+        transformResponse: [(data) => data],
+        onDownloadProgress: (progress) => {
+          const xhr = progress.event?.target as XMLHttpRequest | undefined;
+          if (xhr?.status === 200) consume(xhr.responseText);
+        },
+      },
+    );
+    consume(response.data);
+    if (failure) throw failure;
+    if (!result)
+      throw {
+        code: 'runner_protocol_error',
+        msg: 'Debug stream ended before completion',
+      };
+    return result;
+  }
+
   public getGeneralPipelineMetadata(): Promise<GetPipelineMetadataResponseData> {
     // as designed, this method will be deprecated, and only for developer to check the prefered config schema
     return this.get('/api/v1/pipelines/_/metadata');
@@ -249,13 +452,29 @@ export class BackendClient extends BaseHttpClient {
     return this.get(`/api/v1/pipelines/${uuid}`);
   }
 
+  public getPipelineMigrationPreview(
+    config?: RequestConfig,
+  ): Promise<PipelineMigrationPreview> {
+    return this.get('/api/v1/pipelines/_/migration/preview', undefined, config);
+  }
+
+  public executePipelineMigration(
+    body: PipelineMigrationRequest,
+    config?: RequestConfig,
+  ): Promise<AsyncTaskCreatedResp & { pipeline_uuids?: string[] }> {
+    return this.post('/api/v1/pipelines/_/migration/execute', body, config);
+  }
+
   public createPipeline(pipeline: Pipeline): Promise<{
     uuid: string;
   }> {
     return this.post('/api/v1/pipelines', pipeline);
   }
 
-  public updatePipeline(uuid: string, pipeline: Pipeline): Promise<object> {
+  public updatePipeline(
+    uuid: string,
+    pipeline: Partial<Pipeline>,
+  ): Promise<object> {
     return this.put(`/api/v1/pipelines/${uuid}`, pipeline);
   }
 
@@ -415,8 +634,24 @@ export class BackendClient extends BaseHttpClient {
     return this.post('/api/v1/platform/bots', bot);
   }
 
-  public updateBot(uuid: string, bot: Bot): Promise<object> {
+  public updateBot(uuid: string, bot: Partial<Bot>): Promise<object> {
     return this.put(`/api/v1/platform/bots/${uuid}`, bot);
+  }
+
+  public dryRunBotEventRoute(
+    botId: string,
+    request: BotRouteDryRunRequest,
+  ): Promise<BotRouteDryRunResult> {
+    return this.post(
+      `/api/v1/platform/bots/${botId}/event-routes/dry-run`,
+      request,
+    );
+  }
+
+  public getBotEventRouteStatuses(
+    botId: string,
+  ): Promise<BotEventRouteStatusResponse> {
+    return this.get(`/api/v1/platform/bots/${botId}/event-routes/status`);
   }
 
   public deleteBot(uuid: string): Promise<object> {
@@ -451,10 +686,24 @@ export class BackendClient extends BaseHttpClient {
     return this.post(`/api/v1/platform/bots/${botId}/logs`, request);
   }
 
+  public testHttpBotInbound(
+    botId: string,
+    message: string,
+  ): Promise<{ session_id: string; accepted_message_id: string }> {
+    return this.post(`/api/v1/platform/bots/${botId}/test-inbound`, {
+      message,
+    });
+  }
+
   public getBotSessions(
     botId: string,
-    limit: number = 100,
-    offset: number = 0,
+    options: {
+      limit: number;
+      offset: number;
+      startTime?: string;
+      endTime?: string;
+      userQuery?: string;
+    },
   ): Promise<{
     sessions: Array<{
       session_id: string;
@@ -474,15 +723,38 @@ export class BackendClient extends BaseHttpClient {
   }> {
     const queryParams = new URLSearchParams();
     queryParams.append('botId', botId);
-    queryParams.append('limit', limit.toString());
-    queryParams.append('offset', offset.toString());
+    queryParams.append('limit', options.limit.toString());
+    queryParams.append('offset', options.offset.toString());
+    if (options.startTime) {
+      queryParams.append('startTime', options.startTime);
+    }
+    if (options.endTime) {
+      queryParams.append('endTime', options.endTime);
+    }
+    if (options.userQuery) {
+      queryParams.append('userQuery', options.userQuery);
+    }
     return this.get(`/api/v1/monitoring/sessions?${queryParams.toString()}`);
+  }
+
+  public getSessionAnalysis<T>(
+    sessionId: string,
+    botId: string,
+    options: { startTime?: string; endTime?: string } = {},
+  ): Promise<T> {
+    const queryParams = new URLSearchParams({ botId });
+    if (options.startTime) queryParams.set('startTime', options.startTime);
+    if (options.endTime) queryParams.set('endTime', options.endTime);
+    return this.get(
+      `/api/v1/monitoring/sessions/${encodeURIComponent(sessionId)}/analysis?${queryParams.toString()}`,
+    );
   }
 
   public getSessionMessages(
     sessionId: string,
     limit: number = 200,
     offset: number = 0,
+    botId?: string,
   ): Promise<{
     messages: Array<{
       id: string;
@@ -506,6 +778,7 @@ export class BackendClient extends BaseHttpClient {
   }> {
     const queryParams = new URLSearchParams();
     queryParams.append('sessionId', sessionId);
+    if (botId) queryParams.append('botId', botId);
     queryParams.append('limit', limit.toString());
     queryParams.append('offset', offset.toString());
     return this.get(`/api/v1/monitoring/messages?${queryParams.toString()}`);
@@ -671,6 +944,21 @@ export class BackendClient extends BaseHttpClient {
     );
   }
 
+  public getMcpServerLogs(
+    serverName: string,
+    limit: number = 200,
+    level?: string,
+  ): Promise<{ logs: PluginLogEntry[] }> {
+    const params = new URLSearchParams();
+    params.set('limit', String(limit));
+    if (level) {
+      params.set('level', level);
+    }
+    return this.get(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverName)}/logs?${params.toString()}`,
+    );
+  }
+
   public getPluginAssetURL(
     author: string,
     name: string,
@@ -682,6 +970,54 @@ export class BackendClient extends BaseHttpClient {
     return (
       this.instance.defaults.baseURL +
       `/api/v1/plugins/${author}/${name}/assets/${filepath}`
+    );
+  }
+
+  private async getAuthenticatedObjectURL(
+    path: string,
+    rewritePluginPageSdk = false,
+  ): Promise<string> {
+    const response = await this.instance.get<Blob>(path, {
+      responseType: 'blob',
+    });
+    let blob = response.data;
+    if (rewritePluginPageSdk && blob.type.startsWith('text/html')) {
+      const apiBase =
+        this.instance.defaults.baseURL === '/'
+          ? window.location.origin
+          : this.instance.defaults.baseURL?.replace(/\/$/, '');
+      const pageSdkUrl = `${apiBase}/api/v1/plugins/_sdk/page-sdk.js`;
+      const html = await blob.text();
+      blob = new Blob(
+        [
+          html.replace(
+            /(<script\b[^>]*\bsrc\s*=\s*)(["'])\/api\/v1\/plugins\/_sdk\/page-sdk\.js\2/gi,
+            `$1$2${pageSdkUrl}$2`,
+          ),
+        ],
+        { type: blob.type },
+      );
+    }
+    return URL.createObjectURL(blob);
+  }
+
+  public getAuthenticatedPluginAssetURL(
+    author: string,
+    name: string,
+    filepath: string,
+  ): Promise<string> {
+    return this.getAuthenticatedObjectURL(
+      `/api/v1/plugins/${author}/${name}/authenticated-assets/${filepath}`,
+      true,
+    );
+  }
+
+  public getAuthenticatedPluginIconURL(
+    author: string,
+    name: string,
+  ): Promise<string> {
+    return this.getAuthenticatedObjectURL(
+      `/api/v1/plugins/${author}/${name}/authenticated-icon`,
     );
   }
 
@@ -718,13 +1054,15 @@ export class BackendClient extends BaseHttpClient {
   }
 
   public installPluginFromGithub(
-    assetUrl: string,
+    assetId: number,
+    releaseId: number,
     owner: string,
     repo: string,
     releaseTag: string,
   ): Promise<AsyncTaskCreatedResp> {
     return this.post('/api/v1/plugins/install/github', {
-      asset_url: assetUrl,
+      asset_id: assetId,
+      release_id: releaseId,
       owner,
       repo,
       release_tag: releaseTag,
@@ -901,8 +1239,14 @@ export class BackendClient extends BaseHttpClient {
     );
   }
 
-  public getToolDetail(toolName: string): Promise<ApiRespToolDetail> {
-    return this.get(`/api/v1/tools/${toolName}`);
+  public getToolDetail(
+    toolName: string,
+    pipelineId?: string,
+  ): Promise<ApiRespToolDetail> {
+    return this.get(
+      `/api/v1/tools/${encodeURIComponent(toolName)}`,
+      pipelineId ? { pipeline_uuid: pipelineId } : undefined,
+    );
   }
 
   public getMCPServer(serverName: string): Promise<ApiRespMCPServer> {
@@ -991,12 +1335,26 @@ export class BackendClient extends BaseHttpClient {
 
   public saveWizardProgress(progress: {
     step: number;
+    selected_scenario?: string | null;
     selected_adapter: string | null;
     created_bot_uuid: string | null;
+    created_pipeline_uuid?: string | null;
     bot_saved: boolean;
+    message_received?: boolean;
     selected_runner: string | null;
   }): Promise<void> {
     return this.put('/api/v1/system/wizard/progress', progress);
+  }
+
+  public getWizardRecommendedModel(): Promise<{
+    uuid: string;
+    name: string;
+  }> {
+    return this.get('/api/v1/system/wizard/recommended-model');
+  }
+
+  public getLangBotModelAvailability(): Promise<ApiRespLangBotModelAvailability> {
+    return this.get('/api/v1/system/model-availability');
   }
 
   public getAsyncTasks(params?: {
@@ -1010,8 +1368,8 @@ export class BackendClient extends BaseHttpClient {
     return this.get(`/api/v1/system/tasks${qs ? `?${qs}` : ''}`);
   }
 
-  public getAsyncTask(id: number): Promise<AsyncTask> {
-    return this.get(`/api/v1/system/tasks/${id}`);
+  public getAsyncTask(id: number, config?: RequestConfig): Promise<AsyncTask> {
+    return this.get(`/api/v1/system/tasks/${id}`, undefined, config);
   }
 
   public getPluginSystemStatus(): Promise<ApiRespPluginSystemStatus> {
@@ -1038,8 +1396,13 @@ export class BackendClient extends BaseHttpClient {
   public getPluginDebugInfo(): Promise<{
     debug_url: string;
     plugin_debug_key: string;
+    expires_at: string;
   }> {
     return this.get('/api/v1/plugins/debug-info');
+  }
+
+  public getBoxRuntimeStatus(): Promise<ApiRespBoxStatus> {
+    return this.get('/api/v1/box/runtime-status');
   }
 
   public getBoxStatus(): Promise<ApiRespBoxStatus> {
@@ -1052,30 +1415,198 @@ export class BackendClient extends BaseHttpClient {
 
   // ============ User API ============
   public checkIfInited(): Promise<{ initialized: boolean }> {
-    return this.get('/api/v1/user/init');
+    return this.get('/api/v1/user/init', undefined, { skipWorkspace: true });
   }
 
   public initUser(user: string, password: string): Promise<object> {
-    return this.post('/api/v1/user/init', { user, password });
+    return this.post(
+      '/api/v1/user/init',
+      { user, password },
+      { skipWorkspace: true },
+    );
   }
 
-  public authUser(user: string, password: string): Promise<ApiRespUserToken> {
-    return this.post('/api/v1/user/auth', { user, password });
+  public authUser(
+    user: string,
+    password: string,
+    totpCode?: string,
+  ): Promise<ApiRespUserToken> {
+    return this.post(
+      '/api/v1/user/auth',
+      { user, password, totp_code: totpCode },
+      { skipWorkspace: true },
+    );
+  }
+
+  // ============ TOTP second factor (login) ============
+  public requestTotpChallenge(
+    user: string,
+  ): Promise<{ challenge_token: string }> {
+    return this.post(
+      '/api/v1/user/totp/challenge',
+      { user },
+      { skipWorkspace: true },
+    );
+  }
+
+  public verifyTotpLogin(
+    user: string,
+    code: string,
+    challengeToken: string,
+  ): Promise<{ token: string; user: string }> {
+    // The challenge token proves the password step already ran for this
+    // Account; without it the backend refuses to mint a session.
+    return this.post(
+      '/api/v1/user/totp/verify',
+      { user, code, challenge_token: challengeToken },
+      { skipWorkspace: true },
+    );
+  }
+
+  // ============ TOTP second factor (account settings) ============
+  public getTotpStatus(): Promise<{
+    enabled: boolean;
+    pending: boolean;
+    confirmed_at?: string | null;
+    last_used_at?: string | null;
+    recovery_codes_remaining: number;
+  }> {
+    return this.get('/api/v1/user/totp/status', undefined, {
+      skipWorkspace: true,
+    });
+  }
+
+  public beginTotpEnroll(rotate = false): Promise<{
+    uuid: string;
+    // A server-rendered PNG data URL. The shared secret is never returned so it
+    // cannot be read out of the browser.
+    qr_code_data_url: string;
+    algorithm: string;
+    digits: number;
+    period: number;
+  }> {
+    // rotate=true is the explicit "refresh" action; the default reuses any
+    // pending enrolment so duplicate calls cannot invalidate the shown QR.
+    return this.post(
+      '/api/v1/user/totp/enroll',
+      { rotate },
+      { skipWorkspace: true },
+    );
+  }
+
+  public confirmTotpEnroll(
+    code: string,
+  ): Promise<{ recovery_codes: string[] }> {
+    return this.post(
+      '/api/v1/user/totp/enroll/confirm',
+      { code },
+      { skipWorkspace: true },
+    );
+  }
+
+  public regenerateTotpRecoveryCodes(
+    code: string,
+  ): Promise<{ recovery_codes: string[] }> {
+    return this.post(
+      '/api/v1/user/totp/recovery-codes',
+      { code },
+      { skipWorkspace: true },
+    );
+  }
+
+  public disableTotp(code: string): Promise<void> {
+    return this.post(
+      '/api/v1/user/totp/disable',
+      { code },
+      {
+        skipWorkspace: true,
+      },
+    );
+  }
+
+  // ============ TOTP oversight (Workspace owner/admin only) ============
+  public getTotpAccounts(): Promise<{
+    accounts: Array<{
+      account_uuid: string;
+      user: string;
+      status?: string;
+      enabled: boolean;
+      last_used_at?: string | null;
+      recovery_codes_remaining: number;
+    }>;
+  }> {
+    return this.get('/api/v1/user/totp/accounts');
+  }
+
+  public revokeTotpForAccount(accountUuid: string): Promise<void> {
+    return this.delete(
+      `/api/v1/user/totp/accounts/${encodeURIComponent(accountUuid)}`,
+    );
+  }
+
+  /**
+   * Force a re-binding of another Account's second factor (owner/admin only).
+   * Returns a server-rendered QR code; the shared secret is never returned.
+   */
+  public adminBeginTotpEnroll(accountUuid: string): Promise<{
+    uuid: string;
+    qr_code_data_url: string;
+    algorithm: string;
+    digits: number;
+    period: number;
+  }> {
+    return this.post(
+      `/api/v1/user/totp/accounts/${encodeURIComponent(accountUuid)}/enroll`,
+      {},
+    );
+  }
+
+  /** Activate a forced re-binding; recovery codes are returned exactly once. */
+  public adminConfirmTotpEnroll(
+    accountUuid: string,
+    code: string,
+  ): Promise<{ recovery_codes: string[] }> {
+    return this.post(
+      `/api/v1/user/totp/accounts/${encodeURIComponent(accountUuid)}/enroll/confirm`,
+      { code },
+    );
   }
 
   public checkUserToken(): Promise<ApiRespUserToken> {
-    return this.get('/api/v1/user/check-token');
+    return this.get('/api/v1/user/check-token', undefined, {
+      skipWorkspace: true,
+    });
   }
 
   public resetPassword(
     user: string,
-    recoveryKey: string,
     newPassword: string,
+    options: {
+      // 'recovery_key' is the instance-wide key; 'totp' and 'recovery_code'
+      // consume an Account-scoped second factor instead.
+      method?: 'recovery_key' | 'totp' | 'recovery_code';
+      recoveryKey?: string;
+      totpCode?: string;
+    } = {},
   ): Promise<{ user: string }> {
-    return this.post('/api/v1/user/reset-password', {
+    // Only send the second-factor fields that apply to the selected method, so
+    // the default recovery-key flow keeps its historical wire shape (no empty
+    // `method`/`totp_code` keys) and stays byte-compatible with existing callers.
+    const body: Record<string, unknown> = {
       user,
-      recovery_key: recoveryKey,
       new_password: newPassword,
+    };
+    if (options.method && options.method !== 'recovery_key') {
+      body.method = options.method;
+    }
+    if (options.recoveryKey) {
+      body.recovery_key = options.recoveryKey;
+    }
+    if (options.totpCode) {
+      body.totp_code = options.totpCode;
+    }
+    return this.post('/api/v1/user/reset-password', body, {
+      skipWorkspace: true,
     });
   }
 
@@ -1083,54 +1614,300 @@ export class BackendClient extends BaseHttpClient {
     currentPassword: string,
     newPassword: string,
   ): Promise<{ user: string }> {
-    return this.post('/api/v1/user/change-password', {
-      current_password: currentPassword,
-      new_password: newPassword,
-    });
+    return this.post(
+      '/api/v1/user/change-password',
+      {
+        current_password: currentPassword,
+        new_password: newPassword,
+      },
+      { skipWorkspace: true },
+    );
   }
 
   public getUserInfo(): Promise<{
+    account_uuid: string;
     user: string;
     account_type: 'local' | 'space';
     has_password: boolean;
   }> {
-    return this.get('/api/v1/user/info');
+    return this.get('/api/v1/user/info', undefined, { skipWorkspace: true });
   }
 
-  public getSpaceCredits(): Promise<{ credits: number | null }> {
+  public getWorkspaceSpaceBilling(): Promise<WorkspaceSpaceBilling> {
     return this.get('/api/v1/user/space-credits');
   }
 
   public getAccountInfo(): Promise<{
     initialized: boolean;
-    account_type?: 'local' | 'space';
-    has_password?: boolean;
+    authenticated_invitation_acceptance_enabled?: boolean;
+    invitation_registration_enabled?: boolean;
+    password_login_enabled?: boolean;
+    space_login_enabled?: boolean;
+    passkey_login_enabled?: boolean;
+    passkey_supported?: boolean;
   }> {
-    return this.get('/api/v1/user/account-info');
+    return this.get('/api/v1/user/account-info', undefined, {
+      skipWorkspace: true,
+    });
+  }
+
+  // ============ Passkey (WebAuthn) API ============
+  public getPasskeyAuthOptions(
+    email?: string,
+    origin?: string,
+  ): Promise<{ options: any; challenge_token: string }> {
+    return this.post(
+      '/api/v1/user/passkey/auth/options',
+      { email, origin },
+      { skipWorkspace: true },
+    );
+  }
+
+  public verifyPasskeyAuth(
+    challenge_token: string,
+    credential: any,
+  ): Promise<{ token: string; user: string }> {
+    return this.post(
+      '/api/v1/user/passkey/auth/verify',
+      { challenge_token, credential },
+      { skipWorkspace: true },
+    );
+  }
+
+  public getPasskeyRegisterOptions(
+    origin?: string,
+  ): Promise<{ options: any; challenge_token: string }> {
+    return this.post(
+      '/api/v1/user/passkey/register/options',
+      { origin },
+      { skipWorkspace: true },
+    );
+  }
+
+  public verifyPasskeyRegister(
+    challenge_token: string,
+    credential: any,
+    name?: string,
+  ): Promise<{ uuid: string; name: string; created_at?: string }> {
+    return this.post(
+      '/api/v1/user/passkey/register/verify',
+      { challenge_token, credential, name },
+      { skipWorkspace: true },
+    );
+  }
+
+  public getPasskeys(): Promise<
+    Array<{
+      uuid: string;
+      name: string;
+      aaguid?: string;
+      transports?: string;
+      backed_up?: boolean;
+      created_at?: string;
+      last_used_at?: string;
+    }>
+  > {
+    return this.get('/api/v1/user/passkeys', undefined, {
+      skipWorkspace: true,
+    });
+  }
+
+  public renamePasskey(
+    uuid: string,
+    name: string,
+  ): Promise<{ uuid: string; name: string }> {
+    return this.patch(
+      `/api/v1/user/passkey/${encodeURIComponent(uuid)}`,
+      { name },
+      { skipWorkspace: true },
+    );
+  }
+
+  public deletePasskey(uuid: string): Promise<void> {
+    return this.delete(`/api/v1/user/passkey/${encodeURIComponent(uuid)}`, {
+      skipWorkspace: true,
+    });
+  }
+
+  // ============ Workspace API ============
+  public getWorkspaceBootstrap(): Promise<WorkspaceBootstrapResponse> {
+    return this.get('/api/v1/workspaces/bootstrap', undefined, {
+      skipWorkspace: true,
+    });
+  }
+
+  public getWorkspaces(): Promise<{ workspaces: Workspace[] }> {
+    return this.get('/api/v1/workspaces', undefined, { skipWorkspace: true });
+  }
+
+  public getCurrentWorkspace(): Promise<CurrentWorkspace> {
+    return this.get('/api/v1/workspaces/current');
+  }
+
+  public getWorkspace(
+    workspaceUuid: string,
+  ): Promise<{ workspace: Workspace }> {
+    return this.get(`/api/v1/workspaces/${workspaceUuid}`);
+  }
+
+  public getWorkspaceMembers(
+    workspaceUuid: string,
+  ): Promise<{ members: WorkspaceMembership[] }> {
+    return this.get(`/api/v1/workspaces/${workspaceUuid}/members`);
+  }
+
+  public createWorkspaceInvitation(
+    workspaceUuid: string,
+    email: string,
+    role: Exclude<WorkspaceRole, 'owner'>,
+  ): Promise<{
+    invitation: WorkspaceInvitation;
+    token: string;
+    link: string;
+    delivery: WorkspaceInvitationDelivery;
+  }> {
+    return this.post(`/api/v1/workspaces/${workspaceUuid}/invitations`, {
+      email,
+      role,
+    });
+  }
+
+  public getWorkspaceInvitations(
+    workspaceUuid: string,
+  ): Promise<{ invitations: WorkspaceInvitation[] }> {
+    return this.get(`/api/v1/workspaces/${workspaceUuid}/invitations`);
+  }
+
+  public revokeWorkspaceInvitation(
+    workspaceUuid: string,
+    invitationUuid: string,
+  ): Promise<object> {
+    return this.delete(
+      `/api/v1/workspaces/${workspaceUuid}/invitations/${invitationUuid}`,
+    );
+  }
+
+  public inspectWorkspaceInvitation(
+    token: string,
+  ): Promise<{ invitation: WorkspaceInvitation; workspace: Workspace }> {
+    return this.post(
+      '/api/v1/invitations/inspect',
+      { token },
+      { skipWorkspace: true },
+    );
+  }
+
+  public acceptWorkspaceInvitation(
+    token: string,
+    registration?: { email: string; password: string },
+  ): Promise<{ token: string; workspace_uuid: string }> {
+    return this.post(
+      '/api/v1/invitations/accept',
+      {
+        token,
+        registration,
+      },
+      { skipWorkspace: true },
+    );
+  }
+
+  public updateWorkspaceMemberRole(
+    workspaceUuid: string,
+    accountUuid: string,
+    role: WorkspaceRole,
+  ): Promise<{ member: WorkspaceMembership }> {
+    return this.patch(
+      `/api/v1/workspaces/${workspaceUuid}/members/${accountUuid}`,
+      { role },
+    );
+  }
+
+  public removeWorkspaceMember(
+    workspaceUuid: string,
+    accountUuid: string,
+  ): Promise<object> {
+    return this.delete(
+      `/api/v1/workspaces/${workspaceUuid}/members/${accountUuid}`,
+    );
+  }
+
+  // ============ Workspace governance / operation traceability ============
+
+  public getOperationGovernance(): Promise<OperationGovernance> {
+    return this.get('/api/v1/settings/governance');
+  }
+
+  public updateOperationGovernance(request: {
+    level: OperationLevel;
+    retention_days?: number;
+    max_rows?: number;
+    dedupe_window_seconds?: number;
+  }): Promise<OperationGovernance> {
+    return this.put('/api/v1/settings/governance', request);
+  }
+
+  public getOperationLogs(
+    query: OperationLogQuery = {},
+  ): Promise<OperationLogPage> {
+    return this.get('/api/v1/settings/operation-logs', query);
+  }
+
+  public getOperationLogFilters(): Promise<OperationLogFilters> {
+    return this.get('/api/v1/settings/operation-logs/filters');
+  }
+
+  /**
+   * Build the export URL so the browser can download the CSV attachment
+   * directly; axios would try to parse the response body as JSON.
+   */
+  public buildOperationLogExportURL(query: OperationLogQuery = {}): string {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null || value === '') continue;
+      params.set(key, String(value));
+    }
+    const suffix = params.toString();
+    // A base of "/" means "same origin". Appending the path directly produced
+    // a protocol-relative "//api/..." URL, which a browser reads as the host
+    // "api" — the export request then never reached the backend. Resolve the
+    // base to the current origin first, mirroring the other URL builders here.
+    const apiBase =
+      this.instance.defaults.baseURL === '/' || !this.instance.defaults.baseURL
+        ? window.location.origin
+        : this.instance.defaults.baseURL.replace(/\/$/, '');
+    return `${apiBase}/api/v1/settings/operation-logs/export${
+      suffix ? `?${suffix}` : ''
+    }`;
   }
 
   public setPassword(
     newPassword: string,
     currentPassword?: string,
   ): Promise<{ user: string }> {
-    return this.post('/api/v1/user/set-password', {
-      new_password: newPassword,
-      current_password: currentPassword,
-    });
+    return this.post(
+      '/api/v1/user/set-password',
+      {
+        new_password: newPassword,
+        current_password: currentPassword,
+      },
+      { skipWorkspace: true },
+    );
   }
 
   public async bindSpaceAccount(
     code: string,
     state: string,
+    redirectUri: string,
   ): Promise<{
     token: string;
     user: string;
     account_type: 'local' | 'space';
   }> {
-    const response = await this.instance.post('/api/v1/user/bind-space', {
-      code,
-      state,
-    });
+    const response = await this.instance.post(
+      '/api/v1/user/bind-space',
+      { code, state, redirect_uri: redirectUri },
+      { skipWorkspace: true } as RequestConfig,
+    );
     if (response.data.code !== 0) {
       throw {
         code: response.data.code,
@@ -1141,26 +1918,50 @@ export class BackendClient extends BaseHttpClient {
   }
 
   // ============ Space OAuth API (Redirect Flow) ============
-  public getSpaceAuthorizeUrl(
-    redirectUri: string,
-    state?: string,
-  ): Promise<{
+  public getSpaceAuthorizeUrl(redirectUri: string): Promise<{
     authorize_url: string;
   }> {
-    const params: Record<string, string> = { redirect_uri: redirectUri };
-    if (state) {
-      params.state = state;
-    }
-    return this.get('/api/v1/user/space/authorize-url', params);
+    return this.get(
+      '/api/v1/user/space/authorize-url',
+      { redirect_uri: redirectUri },
+      { skipWorkspace: true },
+    );
   }
 
-  public async exchangeSpaceOAuthCode(code: string): Promise<{
-    token: string;
-    user: string;
+  public getSpaceBindAuthorizeUrl(redirectUri: string): Promise<{
+    authorize_url: string;
   }> {
-    const response = await this.instance.post('/api/v1/user/space/callback', {
-      code,
-    });
+    return this.get(
+      '/api/v1/user/space/bind-authorize-url',
+      { redirect_uri: redirectUri },
+      { skipWorkspace: true },
+    );
+  }
+
+  public async exchangeSpaceOAuthCode(
+    code: string,
+    state: string,
+    redirectUri: string,
+    workspaceUuid?: string,
+    launchAssertion?: string,
+  ): Promise<{
+    token: string;
+    user?: string;
+    workspace_uuid?: string;
+    principal_type?: 'account' | 'support_admin';
+    actor_account_uuid?: string;
+  }> {
+    const response = await this.instance.post(
+      '/api/v1/user/space/callback',
+      {
+        code,
+        state,
+        redirect_uri: redirectUri,
+        workspace_uuid: workspaceUuid,
+        launch_assertion: launchAssertion,
+      },
+      { skipWorkspace: true } as RequestConfig,
+    );
     if (response.data.code !== 0) {
       throw {
         code: response.data.code,
@@ -1178,6 +1979,11 @@ export class BackendClient extends BaseHttpClient {
     endTime?: string;
     limit?: number;
   }): Promise<{
+    traffic?: {
+      bucket: 'hour' | 'day';
+      points: Array<{ timestamp: string; messages: number; llm_calls: number }>;
+      truncated: boolean;
+    };
     overview: {
       total_messages: number;
       llm_calls: number;
@@ -1199,8 +2005,10 @@ export class BackendClient extends BaseHttpClient {
       level: string;
       platform?: string;
       user_id?: string;
+      user_name?: string;
       runner_name?: string;
       variables?: string;
+      role?: string;
     }>;
     llmCalls: Array<{
       id: string;
@@ -1216,8 +2024,26 @@ export class BackendClient extends BaseHttpClient {
       bot_name: string;
       pipeline_id: string;
       pipeline_name: string;
+      session_id?: string;
       error_message?: string;
       message_id?: string;
+    }>;
+    toolCalls: Array<{
+      id: string;
+      timestamp: string;
+      tool_name: string;
+      tool_source: string;
+      duration: number;
+      status: string;
+      bot_id: string;
+      bot_name: string;
+      pipeline_id: string;
+      pipeline_name: string;
+      session_id?: string;
+      message_id?: string;
+      arguments?: string;
+      result?: string;
+      error_message?: string;
     }>;
     embeddingCalls: Array<{
       id: string;
@@ -1264,6 +2090,7 @@ export class BackendClient extends BaseHttpClient {
     totalCount: {
       messages: number;
       llmCalls: number;
+      toolCalls?: number;
       embeddingCalls: number;
       sessions: number;
       errors: number;

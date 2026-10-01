@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-01-sync-upstream",
+  "currentTodo": "完成历史资源迁移及 Linux 验证",
+  "completedTodos": [
+    "21 个冲突解决、前端构建及 189 单测、59 兼容回归、18 SQLite 迁移通过"
+  ],
+  "activeSlice": "迁移闭环与跨平台验证",
+  "evidenceRefs": [
+    "docs/UPSTREAM_SYNC.md"
+  ],
+  "blockedOn": null,
+  "nextStep": "推送合并分支并执行 Linux CI",
+  "updatedAt": "2026-10-01"
+}
