@@ -14,8 +14,10 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, Mock
 from importlib import import_module
-from types import SimpleNamespace
 
+from langbot_plugin.api.entities.builtin.provider import session as provider_session
+
+from langbot.pkg.agent.runner.descriptor import RunnerDescriptor
 from tests.factories import (
     FakeApp,
     text_query,
@@ -23,6 +25,29 @@ from tests.factories import (
     image_query,
     group_text_query,
 )
+
+
+RUNNER_ID = 'plugin:langbot-team/LocalAgent/default'
+
+
+def attach_runner_descriptor(app):
+    descriptor = RunnerDescriptor(
+        usages=['agent'],
+        id=RUNNER_ID,
+        source='plugin',
+        label={'en_US': 'Local Agent'},
+        plugin_author='langbot-team',
+        plugin_name='LocalAgent',
+        runner_name='default',
+        config_schema=[
+            {'name': 'model', 'type': 'model-fallback-selector'},
+            {'name': 'prompt', 'type': 'prompt-editor', 'default': []},
+        ],
+        capabilities={'tool_calling': True, 'multimodal_input': True},
+    )
+    app.runner_registry = Mock()
+    app.runner_registry.get = AsyncMock(return_value=descriptor)
+    app.tool_mgr.get_resolved_tool_catalog = AsyncMock(return_value=[])
 
 
 def get_preproc_module():
@@ -35,8 +60,57 @@ def get_entities_module():
     return import_module('langbot.pkg.pipeline.entities')
 
 
+def make_session(
+    launcher_type: provider_session.LauncherTypes = provider_session.LauncherTypes.PERSON,
+    launcher_id: int = 12345,
+) -> provider_session.Session:
+    """Build a scope-aware Session that matches the shared Query factory."""
+
+    return provider_session.Session(
+        launcher_type=launcher_type,
+        launcher_id=launcher_id,
+        sender_id=12345,
+        bot_uuid='test-bot-uuid',
+    )
+
+
 class TestPreProcessorNormalText:
     """Tests for normal text message preprocessing."""
+
+    @pytest.mark.asyncio
+    async def test_returned_plugin_prompt_edits_are_applied(self):
+        """Prompt hooks retain both edits across the serialized Runtime boundary."""
+        from langbot_plugin.api.entities.context import EventContext
+        from langbot_plugin.api.entities.builtin.provider.message import Message
+
+        app = FakeApp()
+        app.sess_mgr.get_session = AsyncMock(return_value=make_session())
+        conversation = Mock()
+        conversation.prompt = Mock(messages=[])
+        conversation.prompt.copy = Mock(return_value=Mock(messages=[]))
+        conversation.messages = []
+        conversation.uuid = None
+        app.sess_mgr.get_conversation = AsyncMock(return_value=conversation)
+        model = Mock()
+        model.model_entity = Mock(uuid='test-model', abilities=['func_call'])
+        app.model_mgr.get_model_by_uuid = AsyncMock(return_value=model)
+        observed_hooks = []
+
+        async def edit_prompts(event, bound_plugins):
+            observed_hooks.append(event.event_name)
+            ctx = EventContext.model_validate(EventContext.from_event(event).model_dump())
+            ctx.event.default_prompt = [Message(role='system', content='plugin system prompt')]
+            ctx.event.prompt = [Message(role='assistant', content='plugin history')]
+            return ctx
+
+        app.plugin_connector.emit_event = AsyncMock(side_effect=edit_prompts)
+        query = text_query('hello')
+
+        await get_preproc_module().PreProcessor(app).process(query, 'PreProcessor')
+
+        assert observed_hooks == ['PromptPreProcessing']
+        assert query.prompt.messages[0].content == 'plugin system prompt'
+        assert query.messages[0].content == 'plugin history'
 
     @pytest.mark.asyncio
     async def test_normal_text_continues(self):
@@ -46,9 +120,7 @@ class TestPreProcessorNormalText:
 
         app = FakeApp()
         # Mock session manager to return a session
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         # Mock conversation
@@ -92,9 +164,7 @@ class TestPreProcessorNormalText:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -132,9 +202,7 @@ class TestPreProcessorEmptyMessage:
         entities = get_entities_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -171,9 +239,7 @@ class TestPreProcessorImageSegment:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -219,9 +285,7 @@ class TestPreProcessorImageSegment:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -258,9 +322,7 @@ class TestPreProcessorModelSelection:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -273,7 +335,7 @@ class TestPreProcessorModelSelection:
         mock_model = Mock()
         mock_model.model_entity = Mock(uuid='primary-model-uuid', abilities=['func_call'])
         app.model_mgr.get_model_by_uuid = AsyncMock(return_value=mock_model)
-        app.tool_mgr.get_all_tools = AsyncMock(return_value=[])
+        attach_runner_descriptor(app)
 
         mock_event_ctx = Mock()
         mock_event_ctx.event = Mock(default_prompt=[], prompt=[])
@@ -285,10 +347,12 @@ class TestPreProcessorModelSelection:
         # Set pipeline config with primary model
         query.pipeline_config = {
             'ai': {
-                'runner': {'runner': 'local-agent'},
-                'local-agent': {
-                    'model': {'primary': 'primary-model-uuid', 'fallbacks': []},
-                    'prompt': 'default',
+                'runner': {'id': RUNNER_ID},
+                'runner_config': {
+                    RUNNER_ID: {
+                        'model': {'primary': 'primary-model-uuid', 'fallbacks': []},
+                        'prompt': [],
+                    },
                 },
             },
             'output': {'misc': {'at-sender': False}},
@@ -305,9 +369,7 @@ class TestPreProcessorModelSelection:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -324,7 +386,7 @@ class TestPreProcessorModelSelection:
         mock_fallback = Mock()
         mock_fallback.model_entity = Mock(uuid='fallback-uuid', abilities=['func_call'])
 
-        async def mock_get_model(uuid):
+        async def mock_get_model(_context, uuid):
             if uuid == 'primary-uuid':
                 return mock_primary
             elif uuid == 'fallback-uuid':
@@ -332,7 +394,7 @@ class TestPreProcessorModelSelection:
             raise ValueError(f'Model {uuid} not found')
 
         app.model_mgr.get_model_by_uuid = AsyncMock(side_effect=mock_get_model)
-        app.tool_mgr.get_all_tools = AsyncMock(return_value=[])
+        attach_runner_descriptor(app)
 
         mock_event_ctx = Mock()
         mock_event_ctx.event = Mock(default_prompt=[], prompt=[])
@@ -343,10 +405,12 @@ class TestPreProcessorModelSelection:
 
         query.pipeline_config = {
             'ai': {
-                'runner': {'runner': 'local-agent'},
-                'local-agent': {
-                    'model': {'primary': 'primary-uuid', 'fallbacks': ['fallback-uuid']},
-                    'prompt': 'default',
+                'runner': {'id': RUNNER_ID},
+                'runner_config': {
+                    RUNNER_ID: {
+                        'model': {'primary': 'primary-uuid', 'fallbacks': ['fallback-uuid']},
+                        'prompt': [],
+                    },
                 },
             },
             'output': {'misc': {'at-sender': False}},
@@ -368,9 +432,7 @@ class TestPreProcessorVariables:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -405,9 +467,10 @@ class TestPreProcessorVariables:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='group')
-        mock_session.launcher_id = 99999
+        mock_session = make_session(
+            provider_session.LauncherTypes.GROUP,
+            99999,
+        )
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -443,9 +506,7 @@ class TestPreProcessorToolSelection:
         preproc = get_preproc_module()
 
         app = FakeApp()
-        mock_session = Mock()
-        mock_session.launcher_type = Mock(value='person')
-        mock_session.launcher_id = 12345
+        mock_session = make_session()
         app.sess_mgr.get_session = AsyncMock(return_value=mock_session)
 
         mock_conversation = Mock()
@@ -458,11 +519,12 @@ class TestPreProcessorToolSelection:
         mock_model = Mock()
         mock_model.model_entity = Mock(uuid='primary-model-uuid', abilities=['func_call'])
         app.model_mgr.get_model_by_uuid = AsyncMock(return_value=mock_model)
-        app.tool_mgr.get_all_tools = AsyncMock(
+        attach_runner_descriptor(app)
+        app.tool_mgr.get_resolved_tool_catalog = AsyncMock(
             return_value=[
-                SimpleNamespace(name='exec'),
-                SimpleNamespace(name='plugin_tool'),
-                SimpleNamespace(name='mcp_tool'),
+                {'name': 'exec', 'source': 'builtin'},
+                {'name': 'plugin_tool', 'source': 'plugin', 'source_id': 'test/plugin'},
+                {'name': 'mcp_tool', 'source': 'mcp', 'source_id': 'test-mcp'},
             ]
         )
 
@@ -474,12 +536,14 @@ class TestPreProcessorToolSelection:
         query = text_query('hello')
         query.pipeline_config = {
             'ai': {
-                'runner': {'runner': 'local-agent'},
-                'local-agent': {
-                    'model': {'primary': 'primary-model-uuid', 'fallbacks': []},
-                    'prompt': 'default',
-                    'enable-all-tools': False,
-                    'tools': ['plugin_tool'],
+                'runner': {'id': RUNNER_ID},
+                'runner_config': {
+                    RUNNER_ID: {
+                        'model': {'primary': 'primary-model-uuid', 'fallbacks': []},
+                        'prompt': [],
+                        'enable-all-tools': False,
+                        'tools': ['plugin_tool'],
+                    },
                 },
             },
             'output': {'misc': {'at-sender': False}},

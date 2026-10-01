@@ -15,6 +15,7 @@ from langbot.pkg.provider.modelmgr import requester
 from langbot.pkg.provider.modelmgr import token
 from langbot.pkg.entity.persistence import model as persistence_model
 from langbot.pkg.provider.modelmgr.errors import RequesterError
+from tests.unit_tests.provider.conftest import TEST_EXECUTION_CONTEXT, TEST_WORKSPACE_UUID
 
 
 # ============================================================================
@@ -134,6 +135,7 @@ async def test_requester_invoke_rerank_not_implemented():
 
     # Create fake model
     fake_provider_entity = persistence_model.ModelProvider(
+        workspace_uuid=TEST_WORKSPACE_UUID,
         uuid='provider-uuid',
         name='Provider',
         requester='test',
@@ -143,17 +145,20 @@ async def test_requester_invoke_rerank_not_implemented():
     fake_token_mgr = token.TokenManager(name='test', tokens=[])
     fake_requester = inst
     fake_provider = requester.RuntimeProvider(
+        execution_context=TEST_EXECUTION_CONTEXT,
         provider_entity=fake_provider_entity,
         token_mgr=fake_token_mgr,
         requester=fake_requester,
     )
     fake_model_entity = persistence_model.RerankModel(
+        workspace_uuid=TEST_WORKSPACE_UUID,
         uuid='model-uuid',
         name='Model',
         provider_uuid='provider-uuid',
         extra_args={},
     )
     fake_model = requester.RuntimeRerankModel(
+        execution_context=TEST_EXECUTION_CONTEXT,
         model_entity=fake_model_entity,
         provider=fake_provider,
     )
@@ -289,6 +294,7 @@ async def test_runtime_provider_invoke_llm_delegates(runtime_provider, runtime_l
         resp_message_chain=None,
         current_stage_name=None,
     )
+    object.__setattr__(query, '_execution_context', TEST_EXECUTION_CONTEXT)
 
     messages = [
         provider_message.Message(role='user', content=[provider_message.ContentElement(type='text', text='Hello')])
@@ -300,6 +306,60 @@ async def test_runtime_provider_invoke_llm_delegates(runtime_provider, runtime_l
     assert provider.requester._last_messages == messages
     assert provider.requester._last_model == runtime_llm_model
     assert result.role == 'assistant'
+
+
+@pytest.mark.asyncio
+async def test_runtime_provider_invoke_llm_stashes_usage(runtime_provider, runtime_llm_model):
+    """RuntimeProvider preserves requester usage for upstream action handlers."""
+    provider = runtime_provider
+
+    import langbot_plugin.api.entities.builtin.provider.message as provider_message
+    import langbot_plugin.api.entities.builtin.pipeline.query as pipeline_query
+
+    query = pipeline_query.Query.model_construct(
+        query_id='test-query-usage',
+        launcher_type='person',
+        launcher_id=12345,
+        sender_id=12345,
+        message_chain=None,
+        message_event=None,
+        adapter=None,
+        pipeline_uuid='pipeline-uuid',
+        bot_uuid='bot-uuid',
+        pipeline_config={'ai': {}, 'output': {}, 'trigger': {}},
+        session=None,
+        prompt=None,
+        messages=[],
+        user_message=None,
+        use_funcs=[],
+        use_llm_model_uuid=None,
+        variables={},
+        resp_messages=[],
+        resp_message_chain=None,
+        current_stage_name=None,
+    )
+    object.__setattr__(query, '_execution_context', TEST_EXECUTION_CONTEXT)
+    usage = {
+        'prompt_tokens': 11,
+        'completion_tokens': 7,
+        'total_tokens': 18,
+        'prompt_tokens_details': {'cached_tokens': 3},
+    }
+    provider.requester.invoke_llm = AsyncMock(
+        return_value=(
+            provider_message.Message(role='assistant', content='ok'),
+            usage,
+        )
+    )
+
+    result = await provider.invoke_llm(
+        query,
+        runtime_llm_model,
+        [provider_message.Message(role='user', content='Hello')],
+    )
+
+    assert result.content == 'ok'
+    assert query.variables[requester.LLM_USAGE_QUERY_VARIABLE] == usage
 
 
 @pytest.mark.asyncio
@@ -332,6 +392,7 @@ async def test_runtime_provider_invoke_llm_stream_yields_chunks(runtime_provider
         resp_message_chain=None,
         current_stage_name=None,
     )
+    object.__setattr__(query, '_execution_context', TEST_EXECUTION_CONTEXT)
 
     messages = [
         provider_message.Message(role='user', content=[provider_message.ContentElement(type='text', text='Hello')])
@@ -346,11 +407,71 @@ async def test_runtime_provider_invoke_llm_stream_yields_chunks(runtime_provider
 
 
 @pytest.mark.asyncio
+async def test_runtime_provider_invoke_llm_stream_stashes_usage(runtime_provider, runtime_llm_model):
+    """RuntimeProvider transfers captured stream usage to the public query usage key."""
+    provider = runtime_provider
+
+    import langbot_plugin.api.entities.builtin.provider.message as provider_message
+    import langbot_plugin.api.entities.builtin.pipeline.query as pipeline_query
+
+    query = pipeline_query.Query.model_construct(
+        query_id='test-stream-usage',
+        launcher_type='person',
+        launcher_id=12345,
+        sender_id=12345,
+        message_chain=None,
+        message_event=None,
+        adapter=None,
+        pipeline_uuid='pipeline-uuid',
+        bot_uuid='bot-uuid',
+        pipeline_config={'ai': {}, 'output': {}, 'trigger': {}},
+        session=None,
+        prompt=None,
+        messages=[],
+        user_message=None,
+        use_funcs=[],
+        use_llm_model_uuid=None,
+        variables={},
+        resp_messages=[],
+        resp_message_chain=None,
+        current_stage_name=None,
+    )
+    object.__setattr__(query, '_execution_context', TEST_EXECUTION_CONTEXT)
+    usage = {
+        'prompt_tokens': 13,
+        'completion_tokens': 2,
+        'total_tokens': 15,
+    }
+
+    async def fake_stream(**kwargs):
+        kwargs['query'].variables[requester.LLM_USAGE_QUERY_VARIABLE] = usage
+        yield provider_message.MessageChunk(role='assistant', content='ok')
+
+    provider.requester.invoke_llm_stream = fake_stream
+
+    chunks = [
+        chunk
+        async for chunk in provider.invoke_llm_stream(
+            query,
+            runtime_llm_model,
+            [provider_message.Message(role='user', content='Hello')],
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert query.variables[requester.LLM_USAGE_QUERY_VARIABLE] == usage
+
+
+@pytest.mark.asyncio
 async def test_runtime_provider_invoke_embedding_returns_vectors(runtime_provider, runtime_embedding_model):
     """Test RuntimeProvider.invoke_embedding returns embedding vectors."""
     provider = runtime_provider
 
-    result = await provider.invoke_embedding(runtime_embedding_model, ['text1', 'text2'])
+    result = await provider.invoke_embedding(
+        runtime_embedding_model,
+        ['text1', 'text2'],
+        execution_context=TEST_EXECUTION_CONTEXT,
+    )
 
     assert len(result) == 2
     assert result[0] == [0.1, 0.2, 0.3]
@@ -362,7 +483,12 @@ async def test_runtime_provider_invoke_rerank_returns_scores(runtime_provider, r
     # Need to use the correct provider for rerank model
     provider = runtime_rerank_model.provider
 
-    result = await provider.invoke_rerank(runtime_rerank_model, 'query', ['doc1', 'doc2', 'doc3'])
+    result = await provider.invoke_rerank(
+        runtime_rerank_model,
+        'query',
+        ['doc1', 'doc2', 'doc3'],
+        execution_context=TEST_EXECUTION_CONTEXT,
+    )
 
     assert len(result) == 3
     assert result[0]['index'] == 0
@@ -384,6 +510,7 @@ def test_runtime_llm_model_initialization(runtime_llm_model, fake_persistence_da
     assert model.model_entity.abilities == model_entity.abilities
     assert model.model_entity.extra_args == model_entity.extra_args
     assert model.provider is not None
+    assert model.reasoning_config_override is None
 
 
 def test_runtime_llm_model_provider_ref(runtime_llm_model):
@@ -532,6 +659,7 @@ async def test_runtime_provider_invoke_llm_propagates_error(mock_app_for_modelmg
     await requester_inst.initialize()
 
     provider_entity = persistence_model.ModelProvider(
+        workspace_uuid=TEST_WORKSPACE_UUID,
         uuid='error-provider',
         name='Error Provider',
         requester='error-requester',
@@ -541,19 +669,25 @@ async def test_runtime_provider_invoke_llm_propagates_error(mock_app_for_modelmg
     token_mgr = token.TokenManager(name='error-provider', tokens=['error-key'])
 
     provider = requester.RuntimeProvider(
+        execution_context=TEST_EXECUTION_CONTEXT,
         provider_entity=provider_entity,
         token_mgr=token_mgr,
         requester=requester_inst,
     )
 
     model_entity = persistence_model.LLMModel(
+        workspace_uuid=TEST_WORKSPACE_UUID,
         uuid='error-model',
         name='Error Model',
         provider_uuid='error-provider',
         abilities=[],
         extra_args={},
     )
-    model = requester.RuntimeLLMModel(model_entity=model_entity, provider=provider)
+    model = requester.RuntimeLLMModel(
+        execution_context=TEST_EXECUTION_CONTEXT,
+        model_entity=model_entity,
+        provider=provider,
+    )
 
     import langbot_plugin.api.entities.builtin.provider.message as provider_message
     import langbot_plugin.api.entities.builtin.pipeline.query as pipeline_query
@@ -580,6 +714,7 @@ async def test_runtime_provider_invoke_llm_propagates_error(mock_app_for_modelmg
         resp_message_chain=None,
         current_stage_name=None,
     )
+    object.__setattr__(query, '_execution_context', TEST_EXECUTION_CONTEXT)
 
     messages = [
         provider_message.Message(role='user', content=[provider_message.ContentElement(type='text', text='Hello')])

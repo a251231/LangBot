@@ -56,6 +56,9 @@ jobs:
 
           echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
 
+      - name: Stamp build revision
+        run: python3 scripts/stamp_build_revision.py
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -81,7 +84,11 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Automated release for $RELEASE_TAG" || true
+            release_args=()
+            if [[ "$RELEASE_TAG" == *-beta.* || "$RELEASE_TAG" == *-rc.* || "$RELEASE_TAG" == *-alpha.* ]]; then
+              release_args+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Automated release for $RELEASE_TAG" "${release_args[@]}" || true
           fi
           for attempt in 1 2 3 4 5; do
             if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then

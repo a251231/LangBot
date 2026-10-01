@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   FilterState,
   MonitoringData,
@@ -6,7 +6,8 @@ import {
   LLMCall,
   EmbeddingCall,
 } from '../types/monitoring';
-import { backendClient } from '@/app/infra/http';
+import { backendClient, useCurrentWorkspace } from '@/app/infra/http';
+import { getCurrentWorkspaceSnapshot } from '@/app/infra/http/currentWorkspaceStore';
 import { parseUTCTimestamp } from '../utils/dateUtils';
 
 /**
@@ -16,6 +17,10 @@ export function useMonitoringData(filterState: FilterState) {
   const [data, setData] = useState<MonitoringData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const workspaceUuid = useCurrentWorkspace()?.workspace.uuid;
+  const requestIdRef = useRef(0);
+  const scope = JSON.stringify([workspaceUuid, filterState]);
+  const [requestScope, setRequestScope] = useState<string | null>(null);
 
   // Memoize filter parameters to prevent unnecessary re-renders
   const selectedBotsStr = useMemo(
@@ -72,6 +77,12 @@ export function useMonitoringData(filterState: FilterState) {
 
   // Fetch data based on filters
   const fetchData = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    const isCurrent = () =>
+      requestId === requestIdRef.current &&
+      getCurrentWorkspaceSnapshot()?.workspace.uuid === workspaceUuid;
+    setRequestScope(scope);
+    setData(null);
     setLoading(true);
     setError(null);
 
@@ -91,6 +102,7 @@ export function useMonitoringData(filterState: FilterState) {
         endTime,
         limit: 50,
       });
+      if (!isCurrent()) return;
 
       const overview = response?.overview ?? {
         total_messages: 0,
@@ -106,6 +118,9 @@ export function useMonitoringData(filterState: FilterState) {
       const llmCalls = Array.isArray(response?.llmCalls)
         ? response.llmCalls
         : [];
+      const toolCalls = Array.isArray(response?.toolCalls)
+        ? response.toolCalls
+        : [];
       const embeddingCalls = Array.isArray(response?.embeddingCalls)
         ? response.embeddingCalls
         : [];
@@ -116,6 +131,7 @@ export function useMonitoringData(filterState: FilterState) {
       const totalCount = response?.totalCount ?? {
         messages: messages.length,
         llmCalls: llmCalls.length,
+        toolCalls: toolCalls.length,
         embeddingCalls: embeddingCalls.length,
         sessions: sessions.length,
         errors: errors.length,
@@ -123,6 +139,17 @@ export function useMonitoringData(filterState: FilterState) {
 
       // Transform the response to match MonitoringData interface
       const transformedData: MonitoringData = {
+        traffic: response.traffic
+          ? {
+              bucket: response.traffic.bucket,
+              truncated: response.traffic.truncated,
+              points: response.traffic.points.map((point) => ({
+                timestamp: parseUTCTimestamp(point.timestamp),
+                messages: point.messages,
+                llmCalls: point.llm_calls,
+              })),
+            }
+          : undefined,
         overview: {
           totalMessages: overview.total_messages,
           llmCalls: overview.llm_calls,
@@ -145,8 +172,10 @@ export function useMonitoringData(filterState: FilterState) {
             level: string;
             platform?: string;
             user_id?: string;
+            user_name?: string;
             runner_name?: string;
             variables?: string;
+            role?: string;
           }) => ({
             id: msg.id,
             timestamp: parseUTCTimestamp(msg.timestamp),
@@ -160,8 +189,10 @@ export function useMonitoringData(filterState: FilterState) {
             level: msg.level as 'info' | 'warning' | 'error' | 'debug',
             platform: msg.platform,
             userId: msg.user_id,
+            userName: msg.user_name,
             runnerName: msg.runner_name,
             variables: msg.variables,
+            role: msg.role,
           }),
         ),
         llmCalls: llmCalls.map(
@@ -179,6 +210,7 @@ export function useMonitoringData(filterState: FilterState) {
             bot_name: string;
             pipeline_id: string;
             pipeline_name: string;
+            session_id?: string;
             error_message?: string;
             message_id?: string;
           }) => ({
@@ -197,8 +229,44 @@ export function useMonitoringData(filterState: FilterState) {
             botName: call.bot_name,
             pipelineId: call.pipeline_id,
             pipelineName: call.pipeline_name,
+            sessionId: call.session_id,
             errorMessage: call.error_message,
             messageId: call.message_id,
+          }),
+        ),
+        toolCalls: toolCalls.map(
+          (call: {
+            id: string;
+            timestamp: string;
+            tool_name: string;
+            tool_source: string;
+            duration: number;
+            status: string;
+            bot_id: string;
+            bot_name: string;
+            pipeline_id: string;
+            pipeline_name: string;
+            session_id?: string;
+            message_id?: string;
+            arguments?: string;
+            result?: string;
+            error_message?: string;
+          }) => ({
+            id: call.id,
+            timestamp: parseUTCTimestamp(call.timestamp),
+            toolName: call.tool_name,
+            toolSource: call.tool_source,
+            duration: call.duration,
+            status: call.status as 'success' | 'error',
+            botId: call.bot_id,
+            botName: call.bot_name,
+            pipelineId: call.pipeline_id,
+            pipelineName: call.pipeline_name,
+            sessionId: call.session_id,
+            messageId: call.message_id,
+            arguments: call.arguments,
+            result: call.result,
+            errorMessage: call.error_message,
           }),
         ),
         embeddingCalls: embeddingCalls.map(
@@ -294,6 +362,7 @@ export function useMonitoringData(filterState: FilterState) {
         totalCount: {
           messages: totalCount.messages,
           llmCalls: totalCount.llmCalls,
+          toolCalls: totalCount.toolCalls ?? toolCalls.length,
           embeddingCalls: totalCount.embeddingCalls || 0,
           sessions: totalCount.sessions,
           errors: totalCount.errors,
@@ -317,6 +386,7 @@ export function useMonitoringData(filterState: FilterState) {
           botName: call.botName,
           pipelineId: call.pipelineId,
           pipelineName: call.pipelineName,
+          sessionId: call.sessionId,
         }),
       );
 
@@ -349,22 +419,33 @@ export function useMonitoringData(filterState: FilterState) {
 
       setData(transformedData);
     } catch (err) {
+      if (!isCurrent()) return;
       setError(err as Error);
       console.error('Failed to fetch monitoring data:', err);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  }, [getTimeRange, filterState.selectedBots, filterState.selectedPipelines]);
+  }, [
+    getTimeRange,
+    filterState.selectedBots,
+    filterState.selectedPipelines,
+    scope,
+    workspaceUuid,
+  ]);
 
   // Fetch data when filter state changes
   useEffect(() => {
     fetchData();
+    return () => {
+      requestIdRef.current += 1;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     selectedBotsStr,
     selectedPipelinesStr,
     filterState.timeRange,
     customDateRangeStr,
+    workspaceUuid,
   ]);
 
   // Manual refetch function
@@ -373,9 +454,9 @@ export function useMonitoringData(filterState: FilterState) {
   };
 
   return {
-    data,
-    loading,
-    error,
+    data: requestScope === scope ? data : null,
+    loading: requestScope !== scope || loading,
+    error: requestScope === scope ? error : null,
     refetch,
   };
 }

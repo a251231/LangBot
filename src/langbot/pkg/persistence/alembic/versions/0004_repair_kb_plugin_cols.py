@@ -56,6 +56,11 @@ def upgrade() -> None:
         return
 
     columns = _get_columns(inspector, 'knowledge_bases')
+    # Workspace migrations already own the current knowledge-base schema and
+    # metadata. The historical fork branch may run after them when upgrading
+    # an upstream database; it must not replay the pre-Workspace RAG repair.
+    if 'workspace_uuid' in columns:
+        return
     missing_columns = {name: column_type for name, column_type in NEW_COLUMNS.items() if name not in columns}
     had_legacy_rows = _table_has_rows(conn, 'knowledge_bases')
     has_external_rows = _table_exists(inspector, 'external_knowledge_bases') and _table_has_rows(

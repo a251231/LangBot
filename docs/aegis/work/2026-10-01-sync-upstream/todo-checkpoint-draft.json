@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-01-sync-upstream",
+  "currentTodo": "上游整合及功能验收通过",
+  "completedTodos": [
+    "21冲突解决；全部Linux功能CI通过；首次双架构镜像通过；保留主工作区"
+  ],
+  "activeSlice": "主分支归入与交接",
+  "evidenceRefs": [
+    "evidence-bundle-draft-final-ci.json"
+  ],
+  "blockedOn": null,
+  "nextStep": "主分支最终状态通过 https://github.com/a251231/LangBot/pull/4 核对；无剩余代码修改",
+  "updatedAt": "2026-10-01"
+}

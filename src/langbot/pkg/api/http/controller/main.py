@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
+import typing
 
 import quart
 import quart_cors
@@ -26,6 +28,44 @@ importutil.import_modules_in_pkg(groups_pipelines)
 importutil.import_modules_in_pkg(groups_knowledge)
 importutil.import_modules_in_pkg(groups_resources)
 
+# The traceability subsystem is self-contained and auto-registers its routes
+# through ``group.group_class``. Importing it here (instead of from within the
+# ``groups`` package) keeps the feature decoupled: the Core controller package
+# contains no code that depends on it, only this single bootstrap import. It
+# runs after the package scan so its routes join the same registry.
+importlib.import_module('langbot.pkg.operation_trace.routes')
+
+
+class BoundedJSONRequest(quart.Request):
+    """Parse bounded HTTP JSON bodies outside the shared event loop."""
+
+    async def get_json(
+        self,
+        force: bool = False,
+        silent: bool = False,
+        cache: bool = True,
+    ) -> typing.Any:
+        # Keep Quart's cache and error semantics, changing only where the
+        # potentially 10 MiB JSON decoder runs. The RouterGroup establishes a
+        # trusted Workspace blocking-work scope before calling route handlers.
+        if cache and self._cached_json[silent] is not Ellipsis:
+            return self._cached_json[silent]
+        if not (force or self.is_json):
+            return None
+
+        data = await self.get_data(cache=cache, as_text=False)
+        try:
+            result = await asyncio.to_thread(self.json_module.loads, data)
+        except ValueError as error:
+            if silent:
+                result = None
+            else:
+                result = self.on_json_loading_failed(error)
+
+        if cache:
+            self._cached_json[silent] = result
+        return result
+
 
 class HTTPController:
     ap: app.Application
@@ -35,6 +75,7 @@ class HTTPController:
     def __init__(self, ap: app.Application) -> None:
         self.ap = ap
         self.quart_app = quart.Quart(__name__)
+        self.quart_app.request_class = BoundedJSONRequest
         quart_cors.cors(self.quart_app, allow_origin='*')
 
         # Set maximum content length to prevent large file uploads
@@ -78,7 +119,7 @@ class HTTPController:
 
             self.ap.task_mgr.create_task(
                 exception_handler(
-                    host='0.0.0.0',
+                    host=self.ap.instance_config.data['api'].get('host', '0.0.0.0'),
                     port=self.ap.instance_config.data['api']['port'],
                     shutdown_trigger=shutdown_trigger_placeholder,
                 ),
@@ -103,6 +144,7 @@ class HTTPController:
         config.accesslog = '-'
         config.bind = [f'{host}:{port}']
         config.errorlog = config.accesslog
+        config.websocket_max_message_size = group.MAX_FILE_SIZE
 
         asgi_app = self.quart_app
         if self.mcp_mount is not None:
@@ -113,7 +155,16 @@ class HTTPController:
     async def register_routes(self) -> None:
         @self.quart_app.route('/healthz')
         async def healthz():
-            return {'code': 0, 'msg': 'ok'}
+            get_resource_stats = getattr(
+                self.ap,
+                'get_runtime_resource_stats',
+                None,
+            )
+            return {
+                'code': 0,
+                'msg': 'ok',
+                'resources': (get_resource_stats() if callable(get_resource_stats) else {}),
+            }
 
         for g in group.preregistered_groups:
             ginst = g(self.ap, self.quart_app)

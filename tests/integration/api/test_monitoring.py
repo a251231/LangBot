@@ -9,7 +9,8 @@ Run: uv run pytest tests/integration/api/test_monitoring.py -q
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock, Mock
+from unittest.mock import MagicMock, AsyncMock, Mock, patch
+from types import SimpleNamespace
 
 from tests.factories import FakeApp
 
@@ -66,10 +67,32 @@ def fake_monitoring_app():
     app.user_service = Mock()
     app.user_service.is_initialized = AsyncMock(return_value=True)
     app.user_service.verify_jwt_token = AsyncMock(return_value='test@example.com')
-    app.user_service.get_user_by_email = AsyncMock(return_value=Mock(email='test@example.com'))
+    app.user_service.get_user_by_email = AsyncMock(
+        return_value=SimpleNamespace(
+            uuid='account-uuid',
+            user='test@example.com',
+            email='test@example.com',
+        )
+    )
+    app.workspace_collaboration_service = SimpleNamespace(
+        resolve_account_workspace=AsyncMock(
+            return_value=SimpleNamespace(
+                execution=SimpleNamespace(instance_uuid='instance', placement_generation=1),
+                workspace=SimpleNamespace(uuid='00000000-0000-0000-0000-00000000000a'),
+                membership=SimpleNamespace(
+                    uuid='membership-uuid',
+                    role='owner',
+                    projection_revision=1,
+                ),
+            )
+        )
+    )
 
     # Monitoring service
     app.monitoring_service = Mock()
+    from langbot.pkg.api.http.service.monitoring import MonitoringService
+
+    app.monitoring_service.normalize_page_window = MonitoringService(app).normalize_page_window
     app.monitoring_service.get_overview_metrics = AsyncMock(
         return_value={
             'total_messages': 100,
@@ -81,6 +104,7 @@ def fake_monitoring_app():
     )
     app.monitoring_service.get_messages = AsyncMock(return_value=([{'id': 'msg-1', 'content': 'test'}], 100))
     app.monitoring_service.get_llm_calls = AsyncMock(return_value=([{'id': 'llm-1'}], 50))
+    app.monitoring_service.get_tool_calls = AsyncMock(return_value=([{'id': 'tool-1'}], 5))
     app.monitoring_service.get_embedding_calls = AsyncMock(return_value=([{'id': 'emb-1'}], 10))
     app.monitoring_service.get_sessions = AsyncMock(return_value=([{'session_id': 'sess-1'}], 20))
     app.monitoring_service.get_errors = AsyncMock(return_value=([{'id': 'err-1'}], 2))
@@ -133,6 +157,34 @@ class TestMonitoringOverviewEndpoint:
         assert response.status_code == 200
         data = await response.get_json()
         assert data['code'] == 0
+
+    @pytest.mark.asyncio
+    async def test_viewer_can_read_monitoring_but_cannot_export(
+        self,
+        quart_test_client,
+        fake_monitoring_app,
+    ):
+        """Ordinary monitoring is resource.view; export remains data.export."""
+        membership = (
+            fake_monitoring_app.workspace_collaboration_service.resolve_account_workspace.return_value.membership
+        )
+        original_role = membership.role
+        membership.role = 'viewer'
+        try:
+            response = await quart_test_client.get(
+                '/api/v1/monitoring/overview',
+                headers={'Authorization': 'Bearer test_token'},
+            )
+            assert response.status_code == 200
+
+            export_response = await quart_test_client.get(
+                '/api/v1/monitoring/export?type=messages',
+                headers={'Authorization': 'Bearer test_token'},
+            )
+            assert export_response.status_code == 403
+            assert (await export_response.get_json())['code'] == 'permission_denied'
+        finally:
+            membership.role = original_role
 
 
 @pytest.mark.usefixtures('mock_circular_import_chain')
@@ -193,6 +245,22 @@ class TestMonitoringSessionsEndpoint:
 
         assert response.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_get_sessions_forwards_user_search_and_page_window(self, quart_test_client, fake_monitoring_app):
+        fake_monitoring_app.monitoring_service.get_sessions.reset_mock()
+
+        response = await quart_test_client.get(
+            '/api/v1/monitoring/sessions?botId=bot-1&userQuery=alice&limit=20&offset=40',
+            headers={'Authorization': 'Bearer test_token'},
+        )
+
+        assert response.status_code == 200
+        kwargs = fake_monitoring_app.monitoring_service.get_sessions.await_args.kwargs
+        assert kwargs['bot_ids'] == ['bot-1']
+        assert kwargs['user_query'] == 'alice'
+        assert kwargs['limit'] == 20
+        assert kwargs['offset'] == 40
+
 
 @pytest.mark.usefixtures('mock_circular_import_chain')
 class TestMonitoringErrorsEndpoint:
@@ -215,13 +283,20 @@ class TestMonitoringAllDataEndpoint:
     @pytest.mark.asyncio
     async def test_get_all_data_success(self, quart_test_client):
         """GET /api/v1/monitoring/data returns all data."""
-        response = await quart_test_client.get(
-            '/api/v1/monitoring/data', headers={'Authorization': 'Bearer test_token'}
-        )
+        traffic = {'series': [], 'truncated': False}
+        with patch(
+            'langbot.pkg.api.http.controller.groups.monitoring.get_traffic_series',
+            new=AsyncMock(return_value=traffic),
+        ) as get_traffic:
+            response = await quart_test_client.get(
+                '/api/v1/monitoring/data', headers={'Authorization': 'Bearer test_token'}
+            )
+        get_traffic.assert_awaited_once()
 
         assert response.status_code == 200
         data = await response.get_json()
         assert 'overview' in data['data']
+        assert data['data']['traffic'] == traffic
 
 
 @pytest.mark.usefixtures('mock_circular_import_chain')
@@ -229,13 +304,19 @@ class TestMonitoringDetailsEndpoints:
     """Tests for detail endpoints."""
 
     @pytest.mark.asyncio
-    async def test_get_session_analysis(self, quart_test_client):
+    async def test_get_session_analysis(self, quart_test_client, fake_monitoring_app):
         """GET /api/v1/monitoring/sessions/{id}/analysis."""
         response = await quart_test_client.get(
-            '/api/v1/monitoring/sessions/sess-1/analysis', headers={'Authorization': 'Bearer test_token'}
+            '/api/v1/monitoring/sessions/sess-1/analysis'
+            '?startTime=2026-08-31T16%3A00%3A00.000Z'
+            '&endTime=2026-09-01T15%3A59%3A59.999Z',
+            headers={'Authorization': 'Bearer test_token'},
         )
 
         assert response.status_code == 200
+        kwargs = fake_monitoring_app.monitoring_service.get_session_analysis.await_args.kwargs
+        assert kwargs['start_time'].isoformat() == '2026-08-31T16:00:00'
+        assert kwargs['end_time'].isoformat() == '2026-09-01T15:59:59.999000'
 
     @pytest.mark.asyncio
     async def test_get_message_details(self, quart_test_client):

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [],
+  "owners": [],
+  "invariants": [],
+  "compatBoundary": "保留飞书撤回、SQLite 重试、配置保存校验、微信去重及插件发布",
+  "nonGoals": [
+    "当前主工作区未提交插件改动"
+  ]
+}

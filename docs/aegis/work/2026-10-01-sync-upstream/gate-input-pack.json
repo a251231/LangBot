@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "baselineRefs": [
+    "ARCHITECTURE.md"
+  ],
+  "impactStatement": "docs/aegis/work/2026-10-01-sync-upstream/impact-statement-draft.json",
+  "compatPlan": "保留飞书撤回、SQLite 重试、配置保存校验、微信去重及插件发布",
+  "retirementPlan": "旧会话列表实现已由上游索引取代，保留手动清理入口",
+  "evidenceBundle": [
+    "docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-final-ci.json",
+    "docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-initial.json",
+    "docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-linux-ci-postgres.json",
+    "docs/aegis/work/2026-10-01-sync-upstream/evidence-bundle-draft-local-validation.json"
+  ]
+}

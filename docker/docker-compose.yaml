@@ -1,5 +1,5 @@
 # Docker Compose configuration for LangBot
-# For Kubernetes deployment, see kubernetes.yaml and the deployment guide at https://docs.langbot.app
+# For Kubernetes deployment, see kubernetes.yaml and the deployment guide at https://langbot.app/docs
 version: "3"
 
 services:
@@ -16,6 +16,13 @@ services:
     restart: on-failure
     environment:
       - TZ=Asia/Shanghai
+      # Optional. Leave unset on both OSS services, or set the same value on
+      # both to protect the control WebSocket. Generate with: openssl rand -hex 32
+      - LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN=${LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN:-}
+      # Process-wide admission for every asyncio.to_thread() call.
+      - LANGBOT_BLOCKING_EXECUTOR_MAX_WORKERS=${LANGBOT_BLOCKING_EXECUTOR_MAX_WORKERS:-8}
+      - LANGBOT_BLOCKING_EXECUTOR_MAX_PENDING=${LANGBOT_BLOCKING_EXECUTOR_MAX_PENDING:-128}
+      - LANGBOT_BLOCKING_EXECUTOR_MAX_INFLIGHT_PER_SCOPE=${LANGBOT_BLOCKING_EXECUTOR_MAX_INFLIGHT_PER_SCOPE:-4}
     command: ["uv", "run", "--no-sync", "-m", "langbot_plugin.cli.__init__", "rt"]
     networks:
       - langbot_network
@@ -42,9 +49,18 @@ services:
     restart: on-failure
     environment:
       - TZ=Asia/Shanghai
+      # Optional shared control-plane secret used to authenticate both the RPC
+      # socket and managed-process relay. Leave unset on both OSS services, or
+      # generate one with ``openssl rand -hex 32`` and set the same value on
+      # both ends. Strongly recommended when the deployment is Internet-accessible.
+      - LANGBOT_BOX_CONTROL_TOKEN=${LANGBOT_BOX_CONTROL_TOKEN:-}
+      # Box has its own process-wide blocking-work budget.
+      - LANGBOT_BLOCKING_EXECUTOR_MAX_WORKERS=${LANGBOT_BLOCKING_EXECUTOR_MAX_WORKERS:-8}
+      - LANGBOT_BLOCKING_EXECUTOR_MAX_PENDING=${LANGBOT_BLOCKING_EXECUTOR_MAX_PENDING:-128}
+      - LANGBOT_BLOCKING_EXECUTOR_MAX_INFLIGHT_PER_SCOPE=${LANGBOT_BLOCKING_EXECUTOR_MAX_INFLIGHT_PER_SCOPE:-4}
       # The Box runtime does NOT read box.local.* from config.yaml or env; it
-      # receives its configuration from LangBot via the INIT RPC action.
-      # Do not add LANGBOT_BOX_* / BOX__* here — they would be silently ignored.
+      # receives its functional configuration from LangBot via the INIT RPC
+      # action. Do not add BOX__* here because those would be ignored.
     # Launched through the same CLI entry point as the plugin runtime
     # (`langbot_plugin.cli.__init__ <subcommand>`). WebSocket is the default
     # control transport — mirrors `rt`, which also runs with no flag. Pass
@@ -64,6 +80,17 @@ services:
     restart: on-failure
     environment:
       - TZ=Asia/Shanghai
+      # Optional. Leave unset on both OSS services, or match plugin Runtime.
+      - LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN=${LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN:-}
+      # When set, this must match langbot_box. If both ends leave it unset,
+      # OSS permits the connection without token authentication. The token is
+      # sent only in WebSocket handshake headers, never in URLs or payloads.
+      - LANGBOT_BOX_CONTROL_TOKEN=${LANGBOT_BOX_CONTROL_TOKEN:-}
+      # Core process-wide blocking-work admission. These are native config
+      # overrides and are persisted with the effective data/config.yaml.
+      - SYSTEM__BLOCKING_EXECUTOR__MAX_WORKERS=${LANGBOT_BLOCKING_EXECUTOR_MAX_WORKERS:-8}
+      - SYSTEM__BLOCKING_EXECUTOR__MAX_PENDING=${LANGBOT_BLOCKING_EXECUTOR_MAX_PENDING:-128}
+      - SYSTEM__BLOCKING_EXECUTOR__MAX_INFLIGHT_PER_SCOPE=${LANGBOT_BLOCKING_EXECUTOR_MAX_INFLIGHT_PER_SCOPE:-4}
       # Unified env-override convention: SECTION__SUBSECTION__KEY overrides the
       # matching config.yaml field (see LoadConfigStage). These map onto
       # box.* and are forwarded to the Box runtime via INIT RPC.

@@ -86,8 +86,10 @@ pnpm test:e2e
 ## 重要参考
 
 - 架构地图：`ARCHITECTURE.md`。
-- 开发环境文档：https://docs.langbot.app/zh/develop/dev-config。
-- Plugin runtime / CLI / SDK 调试：https://docs.langbot.app/zh/develop/plugin-runtime。
+- 开发环境文档：https://langbot.app/docs/zh/develop/dev-config。
+- Plugin runtime / CLI / SDK 调试：https://langbot.app/docs/zh/develop/plugin-runtime。
+- Service API CLI：独立仓库 `langbot-cli` 的 `lbctl` 管理运行中的工作区；与 SDK 的 `lbp` 分工独立。
+- 仓库内 `skills/` 是 LangBot Agent 技能的单一事实来源。
 - API Key 认证：`docs/API_KEY_AUTH.md`。
 - Box 深度说明：`docs/review/box-architecture.md` 及同目录相关文件。
 - SDK 仓库：修改共享实体、插件 API、action protocol、`lbp rt` 或 `lbp box` 时查看 `../langbot-plugin-sdk/`。
@@ -139,6 +141,8 @@ uv run --no-sync main.py --standalone-box
 - 保持简单，避免不必要的实体、抽象和复杂度。
 - 优先复用已有模块、接口和项目约定，不随意创造新协议或新入口。
 - 修改前先定位真实调用链、真实字段名、真实配置和真实数据形态。
+- 调整 `lbctl` 使用的 Service API 路由或能力时，同步检查 `langbot-cli` 仓库兼容性。
+- LangBot 4.x 数据库升级支持 4.x 迁移链；3.x 数据库需要独立迁移流程。
 - HTTP API 变更如果应被 agent 访问，必须同步更新 `src/langbot/pkg/api/mcp/server.py` 中对应 MCP tool，以及 `skills/` 下相关 skill。
 - 新增数据库 schema 变更使用 `src/langbot/pkg/persistence/alembic/versions/` 下的 Alembic 迁移；不要新增旧式 `dbmXXX` 迁移。
 - 新平台行为只在平台适配器里做平台翻译；pipeline/业务逻辑应放在 `pkg/pipeline/` 或 service 层。

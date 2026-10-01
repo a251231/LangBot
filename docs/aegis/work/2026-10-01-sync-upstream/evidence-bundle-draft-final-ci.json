@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "final-ci",
+  "type": "command",
+  "source": "GitHub Actions PR4 / a6c84061；Docker build 36869828804 / 6cbb2f26",
+  "summary": "a6c84061：Python3.11/3.12/3.13 全量单测、覆盖率、快速集成、Box、启动、SQLite/PostgreSQL迁移、Lint、Playwright全部通过。6cbb2f26双架构镜像构建并推送成功，最终Dockerfile未变化；最新head镜像重建后台进行中。CLA旧base失败原因已确认且新guard限上游。",
+  "verifier": "Codex"
+}

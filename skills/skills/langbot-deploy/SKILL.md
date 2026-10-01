@@ -27,6 +27,19 @@ The `all` / `box` profile starts three services:
 - `langbot_box` — Box sandbox runtime (`:5410`). Uses the host Docker socket to
   spawn sandbox containers, so the **Box root host path and in-container path
   must be identical** (`BOX__LOCAL__HOST_ROOT=${LANGBOT_BOX_ROOT:-${PWD}/data/box}`).
+  OSS allows its RPC and managed-process relay to run without a token when both
+  sides leave `LANGBOT_BOX_CONTROL_TOKEN` unset. For an exposed endpoint, set
+  the same value of at least 32 non-whitespace characters in both the LangBot
+  and Box containers. Generate it once with `openssl rand -hex 32`; never put
+  it in `box.runtime.endpoint` or commit it to config.
+
+A Compose deployment may optionally set
+`LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN` on both `langbot` and
+`langbot_plugin_runtime` when port 5400 needs shared-secret protection. OSS
+defaults to leaving it unset on both sides. If enabled, generate one value with
+`openssl rand -hex 32`; configuring only one side causes the control connection
+to fail. Kubernetes may use the `langbot-plugin-runtime-control` Secret shown in
+`docker/kubernetes.yaml`.
 
 With Box off, the dashboard/skills list stays visible (read-only) but sandbox
 tools, skill add/edit, and stdio MCP are disabled. Set `box.enabled: false`
@@ -35,7 +48,7 @@ tools, skill add/edit, and stdio MCP are disabled. Set `box.enabled: false`
 ## Kubernetes
 
 See `docker/kubernetes.yaml` and the deployment guide at
-https://docs.langbot.app. `docker/deploy-k8s-test.sh` is a test helper.
+https://langbot.app/docs. `docker/deploy-k8s-test.sh` is a test helper.
 
 ## config.yaml (generated at `data/config.yaml` on first run)
 
@@ -50,7 +63,7 @@ Key settings:
 | `api.global_api_key` | **Global API key** for the HTTP API + MCP server. Non-empty = accepted with no login/DB record; no `lbk_` prefix required. Empty = disabled. Plaintext — trusted/internal only, serve over HTTPS. |
 | `plugin.runtime_ws_url` | Standalone plugin runtime WS URL (e.g. `ws://langbot_plugin_runtime:5400/control/ws`) |
 | `box.enabled` | Master switch for the Box sandbox runtime |
-| `box.backend` | `local` (Docker/nsjail autopick) / `docker` / `nsjail` / `e2b`; env override `BOX__BACKEND` |
+| `box.backend` | `local` (Docker/nsjail autopick) / `docker` / `nsjail` / `e2b` / explicit unsafe `host`; env override `BOX__BACKEND` |
 | `box.runtime.endpoint` | External Box runtime URL (e.g. `ws://127.0.0.1:5410`); empty = local auto-managed |
 
 Many keys have `ENV__SUBKEY` overrides (e.g. `BOX__BACKEND`, `BOX__ENABLED`).
@@ -62,6 +75,10 @@ Many keys have `ENV__SUBKEY` overrides (e.g. `BOX__BACKEND`, `BOX__ENABLED`).
   with `--standalone-runtime`.
 - Box has a parallel `--standalone-box` flag; the Docker box host is
   `langbot_box:5410`.
+- `box.backend: host` runs commands directly as the Box Runtime system user.
+  It is never auto-selected, provides no sandbox isolation, and is only for
+  trusted local development. A WebSocket-controlled host backend requires
+  `LANGBOT_BOX_CONTROL_TOKEN`; local stdio control is allowed.
 
 ## Global API key — enabling for agents/automation
 
@@ -80,5 +97,7 @@ login session. See `langbot-mcp-ops` for using it, and `docs/API_KEY_AUTH.md`.
 - "No supported sandbox backend (Docker / nsjail / E2B)" with Docker running
   usually means the user isn't in the `docker` group →
   `sudo usermod -aG docker <user>` and restart in a new shell.
+- Do not use `box.backend: host` as a production fallback. It cannot enforce
+  image, filesystem, network, PID, CPU, memory, or storage isolation.
 - Box root host/container path mismatch breaks sandbox container creation.
 - Don't commit a non-empty `api.global_api_key` to version control.

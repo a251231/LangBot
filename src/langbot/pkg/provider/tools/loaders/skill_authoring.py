@@ -7,6 +7,7 @@ import langbot_plugin.api.entities.builtin.resource.tool as resource_tool
 
 from .. import loader
 from .availability import is_box_backend_available
+from ....api.http.context import ExecutionContext
 
 # Align with Claude Code's Skill tool design:
 # - activate: Activate a skill via Tool Call, returns SKILL.md content
@@ -34,14 +35,12 @@ class SkillToolLoader(loader.ToolLoader):
         # Check if sandbox backend is available (same check as native tools)
         self._sandbox_available = await self._check_sandbox_available()
         if self._sandbox_available:
-            self._tools = [
-                self._build_activate_skill_tool(),
-                self._build_register_skill_tool(),
-            ]
+            self._tools = self._build_skill_tools()
         else:
             self.ap.logger.info(
                 'Skill tools (activate/register_skill) are NOT available. '
-                'No sandbox backend (Docker/nsjail/E2B) is ready.'
+                'No sandbox backend (Docker/nsjail/E2B) is ready. '
+                'Trusted local development may explicitly select box.backend=host.'
             )
 
     async def _check_sandbox_available(self) -> bool:
@@ -49,26 +48,74 @@ class SkillToolLoader(loader.ToolLoader):
         return await is_box_backend_available(self.ap)
 
     async def get_tools(self, bound_plugins: list[str] | None = None) -> list[resource_tool.LLMTool]:
-        if not self._is_available():
+        if not await self._is_available():
             return []
+        if not self._tools:
+            self._tools = self._build_skill_tools()
         return list(self._tools)
 
-    async def has_tool(self, name: str) -> bool:
-        return self._is_available() and name in SKILL_TOOL_NAMES
+    def _build_skill_tools(self) -> list[resource_tool.LLMTool]:
+        tools = [self._build_activate_skill_tool()]
+        if self._skill_registration_available():
+            tools.append(self._build_register_skill_tool())
+        else:
+            self.ap.logger.info(
+                'register_skill is NOT available: Cloud sandboxes never scan arbitrary '
+                'host skill directories. Install skills through the skill store instead.'
+            )
+        return tools
 
-    def _is_available(self) -> bool:
+    def _skill_registration_available(self) -> bool:
+        """Host skill scanning is disabled for Cloud-managed sandboxes."""
+
+        box_service = getattr(self.ap, 'box_service', None)
+        return not bool(getattr(box_service, 'managed_admission_required', False))
+
+    async def has_tool(self, name: str) -> bool:
+        if not await self._is_available() or name not in SKILL_TOOL_NAMES:
+            return False
+        if name == REGISTER_SKILL_TOOL_NAME:
+            return self._skill_registration_available()
+        return True
+
+    async def _is_available(self) -> bool:
         """Check if skill tools should be available.
 
         Skill tools require both a skill manager and a sandbox backend.
         """
-        return self._has_skill_manager() and self._sandbox_available
+        if not self._has_skill_manager():
+            return False
+        self._sandbox_available = await self._check_sandbox_available()
+        return self._sandbox_available
 
     async def invoke_tool(self, name: str, parameters: dict, query) -> typing.Any:
+        require_sandbox = getattr(
+            getattr(self.ap, 'box_service', None),
+            'require_workspace_sandbox',
+            None,
+        )
+        if callable(require_sandbox):
+            await require_sandbox(self._execution_context(query))
         if name == ACTIVATE_SKILL_TOOL_NAME:
             return await self._invoke_activate_skill(parameters, query)
         if name == REGISTER_SKILL_TOOL_NAME:
-            return await self._invoke_register_skill(parameters)
+            return await self._invoke_register_skill(parameters, query)
         raise ValueError(f'Unknown skill tool: {name}')
+
+    @staticmethod
+    def _execution_context(query) -> ExecutionContext:
+        attached_context = getattr(query, '_execution_context', None)
+        if isinstance(attached_context, ExecutionContext):
+            return attached_context
+        return ExecutionContext(
+            instance_uuid=str(getattr(query, 'instance_uuid', '') or ''),
+            workspace_uuid=str(getattr(query, 'workspace_uuid', '') or ''),
+            placement_generation=getattr(query, 'placement_generation', 0) or 0,
+            bot_uuid=getattr(query, 'bot_uuid', None),
+            pipeline_uuid=getattr(query, 'pipeline_uuid', None),
+            query_uuid=getattr(query, 'query_uuid', None),
+            entitlement_revision=getattr(query, 'entitlement_revision', 0),
+        )
 
     async def shutdown(self):
         pass
@@ -92,6 +139,7 @@ class SkillToolLoader(loader.ToolLoader):
 
         # Register activated skill for sandbox mount path resolution
         skill_loader.register_activated_skill(query, skill_data)
+        await skill_loader.persist_activated_skill(self.ap, query, skill_name)
 
         # Return SKILL.md content as Tool Result (injects into context)
         instructions = skill_data.get('instructions', '')
@@ -120,14 +168,17 @@ class SkillToolLoader(loader.ToolLoader):
             'content': result_content,
         }
 
-    async def _invoke_register_skill(self, parameters: dict) -> typing.Any:
+    async def _invoke_register_skill(self, parameters: dict, query) -> typing.Any:
         """Register a skill from sandbox directory to data/skills/."""
+        from . import skill as skill_loader
+
         sandbox_path = str(parameters.get('path', '') or '').strip()
         if not sandbox_path:
             raise ValueError('path is required')
 
         # Resolve sandbox path to host path
-        host_path = self._resolve_workspace_directory(sandbox_path)
+        execution_context = self._execution_context(query)
+        host_path = self._resolve_workspace_directory(sandbox_path, execution_context)
 
         # Get or create skill service
         skill_service = getattr(self.ap, 'skill_service', None)
@@ -135,7 +186,7 @@ class SkillToolLoader(loader.ToolLoader):
             raise ValueError('Skill service not available')
 
         # Scan and register the skill
-        scanned = await skill_service.scan_directory_async(host_path)
+        scanned = await skill_service.scan_directory_async(execution_context, host_path)
 
         # Override name if provided
         skill_name = str(parameters.get('name') or scanned['name']).strip()
@@ -144,14 +195,16 @@ class SkillToolLoader(loader.ToolLoader):
 
         # Create the skill
         created = await skill_service.create_skill(
+            execution_context,
             {
                 'name': skill_name,
                 'display_name': str(parameters.get('display_name') or scanned.get('display_name', '')).strip(),
                 'description': str(parameters.get('description') or scanned.get('description', '')).strip(),
                 'instructions': str(parameters.get('instructions') or scanned.get('instructions', '')),
                 'package_root': host_path,
-            }
+            },
         )
+        skill_loader.register_created_skill_visibility(query, skill_name)
 
         return {
             'registered': True,
@@ -160,10 +213,19 @@ class SkillToolLoader(loader.ToolLoader):
             'skill': created,
         }
 
-    def _resolve_workspace_directory(self, sandbox_path: str) -> str:
+    def _resolve_workspace_directory(
+        self,
+        sandbox_path: str,
+        execution_context: ExecutionContext,
+    ) -> str:
         """Resolve sandbox path to host filesystem path."""
         box_service = getattr(self.ap, 'box_service', None)
-        workspace_root = getattr(box_service, 'default_workspace', None)
+        tenant_workspace = getattr(box_service, '_tenant_workspace', None)
+        workspace_root = (
+            tenant_workspace(execution_context)
+            if callable(tenant_workspace)
+            else getattr(box_service, 'default_workspace', None)
+        )
         if not workspace_root:
             raise ValueError('No default workspace configured')
 

@@ -31,6 +31,9 @@ WORKDIR /app
 
 COPY . .
 
+ARG LANGBOT_BUILD_REVISION
+RUN if [ -n "$LANGBOT_BUILD_REVISION" ]; then python3 scripts/stamp_build_revision.py --revision "$LANGBOT_BUILD_REVISION"; fi
+
 COPY --from=node /app/web/dist ./web/dist
 
 # nsjail binary built in the dedicated stage above. Self-contained sandbox
@@ -38,7 +41,7 @@ COPY --from=node /app/web/dist ./web/dist
 COPY --from=nsjail-build /usr/local/bin/nsjail /usr/local/bin/nsjail
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc ca-certificates curl gnupg fontconfig fonts-noto-cjk \
+    && apt-get install -y --no-install-recommends gcc ca-certificates curl git gnupg fontconfig fonts-noto-cjk \
     # nsjail runtime libraries (the build toolchain stays in the nsjail-build
     # stage; only these shared libs are needed to execute the binary).
     && apt-get install -y --no-install-recommends libprotobuf32 libnl-route-3-200 \
@@ -62,9 +65,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -f /tmp/nodesource_setup.sh \
     && python -m pip install --no-cache-dir uv \
-    && uv sync \
+    && uv sync --extra seekdb \
     && fc-cache -fv \
-    && apt-get purge -y --auto-remove curl gnupg \
+    && apt-get purge -y --auto-remove curl git gnupg \
     && rm -rf /var/lib/apt/lists/* \
     && touch /.dockerenv
 

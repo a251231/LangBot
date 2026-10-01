@@ -15,6 +15,8 @@ if typing.TYPE_CHECKING:
     from ..core import app
     import langbot_plugin.api.entities.builtin.pipeline.query as pipeline_query
 
+from .pool import get_query_execution_context
+
 
 class MonitoringHelper:
     """Helper class for monitoring operations"""
@@ -82,7 +84,10 @@ class MonitoringHelper:
             # Try to record message
             # Use JSON serialization to preserve message chain structure (including image URLs, etc.)
             if hasattr(query, 'message_chain') and hasattr(query.message_chain, 'model_dump'):
-                message_content = json.dumps(query.message_chain.model_dump(), ensure_ascii=False)
+                chain_dump = query.message_chain.model_dump()
+                if hasattr(ap, 'storage_mgr') and hasattr(ap.storage_mgr, 'media_cache'):
+                    chain_dump = await ap.storage_mgr.media_cache.externalize_chain_dump(chain_dump)
+                message_content = json.dumps(chain_dump, ensure_ascii=False)
             else:
                 message_content = str(query)
 
@@ -90,6 +95,7 @@ class MonitoringHelper:
             # Here we just record None, the full variables will be set when query completes
 
             message_id = await ap.monitoring_service.record_message(
+                get_query_execution_context(query),
                 bot_id=bot_id,
                 bot_name=bot_name,
                 pipeline_id=pipeline_id,
@@ -108,7 +114,9 @@ class MonitoringHelper:
             # Update session activity or create new session if it doesn't exist
             # Always pass pipeline info to handle pipeline switches
             session_updated = await ap.monitoring_service.update_session_activity(
+                get_query_execution_context(query),
                 session_id,
+                bot_id=bot_id,
                 pipeline_id=pipeline_id,
                 pipeline_name=pipeline_name,
                 platform=platform,
@@ -118,6 +126,7 @@ class MonitoringHelper:
             if not session_updated:
                 # Session doesn't exist, create it
                 await ap.monitoring_service.record_session_start(
+                    get_query_execution_context(query),
                     session_id=session_id,
                     bot_id=bot_id,
                     bot_name=bot_name,
@@ -153,6 +162,7 @@ class MonitoringHelper:
                             pass
 
                 await ap.monitoring_service.update_message_status(
+                    get_query_execution_context(query),
                     message_id=message_id,
                     status='success',
                     variables=query_variables_str,
@@ -188,7 +198,10 @@ class MonitoringHelper:
                 if hasattr(last_resp, 'get_content_platform_message_chain'):
                     chain = last_resp.get_content_platform_message_chain()
                     if hasattr(chain, 'model_dump'):
-                        message_content = json.dumps(chain.model_dump(), ensure_ascii=False)
+                        chain_dump = chain.model_dump()
+                        if hasattr(ap, 'storage_mgr') and hasattr(ap.storage_mgr, 'media_cache'):
+                            chain_dump = await ap.storage_mgr.media_cache.externalize_chain_dump(chain_dump)
+                        message_content = json.dumps(chain_dump, ensure_ascii=False)
                     else:
                         message_content = str(chain)
                 else:
@@ -197,6 +210,7 @@ class MonitoringHelper:
                 return  # No response to record
 
             await ap.monitoring_service.record_message(
+                get_query_execution_context(query),
                 bot_id=bot_id,
                 bot_name=bot_name,
                 pipeline_id=pipeline_id,
@@ -234,6 +248,7 @@ class MonitoringHelper:
 
             # Record error message
             message_id = await ap.monitoring_service.record_message(
+                get_query_execution_context(query),
                 bot_id=bot_id,
                 bot_name=bot_name,
                 pipeline_id=pipeline_id,
@@ -252,6 +267,7 @@ class MonitoringHelper:
 
             # Record error log
             await ap.monitoring_service.record_error(
+                get_query_execution_context(query),
                 bot_id=bot_id,
                 bot_name=bot_name,
                 pipeline_id=pipeline_id,
@@ -290,6 +306,7 @@ class MonitoringHelper:
             session_id = MonitoringHelper._build_session_id(query)
 
             await ap.monitoring_service.record_llm_call(
+                get_query_execution_context(query),
                 bot_id=bot_id,
                 bot_name=bot_name,
                 pipeline_id=pipeline_id,

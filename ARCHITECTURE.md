@@ -23,6 +23,7 @@ LangBot is not a single-repo system.
 
 - `LangBot/` is the main product: backend, web UI, platform adapters, pipeline engine, HTTP API, MCP server, RAG, persistence, skills integration, and the bridge code that talks to runtimes.
 - `langbot-plugin-sdk/` is published as `langbot-plugin` and pinned in `LangBot/pyproject.toml`. It contains plugin developer APIs, shared entities, `lbp`, the Plugin Runtime (`lbp rt`), and the Box Runtime (`lbp box`).
+- [`langbot-cli`](https://github.com/langbot-app/langbot-cli) is a separately released `lbctl` client for managing a running Workspace through the HTTP Service API; it is not part of the LangBot server or the SDK's `lbp` CLI.
 - Plugins import SDK APIs from `langbot_plugin.*`; the LangBot main process imports the same package for shared entities and runtime protocols.
 
 This split matters. If a change modifies SDK entities, component APIs, action protocols, `lbp rt`, or `lbp box`, verify the sibling SDK repo and install the local SDK into LangBot's virtualenv when testing cross-repo behavior.
@@ -52,12 +53,13 @@ LangBot/
 │   │   ├── api/                    # HTTP API + MCP server mount
 │   │   ├── platform/               # IM adapters and runtime bot manager
 │   │   ├── pipeline/               # Message routing and pipeline stages
-│   │   ├── provider/               # LLM runners, model manager, tools
+│   │   ├── provider/               # Model providers and Host-owned tools
+│   │   ├── agent/                  # Agent/Runner orchestration and run state
 │   │   ├── plugin/                 # LangBot-side Plugin Runtime connector/handler
 │   │   ├── box/                    # LangBot-side Box service/connector
 │   │   ├── skill/                  # Skill metadata/activation integration
 │   │   ├── rag/ , vector/          # Knowledge-base and vector DB integration
-│   │   ├── persistence/            # SQLAlchemy/SQLModel, Alembic, legacy migrations
+│   │   ├── persistence/            # SQLAlchemy/SQLModel and Alembic migrations
 │   │   ├── storage/                # Local/S3 file storage abstraction
 │   │   └── config/, entity/, utils/, telemetry/, survey/
 │   ├── libs/                       # Vendored third-party platform SDKs
@@ -80,7 +82,7 @@ Platform adapter
   → Controller
   → RuntimePipeline
   → PipelineStage chain
-  → RequestRunner / ToolManager / PluginRuntimeConnector / BoxService
+  → Runner orchestrator / ToolManager / PluginRuntimeConnector / BoxService
   → response via adapter
 ```
 
@@ -107,7 +109,7 @@ Inbound platform messages enter through adapter-specific SDK callbacks. The comm
 3. `MessageAggregator` batches/normalizes messages before adding a `Query` to `QueryPool`.
 4. `Controller` in `pkg/pipeline/controller.py` selects queries subject to global pipeline concurrency and per-session concurrency.
 5. `RuntimePipeline` in `pkg/pipeline/pipelinemgr.py` runs configured pipeline stages using a responsibility-chain style executor that supports generator stages.
-6. The chat stage emits plugin events, calls a configured `RequestRunner`, handles streaming/non-streaming responses, records telemetry, and appends conversation history.
+6. The chat stage emits plugin events and projects the current query into the Runner Host orchestrator. The selected plugin Runner returns streaming or final results while the Host owns authorization, tools, telemetry, and conversation history.
 7. Output stages send text, cards, chunks, files, or error notices back through the original platform adapter.
 
 Pipeline components are registered by decorators and package import side effects. When adding a new stage, loader, runner, or adapter, check the corresponding preregistration mechanism instead of inventing a second registry.
@@ -117,6 +119,7 @@ Pipeline components are registered by decorators and package import side effects
 Platform code lives under `pkg/platform/`.
 
 - `botmgr.py` owns runtime bots, routing rules, event logging, webhook pushing, and adapter lifecycle.
+- Bots store exclusive Agent/Pipeline routes in `event_bindings` and independent plugin subscriptions in `plugin_processors` (`processor_uuid`, `enabled`). Subscriptions resolve event patterns from the installed Runner and fan out alongside the primary route. Configuration, state, debug and run logs belong to the reusable processor instance.
 - `sources/` contains adapter implementations. Each adapter subclasses `langbot_plugin.api.definition.abstract.platform.adapter.AbstractMessagePlatformAdapter` from the SDK.
 - Platform entities such as `MessageChain`, `Image`, `At`, `Voice`, and events come from `langbot-plugin-sdk`, not from this repo.
 
@@ -136,12 +139,12 @@ Important pieces:
 
 Pipelines are configuration-driven. Prefer adding a stage or extending an existing stage family over hard-coding behavior in platform adapters.
 
-## Provider, RAG, and Tools
+## Agents, Providers, RAG, and Tools
 
-Provider code lives under `pkg/provider/`.
+Agent orchestration lives under `pkg/agent/`; model providers and tools live under `pkg/provider/`.
 
 - `modelmgr/` manages configured model providers and requesters.
-- `runners/` implements request runners such as the local agent runner and external workflow integrations.
+- `pkg/agent/runner/` discovers plugin Runner components, resolves bindings, constructs run-scoped context/resources, and records execution state.
 - `tools/toolmgr.py` aggregates tools from native tools, plugin tools, external MCP servers, and skill-authoring tools.
 - `tools/loaders/mcp.py` is the MCP client side: external MCP servers that LangBot connects to for agent tools.
 - RAG lives across `pkg/rag/`, `pkg/vector/`, model services, and plugin KnowledgeEngine actions.
@@ -158,6 +161,7 @@ In this repo:
 - `pkg/plugin/handler.py` exposes LangBot actions to the runtime and calls runtime actions for plugin operations.
 - `pkg/provider/tools/loaders/plugin.py` exposes plugin Tool components to LLM runners.
 - Pipeline handlers emit SDK events such as normal-message events and prompt-processing events.
+- [Certified plugin policy](docs/architecture/certified-plugins.md) defines Core's archive-fact, admission, and tenant-log-visibility boundary; the SDK remains responsible for certificate verification.
 
 In `langbot-plugin-sdk`:
 
@@ -169,6 +173,23 @@ The Plugin Runtime supports stdio and WebSocket control transports. Direct local
 
 ## Box Runtime and Skills
 
+Runner plugins own sandbox policy: enablement, reuse-key interpolation, acquisition,
+binding, and explicit file import/export. The Host exposes authenticated resource
+APIs (`get_box_status`, `list_boxes`, `acquire_box`) and run-bound operations
+(`bind_box`, `import_box_attachments`, `export_box_files`, `reply_files`). Box Runtime
+owns atomic capacity enforcement and container reuse/lifecycle. Reusing an existing
+Box is allowed when no additional capacity remains.
+
+A run binds one Box before native sandbox tools or file transfer. The Host does not
+choose a conversation scope or stage attachments before starting the Runner. Input
+references retain the original attachment metadata; import yields paths specific to
+the run. Output export reads only that run's outbox and returns opaque file handles.
+`message.completed.file_ids` attaches explicitly exported files to Pipeline output;
+Agents send them explicitly with `ctx.reply_files()`, subject to event reply permission.
+The Pipeline wrapper never scans a Box. Binding ends with the run; the reusable Box
+remains subject to Runtime idle expiry. Persistent workspace files survive expiry,
+but processes and container-local state do not.
+
 Box is the sandbox subsystem used by native agent tools, stdio MCP servers, skill authoring, and managed processes.
 
 In this repo:
@@ -177,6 +198,12 @@ In this repo:
 - `pkg/box/connector.py` connects to the Box Runtime over stdio, Windows subprocess+WebSocket, or remote WebSocket.
 - `pkg/provider/tools/loaders/native.py`, `mcp_stdio.py`, and skill loaders depend on Box availability.
 - `pkg/skill/manager.py` loads skills from the Box runtime, falling back to local `data/skills` when needed.
+
+Durable Box Workspace storage is shared across placement generations, but
+sandbox sessions and managed processes are generation-scoped. LangBot validates
+the current execution binding before an MCP stdio relay attach and sends the
+Workspace/generation binding in authenticated headers, so a placement cutover
+retires stale processes and closes already-attached relays.
 
 In `langbot-plugin-sdk`:
 
@@ -206,8 +233,9 @@ Persistence is centered on `pkg/persistence/mgr.py`.
 
 - SQLite is the default database; PostgreSQL is supported.
 - Models live under `pkg/entity/persistence/`.
-- Fresh schemas are created from metadata, then legacy migrations run up to the frozen 3.x baseline, then Alembic migrations run to head.
-- New schema changes should use Alembic under `pkg/persistence/alembic/versions/`; do not extend the frozen legacy migration chain.
+- Timezone-less SQL `DateTime` columns store UTC-naive values on both backends. Normalize aware values with `pkg/persistence/datetime_utils.py::as_naive_utc` at the bind boundary, including deadlines, leases, event times, and query/retention cutoffs; do not merely strip an offset. Existing naive rows represent UTC. Restore UTC awareness for application comparisons and epoch serialization. Runner ledger/event/transcript stores follow this existing schema contract without a data migration or changes to journal/tenant authorization.
+- Fresh schemas are created from current metadata, then Alembic migrations run to head. LangBot 4.x does not upgrade 3.x databases.
+- New schema changes use Alembic under `pkg/persistence/alembic/versions/`; there is no legacy migration chain in 4.x.
 
 Configuration starts from `src/langbot/templates/config.yaml` and is generated into `data/config.yaml` on first run. Most long-lived managers read from `ap.instance_config.data`.
 
@@ -225,6 +253,7 @@ LangBot is deliberately agent-friendly. The agent-facing surfaces are part of th
 
 - `skills/` is the single source of truth for in-repo skills.
 - `pkg/api/mcp/server.py` exposes the LangBot MCP server at `/mcp`.
+- `lbctl` calls the authenticated HTTP Service API from a terminal; its source and releases live in `langbot-cli`.
 - `api.global_api_key` authenticates API/MCP access without a browser login.
 - `AGENTS.md` and `ARCHITECTURE.md` tell coding agents how the repo works.
 
@@ -239,7 +268,7 @@ When one of these changes, update the others if the behavior or contract changed
 - New LLM tool source: extend `pkg/provider/tools/loaders/` and `ToolManager` intentionally.
 - New plugin component/API/protocol: change `langbot-plugin-sdk` first or in lockstep, then update LangBot bridge code.
 - New Box capability: change both `pkg/box/` and `langbot-plugin-sdk/src/langbot_plugin/box/`, plus config and tests.
-- New database schema: add an Alembic migration, not a legacy `dbmXXX` migration.
+- New database schema: add an Alembic migration.
 
 ## Design Biases
 

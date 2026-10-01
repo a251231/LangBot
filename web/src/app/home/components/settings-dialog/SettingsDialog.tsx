@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { KeyRound, Sparkles, Settings, HardDrive } from 'lucide-react';
+import {
+  HardDrive,
+  History,
+  KeyRound,
+  Settings,
+  Sparkles,
+  UsersRound,
+} from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -22,16 +29,26 @@ import AccountSettingsPanel from '@/app/home/components/account-settings-dialog/
 import ApiIntegrationPanel from '@/app/home/components/api-integration-dialog/ApiIntegrationPanel';
 import ModelsPanel from '@/app/home/components/models-dialog/ModelsPanel';
 import StorageAnalysisPanel from '@/app/home/components/storage-analysis-dialog/StorageAnalysisPanel';
+import WorkspaceSettingsPanel from '@/app/home/components/workspace-settings/WorkspaceSettingsPanel';
+import OperationTracePanel from '@/app/home/components/workspace-settings/OperationTracePanel';
+import { useCurrentWorkspace } from '@/app/infra/http';
 
 // The set of settings sections shown in the unified dialog. The string values
 // are also reused as the ?action= query param suffix so deep links keep working.
 export type SettingsSection =
-  'account' | 'apiIntegration' | 'models' | 'storageAnalysis';
+  | 'workspace'
+  | 'operationTrace'
+  | 'account'
+  | 'apiIntegration'
+  | 'models'
+  | 'storageAnalysis';
 
 // Map between a section id and its ?action= query value, so existing deep links
 // (showAccountSettings, showApiIntegrationSettings, showModelSettings,
 // showStorageAnalysis) continue to resolve to the right section.
 export const SETTINGS_ACTION_BY_SECTION: Record<SettingsSection, string> = {
+  workspace: 'showWorkspaceSettings',
+  operationTrace: 'showOperationTrace',
   account: 'showAccountSettings',
   apiIntegration: 'showApiIntegrationSettings',
   models: 'showModelSettings',
@@ -60,6 +77,7 @@ export default function SettingsDialog({
   onSectionChange,
 }: SettingsDialogProps) {
   const { t } = useTranslation();
+  const currentWorkspace = useCurrentWorkspace();
   // A nested modal (e.g. the provider form) can request that we ignore
   // outer-close until it is dismissed.
   const [blocking, setBlocking] = useState(false);
@@ -73,13 +91,20 @@ export default function SettingsDialog({
     }
   }, [section, open]);
 
-  const navItems: {
+  const allNavItems: {
     id: SettingsSection;
     label: string;
     title: string;
     description: string;
     icon: React.ReactNode;
   }[] = [
+    {
+      id: 'workspace',
+      label: t('settingsDialog.nav.workspace'),
+      title: t('workspace.title'),
+      description: t('workspace.description'),
+      icon: <UsersRound className="size-4" />,
+    },
     {
       id: 'models',
       label: t('settingsDialog.nav.models'),
@@ -108,7 +133,51 @@ export default function SettingsDialog({
       description: t('account.settingsDescription'),
       icon: <Settings className="size-4" />,
     },
+    {
+      id: 'operationTrace',
+      label: t('settingsDialog.nav.operationTrace'),
+      title: t('operationTrace.title'),
+      description: t('operationTrace.description'),
+      icon: <History className="size-4" />,
+    },
   ];
+  const permissions = currentWorkspace?.permissions ?? [];
+  const canManageApiKeys = permissions.includes('api_key.manage');
+  const canViewAudit = permissions.includes('audit.view');
+  const canViewStorageAnalysis =
+    currentWorkspace?.workspace.source !== 'cloud_projection' && canViewAudit;
+  // Operation traceability is an audit surface: it is limited to the roles
+  // that also hold the audit permission (owner / admin).
+  const canViewOperationTrace = canViewAudit;
+  const navItems = allNavItems.filter((item) => {
+    if (item.id === 'apiIntegration') {
+      return canManageApiKeys;
+    }
+    if (item.id === 'storageAnalysis') {
+      return canViewStorageAnalysis;
+    }
+    if (item.id === 'operationTrace') {
+      return canViewOperationTrace;
+    }
+    return true;
+  });
+
+  useEffect(() => {
+    const forbiddenSection =
+      (section === 'apiIntegration' && !canManageApiKeys) ||
+      (section === 'storageAnalysis' && !canViewStorageAnalysis) ||
+      (section === 'operationTrace' && !canViewOperationTrace);
+    if (open && forbiddenSection) {
+      onSectionChange('workspace');
+    }
+  }, [
+    canManageApiKeys,
+    canViewStorageAnalysis,
+    canViewOperationTrace,
+    open,
+    section,
+    onSectionChange,
+  ]);
 
   const activeItem = navItems.find((item) => item.id === section);
   const activeLabel = activeItem?.title ?? t('settingsDialog.title');
@@ -198,6 +267,16 @@ export default function SettingsDialog({
             </div>
 
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              {section === 'workspace' && (
+                <WorkspaceSettingsPanel
+                  active={open && section === 'workspace'}
+                />
+              )}
+              {section === 'operationTrace' && canViewOperationTrace && (
+                <OperationTracePanel
+                  active={open && section === 'operationTrace'}
+                />
+              )}
               {section === 'models' && (
                 <ModelsPanel
                   active={open && section === 'models'}
@@ -209,7 +288,7 @@ export default function SettingsDialog({
                   active={open && section === 'apiIntegration'}
                 />
               )}
-              {section === 'storageAnalysis' && (
+              {section === 'storageAnalysis' && canViewStorageAnalysis && (
                 <StorageAnalysisPanel
                   active={open && section === 'storageAnalysis'}
                 />

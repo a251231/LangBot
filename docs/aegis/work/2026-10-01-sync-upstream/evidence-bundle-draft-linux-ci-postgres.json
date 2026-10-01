@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "linux-ci-postgres",
+  "type": "command",
+  "source": "GitHub Actions 36871080957 / 25fcfd8b",
+  "summary": "PostgreSQL迁移、监控RLS、向量库、发布迁移及插件身份场景66项全部通过；SQLite通过。GitHub Actions 36871081156 三组Python全量单测、快速集成、Box和启动全部通过。最终覆盖率和前端端到端待PR4检查，CLA旧base缺上游PAT与Fork功能无关。",
+  "verifier": "Codex"
+}
