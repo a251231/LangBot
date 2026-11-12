@@ -1,9 +1,5 @@
-import asyncio
-import importlib
-import sys
-import types
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from langbot.pkg.platform.sources.wechatferry import (
     WeChatFerryAdapter,
@@ -31,7 +27,6 @@ class DummyLogger(abstract_platform_logger.AbstractEventLogger):
         pass
 
 
-
 def test_deduplicator():
     dedup = WeChatFerryMessageDeduplicator(max_size=10)
     assert dedup.is_duplicate(1001) is False
@@ -42,11 +37,13 @@ def test_deduplicator():
 
 @pytest.mark.asyncio
 async def test_message_converter_yiri2target():
-    chain = platform_message.MessageChain([
-        platform_message.At(target='wxid_target1'),
-        platform_message.Plain(text=' 问道签到'),
-        platform_message.Image(url='http://example.com/test.png'),
-    ])
+    chain = platform_message.MessageChain(
+        [
+            platform_message.At(target='wxid_target1'),
+            platform_message.Plain(text=' 问道签到'),
+            platform_message.Image(url='http://example.com/test.png'),
+        ]
+    )
     payload = await WeChatFerryMessageConverter.yiri2target(chain)
     assert payload['text'] == ' 问道签到'
     assert payload['ats'] == ['wxid_target1']
@@ -151,7 +148,9 @@ async def test_adapter_reply_routing():
         id='wxid_user',
         member_name='User',
         permission=platform_entities.Permission.Member,
-        group=platform_entities.Group(id='group123@chatroom', name='Group', permission=platform_entities.Permission.Member),
+        group=platform_entities.Group(
+            id='group123@chatroom', name='Group', permission=platform_entities.Permission.Member
+        ),
         special_title='',
     )
     group_msg_event = platform_events.GroupMessage(
@@ -165,4 +164,3 @@ async def test_adapter_reply_routing():
     with patch.object(WeChatFerryAdapter, 'send_message', new_callable=AsyncMock) as mock_send:
         await adapter.reply_message(group_msg_event, reply_chain)
         mock_send.assert_awaited_once_with('group', 'group123@chatroom', reply_chain)
-

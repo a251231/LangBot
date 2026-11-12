@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
-import logging
 import time
 import traceback
 import typing
@@ -200,9 +198,7 @@ class WeChatFerryAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapte
         typing.Callable[[platform_events.Event, abstract_platform_adapter.AbstractMessagePlatformAdapter], None],
     ] = pydantic.Field(default_factory=dict)
 
-    _deduplicator: WeChatFerryMessageDeduplicator = pydantic.PrivateAttr(
-        default_factory=WeChatFerryMessageDeduplicator
-    )
+    _deduplicator: WeChatFerryMessageDeduplicator = pydantic.PrivateAttr(default_factory=WeChatFerryMessageDeduplicator)
     _running: bool = pydantic.PrivateAttr(default=False)
     _ws_task: typing.Optional[asyncio.Task] = pydantic.PrivateAttr(default=None)
 
