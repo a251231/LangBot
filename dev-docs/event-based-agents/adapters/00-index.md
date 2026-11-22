@@ -27,6 +27,7 @@ Current acceptance report: [EBA Adapter Acceptance Report](./acceptance-report.m
 | Slack | Migrated; private text and outbound/API plugin E2E verified | [Slack](./slack.md) |
 | WeCom Customer Service | Migrated; customer-side UI text plugin E2E verified, inbound media and platform-API live coverage pending | [WeCom Customer Service](./wecomcs.md) |
 | Kook | Migrated; unit/mocked converter and API coverage only, live acceptance pending | [Kook](./kook.md) |
+| WeChatFerry | Implemented as EBA adapter; unit, WS/HTTP loopback, and live gateway status verified; real WeChat UI E2E blocked while client logged out | [WeChatFerry](./wechatferry.md) |
 
 ## Documentation Checklist
 
