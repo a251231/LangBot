@@ -1,4 +1,13 @@
 export default {
+  networkDiagnostics: {
+    timeout: 'The download timed out. Check your network or proxy and retry.',
+    connection:
+      'Could not connect to the marketplace. Check your network or proxy.',
+    incomplete: 'The download was interrupted. Please retry.',
+    http: 'The marketplace rejected the download. Check the status and retry later.',
+    network:
+      'A network error interrupted installation. Check your connection and retry.',
+  },
   complete: 'Done',
   checkingPlugin: 'Check plugin',
   preparingPlugin: 'Prepare installation',
@@ -7,6 +16,8 @@ export default {
   downloaded: 'Downloaded {{size}}',
   processed: 'Processed {{completed}} / {{total}} pipelines',
   installErrors: {
+    plugin_permission_confirmation_required:
+      'Plugin permissions could not be confirmed. Ask a member with the required permissions to review the plugin and retry.',
     plugin_version_unavailable:
       'The required plugin version is not available in the marketplace. Retry after it is published, or migrate data only.',
     plugin_download_timeout:
@@ -37,6 +48,19 @@ export default {
     'After checking the runtime, refresh, select this pipeline and confirm to retry activation only. Its saved configuration will not be migrated again.',
   details: 'Migration details',
   notices: {
+    customRunner:
+      'Legacy custom runners must be rewritten as plugin runners before they can be bound. See the plugin docs: https://langbot.app/docs/en/plugin/dev/tutor',
+    fieldDropped:
+      'Unrecognized legacy fields or sections were removed from the active config; the original values are kept in the migration backup.',
+    valueRepaired:
+      'Malformed or missing values were repaired with the 4.10 defaults. Review them after migration.',
+    mixedRunner:
+      'Both a new and a legacy runner selection exist; the usable one was kept.',
+    runnerConfigReplaced:
+      'The existing new-style runner config is replaced by the migration result; the original is kept in the backup.',
+    runnerAdded:
+      'The required runner plugin was added to the extension list of this pipeline.',
+    extensionPrefs: 'Invalid entries in the extension settings were ignored.',
     runtimeUnavailable:
       'The plugin runtime is disconnected. Restore the connection and retry, or migrate data only.',
     executionFailed: 'Migration failed. Check the server logs and retry.',
@@ -119,6 +143,7 @@ export default {
     blocked: 'Blocked',
     already_current: 'Already current',
     not_legacy: 'Not legacy',
+    unsupported_runner: 'Unsupported runner',
     activation_pending: 'Activation pending',
     pending: 'Pending',
     migrated: 'Migrated',

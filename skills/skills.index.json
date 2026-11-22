@@ -77,9 +77,10 @@
     {
       "directory": "langbot-plugin-dev",
       "name": "langbot-plugin-dev",
-      "description": "Develop, debug, and test LangBot plugins. Use when creating new LangBot plugins, fixing plugin bugs, setting up a LangBot test environment, or testing plugins via WebSocket. Covers plugin component architecture (EventListener, Command, Tool), the plugin SDK API (invoke_llm, get_llm_models, send_message, plugin storage), common pitfalls, and automated WebSocket-based testing. Triggers on \"langbot plugin\", \"lbp\", \"GroupChatSummary\", \"plugin debug\", \"langbot test\".",
+      "description": "Develop, debug, test, and publish LangBot plugins. Use when creating or fixing a LangBot plugin or official plugin under plugins/, choosing component types (EventListener, Command, Tool, Runner, KnowledgeEngine, KnowledgeRetriever, Parser, Page), calling the Workspace API, platform API or execution APIs from a plugin, persisting plugin data (storage APIs, never the filesystem), declaring plugin permissions, debugging with lbp run, or publishing to LangBot Space. Triggers on \"langbot plugin\", \"lbp\", \"plugin permissions\", \"workspace api\", \"call_platform_api\", \"plugin debug\".",
       "references": [
-        "references/test-env-setup.md"
+        "references/sdk-pitfalls.md",
+        "references/testing.md"
       ],
       "cases": [],
       "case_summaries": [],
@@ -1805,7 +1806,7 @@
         },
         {
           "id": "sandbox-skill-authoring-e2e",
-          "title": "Local Agent creates, registers, activates, and uses a sandbox skill",
+          "title": "Local Agent publishes and executes an immutable Skill revision",
           "mode": "agent-browser",
           "area": "sandbox",
           "type": "regression",
@@ -1817,9 +1818,7 @@
             "skills",
             "local-agent",
             "tools",
-            "e2b",
-            "nsjail",
-            "host"
+            "nsjail"
           ],
           "automation": "",
           "setup_automation": [],
@@ -1833,7 +1832,7 @@
         },
         {
           "id": "sandbox-skill-authoring-edit-existing-e2e",
-          "title": "Local Agent modifies an activated sandbox skill package",
+          "title": "Local Agent publishes a new Skill revision without changing an active run",
           "mode": "agent-browser",
           "area": "sandbox",
           "type": "regression",
@@ -1845,17 +1844,12 @@
             "skills",
             "local-agent",
             "tools",
-            "edit"
+            "edit",
+            "nsjail"
           ],
-          "automation": "scripts/e2e/pipeline-debug-chat.mjs",
-          "setup_automation": [
-            "node:scripts/e2e/ensure-local-agent-pipeline.mjs --write-env",
-            "node:scripts/e2e/reset-sandbox-skill.mjs --name=lb-skill-edit-regression"
-          ],
-          "setup_provides_env": [
-            "LANGBOT_LOCAL_AGENT_PIPELINE_URL",
-            "LANGBOT_LOCAL_AGENT_PIPELINE_NAME"
-          ],
+          "automation": "",
+          "setup_automation": [],
+          "setup_provides_env": [],
           "evidence_required": [
             "ui",
             "backend_log",

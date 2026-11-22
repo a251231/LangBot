@@ -20,7 +20,7 @@ from .host_models import AgentEventEnvelope, AgentBinding
 from .resource_policy import ResourcePolicyProjector
 from ...provider.tools.loaders.mcp import MCP_TOOL_LIST_RESOURCES, MCP_TOOL_READ_RESOURCE
 from ...provider.tools.toolmgr import ToolSourceRef
-from .platform_tools import build_platform_tool_resources
+from .platform_tools import PRESENT_INTERACTIVE_CARD_TOOL, build_platform_tool_resources
 
 
 class AgentResourceBuilder:
@@ -55,6 +55,7 @@ class AgentResourceBuilder:
         event: AgentEventEnvelope,
         binding: AgentBinding,
         descriptor: RunnerDescriptor,
+        tool_catalog: typing.Iterable[dict[str, typing.Any]] | None = None,
     ) -> AgentResources:
         """Build AgentResources from event and binding.
 
@@ -86,11 +87,22 @@ class AgentResourceBuilder:
             resource_policy,
             descriptor,
             runner_config,
+            tool_catalog,
         )
         runner_uses_host_tools = config_schema.uses_host_tools(descriptor)
+        selected_platform_tools = list(resource_policy.allowed_platform_tool_names or [])
+        if (
+            binding.processor_type not in {'agent', 'pipeline'}
+            or not binding.delivery_policy.enable_interactions
+            or not getattr(descriptor.capabilities, 'interactions', False)
+            or 'request' not in (getattr(manifest_perms, 'interactions', []) or [])
+        ):
+            selected_platform_tools = [
+                name for name in selected_platform_tools if name != PRESENT_INTERACTIVE_CARD_TOOL
+            ]
         platform_tools, platform_capabilities = build_platform_tool_resources(
             event,
-            resource_policy.allowed_platform_tool_names,
+            selected_platform_tools,
             (
                 [operation for operation in ('detail', 'call') if operation in set(manifest_perms.tools)]
                 if runner_uses_host_tools
@@ -106,14 +118,22 @@ class AgentResourceBuilder:
             descriptor,
             runner_config,
         )
+        if getattr(self.ap, 'skill_mgr', None) is not None:
+            await self.ap.skill_mgr.reload_skills(execution_context)
         skills = self._build_skills_from_binding(
             execution_context,
             resource_policy,
             descriptor,
         )
         storage = self._build_storage_from_binding(manifest_perms, binding)
+        workspace_operations = await self._build_workspace_operations_from_binding(
+            execution_context,
+            event,
+            binding,
+            descriptor,
+        )
 
-        return {
+        resources: AgentResources = {
             'models': models,
             'tools': tools,
             'knowledge_bases': knowledge_bases,
@@ -121,6 +141,33 @@ class AgentResourceBuilder:
             'storage': storage,
             'platform_capabilities': platform_capabilities,
         }
+        if workspace_operations is not None:
+            resources['workspace_operations'] = workspace_operations
+
+        return resources
+
+    async def _build_workspace_operations_from_binding(
+        self,
+        execution_context: ExecutionContext,
+        event: AgentEventEnvelope,
+        binding: AgentBinding,
+        descriptor: RunnerDescriptor,
+    ) -> list[dict[str, typing.Any]] | None:
+        """Deliver the selected subset of installation grants as model preferences."""
+        from ...api.application.plugin_permissions import installation_context
+        from ...api.application.granted_operations import list_granted
+
+        selected = binding.resource_policy.allowed_workspace_operations or []
+        if not selected:
+            return []
+        await self.ap.plugin_connector.require_workspace_context(execution_context)
+        _, setting = await self.ap.plugin_connector._setting_for_plugin(
+            descriptor.plugin_author, descriptor.plugin_name
+        )
+        installation = self.ap.plugin_connector._binding_from_setting(execution_context, setting)
+        context = await installation_context(self.ap, installation, run_id=event.event_id)
+        operations = list_granted(self.ap, context, consumer='processor', granted=selected)
+        return [operation.as_dict() for operation in operations]
 
     async def _build_models_from_binding(
         self,
@@ -176,6 +223,7 @@ class AgentResourceBuilder:
         resource_policy: typing.Any,
         descriptor: RunnerDescriptor,
         runner_config: dict[str, typing.Any],
+        tool_catalog: typing.Iterable[dict[str, typing.Any]] | None = None,
     ) -> list[ToolResource]:
         """Build tools list from binding."""
         tools: list[ToolResource] = []
@@ -188,6 +236,7 @@ class AgentResourceBuilder:
 
         allowed_names = resource_policy.allowed_tool_names
         allowed_sources = resource_policy.allowed_tool_sources
+        catalog_by_name = {item['name']: item for item in (tool_catalog or ())}
         if resource_policy.allow_all_tools or allowed_sources is None:
             get_catalog = getattr(getattr(self.ap, 'tool_mgr', None), 'get_resolved_tool_catalog', None)
             if get_catalog is None:
@@ -206,6 +255,7 @@ class AgentResourceBuilder:
                 selected_names = set(allowed_names or [])
                 catalog = [item for item in catalog if item.get('name') in selected_names]
             allowed_names = ResourcePolicyProjector.extract_tool_names(catalog)
+            catalog_by_name = {item['name']: item for item in catalog}
             allowed_sources = {
                 item['name']: ref for item in catalog if (ref := self._catalog_source_ref(item)) is not None
             }
@@ -236,7 +286,15 @@ class AgentResourceBuilder:
                 if source_ref is None:
                     self.ap.logger.warning(f'Tool {tool_name} is not authorized because its Host source is unresolved')
                     continue
-                if get_tool_schema is not None:
+                catalog_item = catalog_by_name.get(tool_name)
+                if (
+                    catalog_item is not None
+                    and self._catalog_source_ref(catalog_item) == source_ref
+                    and 'parameters' in catalog_item
+                ):
+                    description = catalog_item.get('description')
+                    parameters = catalog_item['parameters'] or None
+                elif get_tool_schema is not None:
                     description, parameters = await get_tool_schema(
                         execution_context,
                         tool_name,

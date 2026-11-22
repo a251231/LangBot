@@ -48,6 +48,10 @@ mkdir -p "${FPK_DIR}/app/langbot"
 cd "${SRC_ROOT}"
 rsync -a \
     --exclude='.git' \
+    --exclude='/plugins/' \
+    --exclude='/sdk/scripts/' \
+    --exclude='/sdk/local_e2e/' \
+    --exclude='*.lbpkg' \
     --exclude='.venv' \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
@@ -64,11 +68,14 @@ rsync -a \
     --exclude='Dockerfile' \
     --exclude='docker/' \
     --exclude='kubernetes.yaml' \
-    --exclude='.github/' \
+    --exclude='/.github/' \
     --exclude='docs/' \
+    --exclude='dev-docs/' \
     --exclude='examples/' \
     --exclude='res/' \
     ./ "${FPK_DIR}/app/langbot/"
+
+python3 "${SRC_ROOT}/scripts/check_core_artifacts.py" --source "${FPK_DIR}/app/langbot"
 
 [ -d "${FPK_DIR}/app/langbot/web/dist" ] || { echo "ERROR: web/dist missing after rsync!" >&2; exit 1; }
 echo "    Source synced ($(du -sh "${FPK_DIR}/app/langbot" | cut -f1))"

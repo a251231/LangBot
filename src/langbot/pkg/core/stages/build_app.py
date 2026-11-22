@@ -28,6 +28,7 @@ from ...api.http.service import knowledge as knowledge_service
 from ...api.http.service import mcp as mcp_service
 from ...api.http.service import apikey as apikey_service
 from ...api.http.service import webhook as webhook_service
+from ...skill import repository as skill_repository
 from ...api.http.service import monitoring as monitoring_service
 from ...operation_trace import service as operation_trace_service
 from ...api.http.service import skill as skill_service
@@ -44,6 +45,8 @@ from ...agent.runner import RunnerRegistry, AgentRunOrchestrator, RunnerDefaultC
 from ...workspace import service as workspace_service_module
 from ...workspace import collaboration as workspace_collaboration_module
 from ...workspace import invitation_delivery as invitation_delivery_module
+from ...notification import email as email_notification_module
+from ...alerts import service as alert_service_module
 from ...cloud import bootstrap as cloud_bootstrap
 from ...cloud import launch as cloud_launch_module
 from ...cloud import support_admin as cloud_support_admin_module
@@ -52,6 +55,7 @@ from ...cloud.directory_projection import DirectoryProjectionService
 from ...cloud.entitlements import EntitlementResolver
 from ...cloud.model_catalog import CloudModelCatalogSyncService
 from ...api.http.context import ExecutionContext, PrincipalContext, PrincipalType
+from ...api.application import ApplicationAPI
 from ...api.http.authz import WorkspaceRequiredError
 
 
@@ -110,6 +114,12 @@ class BuildAppStage(stage.BootingStage):
         rerank_models_service_inst = model_service.RerankModelsService(ap)
         ap.rerank_models_service = rerank_models_service_inst
 
+        asr_models_service_inst = model_service.ASRModelsService(ap)
+        ap.asr_models_service = asr_models_service_inst
+
+        tts_models_service_inst = model_service.TTSModelsService(ap)
+        ap.tts_models_service = tts_models_service_inst
+
         provider_service_inst = provider_service.ModelProviderService(ap)
         ap.provider_service = provider_service_inst
 
@@ -137,8 +147,10 @@ class BuildAppStage(stage.BootingStage):
         webhook_service_inst = webhook_service.WebhookService(ap)
         ap.webhook_service = webhook_service_inst
 
+        ap.skill_repository = skill_repository.SkillRepository(ap)
         skill_service_inst = skill_service.SkillService(ap)
         ap.skill_service = skill_service_inst
+        ap.application_api = ApplicationAPI(ap)
 
         proxy_mgr = proxy.ProxyManager(ap)
         await proxy_mgr.initialize()
@@ -154,6 +166,12 @@ class BuildAppStage(stage.BootingStage):
         storage_mgr_inst = storagemgr.StorageMgr(ap)
         ap.storage_mgr = storage_mgr_inst
         await storage_mgr_inst.initialize()
+
+        from ...storage.artifacts import ArtifactService
+        from ...storage.artifact_publication import ArtifactPublicationService
+
+        ap.artifact_service = ArtifactService(ap)
+        ap.artifact_publication_service = ArtifactPublicationService(ap)
 
         persistence_mgr_inst = persistencemgr.PersistenceManager(
             ap,
@@ -171,6 +189,17 @@ class BuildAppStage(stage.BootingStage):
             )
             await directory_projection_service.initialize()
             ap.directory_projection_service = directory_projection_service
+            # Startup continues for a while after the first snapshot: platform
+            # ports reconnect, knowledge bases and pipelines reload, and a cold
+            # shared Runtime restore may still be running. Workspace admission
+            # fails closed once the projection is older than its staleness
+            # window, so keep refreshing it from the moment the first snapshot
+            # is committed instead of after the rest of this stage.
+            ap.directory_projection_task = ap.task_mgr.create_task(
+                directory_projection_service.run(),
+                name='cloud-directory-projection',
+                scopes=[core_entities.LifecycleControlScope.APPLICATION],
+            )
 
         workspace_policy = deployment.workspace_policy
         workspace_service_inst = workspace_service_module.WorkspaceService(
@@ -208,7 +237,9 @@ class BuildAppStage(stage.BootingStage):
             ap,
             workspace_service_inst,
         )
+        ap.email_service = email_notification_module.EmailService(ap)
         ap.invitation_delivery_service = invitation_delivery_module.InvitationDeliveryService(ap)
+        ap.alert_service = alert_service_module.AlertService(ap)
         ap.support_admin_session_service = cloud_support_admin_module.SupportAdminSessionService(ap)
         ap.space_launch_service = cloud_launch_module.SpaceLaunchService(ap)
 
@@ -261,6 +292,18 @@ class BuildAppStage(stage.BootingStage):
         ap.box_service = box_service_inst
         await box_service_inst.initialize()
 
+        # No HTTP, plugin or bot writer may observe a partially imported catalog.
+        from ...skill.migration import initialize_skill_migration
+        from ...storage.migration import initialize_storage_migration
+
+        config = ap.instance_config.data
+        await initialize_skill_migration(
+            ap, source_required=config.get('skills', {}).get('migration', {}).get('require_source', False)
+        )
+        await initialize_storage_migration(
+            ap, source_required=config.get('storage', {}).get('migration', {}).get('require_source', False)
+        )
+
         llm_tool_mgr_inst = llm_tool_mgr.ToolManager(ap)
         ap.tool_mgr = llm_tool_mgr_inst
         await llm_tool_mgr_inst.initialize()
@@ -296,7 +339,6 @@ class BuildAppStage(stage.BootingStage):
         # 初始化向量数据库管理器
         vectordb_mgr_inst = vectordb_mgr.VectorDBManager(ap)
         ap.vector_db_mgr = vectordb_mgr_inst
-        await vectordb_mgr_inst.initialize()
 
         http_ctrl = http_controller.HTTPController(ap)
         ap.http_ctrl = http_ctrl
@@ -311,10 +353,10 @@ class BuildAppStage(stage.BootingStage):
         async def runtime_disconnect_callback(connector: plugin_connector.PluginRuntimeConnector) -> None:
             connector.schedule_reconnect()
 
-        if ap.directory_projection_service is not None:
-            # Keep the projection fresh while shared Runtime cold restore runs.
-            # BuildApp initializes the connector before Application.run() starts
-            # its long-lived tasks, so start the single refresh task here.
+        if ap.directory_projection_service is not None and getattr(ap, 'directory_projection_task', None) is None:
+            # Fallback for a deployment that reached this point without the
+            # startup task (see the projection start right after the first
+            # snapshot is committed).
             ap.directory_projection_task = ap.task_mgr.create_task(
                 ap.directory_projection_service.run(),
                 name='cloud-directory-projection',
@@ -334,6 +376,7 @@ class BuildAppStage(stage.BootingStage):
 
         agent_run_orchestrator_inst = AgentRunOrchestrator(ap, runner_registry_inst)
         ap.agent_run_orchestrator = agent_run_orchestrator_inst
+        await agent_run_orchestrator_inst.interaction_manager.store.cancel_orphaned_pending(set())
 
         ctrl = controller.Controller(ap)
         ap.ctrl = ctrl

@@ -153,15 +153,23 @@ export default function ProviderCard({
     useState(false);
   const [addModelMode, setAddModelMode] = useState<'manual' | 'scan'>('manual');
 
-  const canDelete =
-    !isLangBotModels &&
-    (provider.llm_count || 0) === 0 &&
-    (provider.embedding_count || 0) === 0 &&
-    (provider.rerank_count || 0) === 0;
+  const modelsCountFromLoaded = models
+    ? (models.llm?.length || 0) +
+      (models.embedding?.length || 0) +
+      (models.rerank?.length || 0) +
+      (models.asr?.length || 0) +
+      (models.tts?.length || 0)
+    : undefined;
   const totalModels =
-    (provider.llm_count || 0) +
-    (provider.embedding_count || 0) +
-    (provider.rerank_count || 0);
+    modelsCountFromLoaded !== undefined
+      ? modelsCountFromLoaded
+      : (provider.llm_count || 0) +
+        (provider.embedding_count || 0) +
+        (provider.rerank_count || 0) +
+        (provider.asr_count || 0) +
+        (provider.tts_count || 0);
+
+  const canDelete = !isLangBotModels && totalModels === 0;
 
   return (
     <Card className="mb-2">
@@ -187,7 +195,7 @@ export default function ProviderCard({
                 />
               )}
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
                   <CardTitle className="text-base truncate">
                     {provider.name}
                   </CardTitle>
@@ -195,9 +203,18 @@ export default function ProviderCard({
                     {t('models.modelsCount', { count: totalModels })}
                   </Badge>
                 </div>
-                <p className="text-xs text-muted-foreground truncate">
+                <p
+                  className={`text-xs text-muted-foreground ${isLangBotModels ? 'leading-relaxed' : 'truncate'}`}
+                >
                   {isLangBotModels ? (
-                    t('models.langbotModelsDescription')
+                    <>
+                      {t('models.langbotModelsDescription')}
+                      {!ownerSpaceBound && (
+                        <span className="mt-1 block">
+                          {t('models.ownerMustBindSpace')}
+                        </span>
+                      )}
+                    </>
                   ) : (
                     <>
                       {provider.base_url}
@@ -222,7 +239,7 @@ export default function ProviderCard({
                   }}
                 >
                   <LogIn className="h-4 w-4 mr-1" />
-                  {t('models.ownerMustBindSpace')}
+                  {t('models.loginWithSpace')}
                 </Button>
               )}
               {isLangBotModels && ownerSpaceBound && spaceCredits !== null && (
@@ -251,11 +268,6 @@ export default function ProviderCard({
               {isLangBotModels && !isWorkspaceOwner && ownerSpaceBound && (
                 <span className="text-xs text-muted-foreground">
                   {t('models.usesOwnerSpaceBilling')}
-                </span>
-              )}
-              {isLangBotModels && !isWorkspaceOwner && !ownerSpaceBound && (
-                <span className="text-xs text-muted-foreground">
-                  {t('models.ownerMustBindSpace')}
                 </span>
               )}
               {canManage && !isLangBotModels && (
@@ -363,7 +375,7 @@ export default function ProviderCard({
                       }}
                     >
                       <Plus className="h-3 w-3 mr-1" />
-                      {t('models.addModel')}
+                      {t('common.add')}
                     </Button>
                   }
                   onOpen={() => {
@@ -390,14 +402,15 @@ export default function ProviderCard({
                   trigger={
                     <Button
                       variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
+                      size="sm"
+                      className="h-6 text-xs"
                       onClick={(e) => {
                         e.stopPropagation();
                         setAddModelMode('scan');
                       }}
                     >
-                      <Radar className="h-3 w-3" />
+                      <Radar className="h-3 w-3 mr-1" />
+                      {t('models.scanModels')}
                     </Button>
                   }
                   onOpen={() => {
@@ -596,9 +609,117 @@ export default function ProviderCard({
                     onResetTestResult={onResetTestResult}
                   />
                 ))}
+                {(models.asr || []).map((model) => (
+                  <ModelItem
+                    key={model.uuid}
+                    model={model}
+                    canManage={canManage}
+                    modelType="asr"
+                    isLangBotModels={isLangBotModels}
+                    metadata={
+                      modelMetadata[model.uuid] ?? modelMetadata[model.name]
+                    }
+                    availabilityLoaded={modelAvailabilityLoaded}
+                    editModelPopoverOpen={editModelPopoverOpen}
+                    deleteConfirmOpen={deleteConfirmOpen}
+                    onOpenEditModel={onOpenEditModel}
+                    onCloseEditModel={onCloseEditModel}
+                    onOpenDeleteConfirm={onOpenDeleteConfirm}
+                    onCloseDeleteConfirm={onCloseDeleteConfirm}
+                    onDeleteModel={() => onDeleteModel(model.uuid, 'asr')}
+                    onUpdateModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
+                      onUpdateModel(
+                        model.uuid,
+                        'asr',
+                        name,
+                        abilities,
+                        extraArgs,
+                        reasoningConfig,
+                      )
+                    }
+                    onTestModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
+                      onTestModel(
+                        name,
+                        'asr',
+                        abilities,
+                        extraArgs,
+                        reasoningConfig,
+                      )
+                    }
+                    isSubmitting={isSubmitting}
+                    isTesting={isTesting}
+                    testResult={testResult}
+                    onResetTestResult={onResetTestResult}
+                  />
+                ))}
+                {(models.tts || []).map((model) => (
+                  <ModelItem
+                    key={model.uuid}
+                    model={model}
+                    canManage={canManage}
+                    modelType="tts"
+                    isLangBotModels={isLangBotModels}
+                    metadata={
+                      modelMetadata[model.uuid] ?? modelMetadata[model.name]
+                    }
+                    availabilityLoaded={modelAvailabilityLoaded}
+                    editModelPopoverOpen={editModelPopoverOpen}
+                    deleteConfirmOpen={deleteConfirmOpen}
+                    onOpenEditModel={onOpenEditModel}
+                    onCloseEditModel={onCloseEditModel}
+                    onOpenDeleteConfirm={onOpenDeleteConfirm}
+                    onCloseDeleteConfirm={onCloseDeleteConfirm}
+                    onDeleteModel={() => onDeleteModel(model.uuid, 'tts')}
+                    onUpdateModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
+                      onUpdateModel(
+                        model.uuid,
+                        'tts',
+                        name,
+                        abilities,
+                        extraArgs,
+                        reasoningConfig,
+                      )
+                    }
+                    onTestModel={(
+                      name,
+                      abilities,
+                      extraArgs,
+                      reasoningConfig,
+                    ) =>
+                      onTestModel(
+                        name,
+                        'tts',
+                        abilities,
+                        extraArgs,
+                        reasoningConfig,
+                      )
+                    }
+                    isSubmitting={isSubmitting}
+                    isTesting={isTesting}
+                    testResult={testResult}
+                    onResetTestResult={onResetTestResult}
+                  />
+                ))}
                 {models.llm.length === 0 &&
                   models.embedding.length === 0 &&
-                  models.rerank.length === 0 && (
+                  models.rerank.length === 0 &&
+                  (!models.asr || models.asr.length === 0) &&
+                  (!models.tts || models.tts.length === 0) && (
                     <p className="text-sm text-muted-foreground text-center py-4">
                       {t('models.noModels')}
                     </p>

@@ -1,4 +1,11 @@
 export default {
+  networkDiagnostics: {
+    timeout: '下載逾時，請檢查網路或代理後重試。',
+    connection: '無法連線至外掛市集，請檢查網路或代理。',
+    incomplete: '下載意外中斷，請重試。',
+    http: '外掛市集拒絕了下載請求，請查看狀態碼並稍後重試。',
+    network: '網路錯誤導致安裝中斷，請檢查連線後重試。',
+  },
   complete: '完成',
   checkingPlugin: '檢查外掛',
   preparingPlugin: '準備安裝',
@@ -7,6 +14,8 @@ export default {
   downloaded: '已下載 {{size}}',
   processed: '已處理 {{completed}} / {{total}} 條流水線',
   installErrors: {
+    plugin_permission_confirmation_required:
+      '無法確認外掛權限。請有相應權限的成員在外掛設定中確認後重試。',
     plugin_version_unavailable:
       '擴充市集尚未提供所需外掛版本，請等待上架後重試，或選擇僅遷移資料。',
     plugin_download_timeout: '下載外掛逾時，請檢查網路後重試。',
@@ -32,6 +41,17 @@ export default {
     '檢查執行環境後重新整理，選取此流水線並確認，即可只重試啟用，不會再次遷移已儲存的設定。',
   details: '遷移詳情',
   notices: {
+    customRunner:
+      '舊版自訂 Runner 需要改寫為外掛 Runner 後再綁定。參見外掛開發文件：https://langbot.app/docs/zh/plugin/dev/tutor',
+    fieldDropped:
+      '未識別的舊欄位或設定段已從使用中設定移除，原值保存在遷移備份中。',
+    valueRepaired:
+      '格式不正確或缺少的值已依 4.10 預設值自動修復，請在遷移後檢查。',
+    mixedRunner: '同時存在新舊 Runner 選擇，已採用可用的那一項。',
+    runnerConfigReplaced:
+      '既有的新版 Runner 設定會被遷移結果取代，原值保存在遷移備份中。',
+    runnerAdded: '已將所需 Runner 外掛加入此流水線的擴充列表。',
+    extensionPrefs: '擴充設定中有無效項目，已忽略。',
     runtimeUnavailable:
       '外掛執行環境未連線，請恢復連線後重試，或選擇僅遷移資料。',
     executionFailed: '遷移執行失敗，請查看服務日誌後重試。',
@@ -97,6 +117,7 @@ export default {
     blocked: '已阻止',
     already_current: '已是新版',
     not_legacy: '非舊版',
+    unsupported_runner: '不支援的 Runner',
     activation_pending: '等待啟用',
     pending: '等待中',
     migrated: '已遷移',

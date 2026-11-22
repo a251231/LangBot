@@ -14,7 +14,7 @@ from ...api.http.context import ExecutionContext
 from ...api.http.service.tenant import TenantContext
 from .descriptor import RunnerDescriptor
 from .id import parse_runner_id, format_runner_id
-from .errors import RunnerNotFoundError, RunnerNotAuthorizedError
+from .errors import RunnerNotFoundError
 
 
 class RunnerRegistry:
@@ -229,18 +229,17 @@ class RunnerRegistry:
 
         Args:
             runner_id: Runner ID to lookup
-            bound_plugins: Optional bound plugins filter
+            bound_plugins: Legacy pipeline extension filter; does not authorize Runners.
 
         Returns:
             RunnerDescriptor
 
         Raises:
             RunnerNotFoundError: If runner not found
-            RunnerNotAuthorizedError: If runner not in bound plugins
         """
         # Parse and validate runner ID format
         try:
-            parse_runner_id(runner_id)
+            parsed = parse_runner_id(runner_id)
         except ValueError as e:
             raise RunnerNotFoundError(runner_id) from e
 
@@ -257,13 +256,22 @@ class RunnerRegistry:
             )
             descriptor = next((item for item in runners if item.id == runner_id), None)
         if descriptor is None:
-            raise RunnerNotFoundError(runner_id)
+            try:
+                await self.ap.plugin_connector.wait_for_runner_plugin(parsed.plugin_author, parsed.plugin_name)
+            except (ValueError, RuntimeError) as exc:
+                raise RunnerNotFoundError(runner_id, str(exc)) from exc
+            runners = await self.list_runners(context, bound_plugins=None, use_cache=False, usage=None)
+            descriptor = next((item for item in runners if item.id == runner_id), None)
+        if descriptor is None:
+            raise RunnerNotFoundError(
+                runner_id,
+                'The plugin is running but does not expose this Runner. '
+                'Check its version and select an available Runner in the pipeline AI settings.',
+            )
 
-        # Check authorization
-        if bound_plugins is not None:
-            plugin_id = descriptor.get_plugin_id()
-            if plugin_id not in bound_plugins:
-                raise RunnerNotAuthorizedError(runner_id, bound_plugins)
+        # A selected Runner is independent of the pipeline extension allowlist.
+        # Installation enablement and Workspace scope are enforced by the connector
+        # again at invocation; never widen the extension permissions on the query.
 
         return descriptor
 

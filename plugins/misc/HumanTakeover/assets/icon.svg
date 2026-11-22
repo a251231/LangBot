@@ -1,0 +1,16 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    HumanTakeover — headset + handoff arrow.
+    Group is translated so the *combined* bbox centres on (32,32); transparent
+    canvas, art inside 12..52. Mid-slate tones read on a white card; the arrow is
+    the single blue accent.
+  -->
+  <g transform="translate(-2 -2)">
+    <circle cx="32" cy="29" r="11" stroke="#64748B" stroke-width="3.4"/>
+    <rect x="17.5" y="28" width="7" height="12" rx="3.5" fill="#64748B"/>
+    <rect x="39.5" y="28" width="7" height="12" rx="3.5" fill="#64748B"/>
+    <rect x="29.5" y="36" width="5.5" height="8" rx="2.75" fill="#94A3B8"/>
+    <rect x="36.5" y="45" width="11" height="3.2" rx="1.6" fill="#2563EB"/>
+    <path d="M44.5 41.5l4.5 4.7-4.5 4.7" stroke="#2563EB" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

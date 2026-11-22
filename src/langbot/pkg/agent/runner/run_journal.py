@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import datetime
+import math
 import typing
 
 from ...core import app
+from ...storage.media import MediaCache
 from .descriptor import RunnerDescriptor
 from .errors import RunnerProtocolError
 from .host_models import AgentBinding, AgentEventEnvelope
@@ -38,16 +41,31 @@ class AgentRunJournal:
             return dict(value)
         return {}
 
+    @staticmethod
+    def _event_time_to_utc(value: typing.Any) -> datetime.datetime | None:
+        """Normalize legacy second/millisecond/microsecond Unix timestamps to UTC datetime."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            timestamp = float(value)
+            if timestamp == 0 or not math.isfinite(timestamp):
+                return None
+            while abs(timestamp) > 10_000_000_000:
+                timestamp /= 1000
+            return datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
     @classmethod
     def _sanitize_content_item(cls, value: typing.Any) -> typing.Any:
         item = cls._to_plain_dict(value)
         if not item:
             return value
         item_type = item.get('type')
-        if item_type == 'image_base64' and item.get('image_base64'):
-            item['image_base64'] = None
+        if MediaCache.has_inline_images(item):
+            item = MediaCache.redact_inline_images(item)
             item['content_redacted'] = True
-        elif item_type == 'file_base64' and item.get('file_base64'):
+        if item_type == 'file_base64' and item.get('file_base64'):
             item['file_base64'] = None
             item['content_redacted'] = True
         return item
@@ -68,6 +86,28 @@ class AgentRunJournal:
     def _sanitize_attachments(cls, attachments: typing.Iterable[typing.Any]) -> list[dict[str, typing.Any]]:
         return [cls._sanitize_attachment_ref(attachment) for attachment in attachments]
 
+    @classmethod
+    def _sanitize_event_data(cls, value: typing.Any) -> typing.Any:
+        """Retain arbitrary event fields without copying inline binary payloads."""
+        if hasattr(value, 'model_dump'):
+            value = value.model_dump(mode='json')
+        if isinstance(value, list):
+            return [cls._sanitize_event_data(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        if value.get('type') in ('Image', 'image', 'image_url', 'image_base64'):
+            value = cls._sanitize_content_item(value)
+        result = {}
+        for key, item in value.items():
+            if key in ('image_base64', 'file_base64', 'base64') and item:
+                result[key] = None
+                result['content_redacted'] = True
+            elif key == 'attachments' and isinstance(item, list):
+                result[key] = [cls._sanitize_event_data(cls._sanitize_attachment_ref(ref)) for ref in item]
+            else:
+                result[key] = cls._sanitize_event_data(item)
+        return result
+
     async def create_run(
         self,
         *,
@@ -78,6 +118,9 @@ class AgentRunJournal:
         authorization: dict[str, typing.Any],
     ) -> dict[str, typing.Any]:
         """Create the Host-owned run ledger record."""
+        from ...telemetry import trace
+
+        trace_state = trace.current()
         runtime = context.get('runtime') if isinstance(context, dict) else {}
         return await self._get_run_ledger_store().create_run(
             run_id=context['run_id'],
@@ -85,25 +128,29 @@ class AgentRunJournal:
             binding_id=binding.binding_id,
             agent_id=binding.agent_id,
             runner_id=descriptor.id,
-            conversation_id=event.conversation_id,
+            conversation_id=event.ledger_conversation_id,
             thread_id=event.thread_id,
             workspace_id=event.workspace_id,
             bot_id=event.bot_id,
             deadline_at=runtime.get('deadline_at') if isinstance(runtime, dict) else None,
-            authorization=authorization,
+            authorization={**authorization, 'recovery_event': self._sanitize_event_data(event.model_dump(mode='json'))},
             metadata={
                 'event_type': event.event_type,
+                'ingress_event_id': trace_state.event_id if trace_state else event.event_id,
                 'source': event.source,
                 'processor_id': binding.processor_id,
                 'processor_type': binding.processor_type,
                 **(
-                    {'input_event': event.data, 'delivery': event.delivery.model_dump(mode='json')}
+                    {
+                        'input_event': self._sanitize_event_data(event.data),
+                        'delivery': event.delivery.model_dump(mode='json'),
+                    }
                     if binding.processor_type == 'event_processor'
                     else {}
                 ),
                 **(
                     {
-                        **({'input_event': event.data} if event.event_type != 'message.received' else {}),
+                        'input_event': self._sanitize_event_data(event.data),
                         'input': {
                             'text': context.get('input', {}).get('text', ''),
                             'contents': self._sanitize_contents(context.get('input', {}).get('contents', [])),
@@ -122,7 +169,7 @@ class AgentRunJournal:
         *,
         result_dict: dict[str, typing.Any],
         run_id: str,
-        sequence: int,
+        sequence: int | None,
         source: str = 'runner',
         metadata: dict[str, typing.Any] | None = None,
     ) -> dict[str, typing.Any]:
@@ -130,11 +177,19 @@ class AgentRunJournal:
         usage = result_dict.get('usage')
         if hasattr(usage, 'model_dump'):
             usage = usage.model_dump(mode='json')
+        result_metadata = result_dict.get('metadata')
+        if isinstance(result_metadata, dict):
+            metadata = {**result_metadata, **(metadata or {})}
+        data = result_dict.get('data') if isinstance(result_dict.get('data'), dict) else {}
+        if MediaCache.has_inline_images(data):
+            data = await self.ap.storage_mgr.media_cache.externalize_chain_dump(data)
+        if MediaCache.has_inline_images(metadata):
+            metadata = MediaCache.redact_inline_images(metadata)
         return await self._get_run_ledger_store().append_event(
             run_id=run_id,
             sequence=sequence,
             event_type=str(result_dict.get('type') or 'unknown'),
-            data=result_dict.get('data') if isinstance(result_dict.get('data'), dict) else {},
+            data=data,
             usage=usage if isinstance(usage, dict) else None,
             source=source,
             metadata=metadata,
@@ -223,8 +278,6 @@ class AgentRunJournal:
         metadata: dict[str, typing.Any] | None = None,
     ) -> str:
         """Write incoming event to EventLog."""
-        import datetime
-
         from .event_log_store import EventLogStore
 
         store = EventLogStore(self.ap.persistence_mgr.get_db_engine())
@@ -246,7 +299,7 @@ class AgentRunJournal:
             source=event.source,
             bot_id=event.bot_id,
             workspace_id=event.workspace_id,
-            conversation_id=event.conversation_id,
+            conversation_id=event.ledger_conversation_id,
             thread_id=event.thread_id,
             actor_type=event.actor.actor_type if event.actor else None,
             actor_id=event.actor.actor_id if event.actor else None,
@@ -257,10 +310,8 @@ class AgentRunJournal:
             input_json=input_json,
             run_id=run_id,
             runner_id=runner_id,
-            event_time=(
-                datetime.datetime.fromtimestamp(event.event_time, datetime.timezone.utc) if event.event_time else None
-            ),
-            metadata=metadata,
+            event_time=self._event_time_to_utc(event.event_time),
+            metadata={**(metadata or {}), 'input_event': self._sanitize_event_data(event.data)},
         )
 
     async def write_user_transcript(
@@ -312,11 +363,10 @@ class AgentRunJournal:
         *,
         reason: str = 'run_ended',
     ) -> None:
-        """Write terminal audit events for steering items left unconsumed."""
+        """Audit unconsumed steering items and requeue claimed deliveries."""
         if not items:
             return
 
-        import datetime
         import uuid
 
         from .event_log_store import EventLogStore
@@ -325,24 +375,29 @@ class AgentRunJournal:
 
         for item in items:
             event = item.get('event') if isinstance(item.get('event'), dict) else {}
+            source_event_id = event.get('event_id')
+            delivery_id = item.get('_steering_delivery_id') or item.get('delivery_id')
+            requeued = bool(delivery_id)
+            if source_event_id:
+                released = await store.update_steering_status(
+                    str(source_event_id),
+                    status='queued' if requeued else 'dropped',
+                    delivery_id='' if requeued else delivery_id,
+                    lease_expires_at=0 if requeued else None,
+                    expected_delivery_id=delivery_id,
+                    owner_run_id=run_id,
+                )
+                if not released:
+                    continue
             conversation = item.get('conversation') if isinstance(item.get('conversation'), dict) else {}
             actor = item.get('actor') if isinstance(item.get('actor'), dict) else {}
             subject = item.get('subject') if isinstance(item.get('subject'), dict) else {}
 
-            event_time = None
-            raw_event_time = event.get('event_time')
-            if raw_event_time:
-                try:
-                    event_time = datetime.datetime.fromtimestamp(
-                        raw_event_time,
-                        datetime.timezone.utc,
-                    )
-                except (TypeError, ValueError, OSError):
-                    event_time = None
+            event_time = self._event_time_to_utc(event.get('event_time'))
 
             await store.append_event(
                 event_id=str(uuid.uuid4()),
-                event_type='steering.dropped',
+                event_type='steering.requeued' if requeued else 'steering.dropped',
                 source='host',
                 bot_id=conversation.get('bot_id'),
                 workspace_id=conversation.get('workspace_id'),
@@ -353,13 +408,15 @@ class AgentRunJournal:
                 actor_name=actor.get('actor_name'),
                 subject_type=subject.get('subject_type'),
                 subject_id=subject.get('subject_id'),
-                input_summary='Unconsumed steering input dropped',
+                input_summary='Unacknowledged steering input requeued'
+                if requeued
+                else 'Unconsumed steering input dropped',
                 run_id=run_id,
                 runner_id=runner_id,
                 event_time=event_time,
                 metadata={
                     'steering': {
-                        'status': 'dropped',
+                        'status': 'requeued' if requeued else 'dropped',
                         'reason': reason,
                         'original_event_id': event.get('event_id'),
                         'claimed_run_id': item.get('claimed_run_id'),

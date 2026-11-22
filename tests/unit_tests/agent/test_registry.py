@@ -8,7 +8,7 @@ import pytest
 
 from langbot.pkg.agent.runner.registry import RunnerRegistry
 from langbot.pkg.agent.runner.descriptor import RunnerDescriptor
-from langbot.pkg.agent.runner.errors import RunnerNotFoundError, RunnerNotAuthorizedError
+from langbot.pkg.agent.runner.errors import RunnerNotFoundError
 from langbot.pkg.api.http.context import ExecutionContext
 
 
@@ -40,6 +40,9 @@ class FakeApplication:
 
         class FakePluginConnector:
             is_enable_plugin = True
+
+            async def wait_for_runner_plugin(self, plugin_author, plugin_name):
+                raise ValueError('The Runner plugin is not installed in this Workspace. Open Plugins to install it.')
 
             async def require_workspace_context(self, context):
                 return context
@@ -124,6 +127,7 @@ class TestRegistryDiscovery:
     async def test_discover_caches_results(self):
         """Discovery should cache results."""
         ap = FakeApplication()
+        ap.plugin_connector.list_runners = AsyncMock(wraps=ap.plugin_connector.list_runners)
         registry = RunnerRegistry(ap)
 
         # First discovery
@@ -134,6 +138,11 @@ class TestRegistryDiscovery:
 
         assert registry._cache is not None
         assert len(runners1) == len(runners2)
+        ap.plugin_connector.list_runners.assert_awaited_once()
+        assert [runner.id for runner in runners2] == [
+            'plugin:langbot-team/LocalAgent/default',
+            'plugin:alice/my-agent/custom',
+        ]
 
     @pytest.mark.asyncio
     async def test_discover_handles_plugin_disabled(self):
@@ -187,6 +196,33 @@ class TestRegistryDiscovery:
 class TestRegistryGet:
     """Tests for getting specific runner."""
 
+    async def test_get_waits_then_rediscovers_without_widening_extensions(self):
+        ap = FakeApplication()
+        entries = await ap.plugin_connector.list_runners()
+        ap.plugin_connector.list_runners = AsyncMock(side_effect=[[], [], entries])
+        ap.plugin_connector.wait_for_runner_plugin = AsyncMock()
+        descriptor = await RunnerRegistry(ap).get(
+            TEST_CONTEXT, 'plugin:langbot-team/LocalAgent/default', bound_plugins=[]
+        )
+        assert descriptor.plugin_name == 'LocalAgent'
+        ap.plugin_connector.wait_for_runner_plugin.assert_awaited_once_with('langbot-team', 'LocalAgent')
+
+    async def test_get_preserves_startup_failure_detail(self):
+        ap = FakeApplication()
+        ap.plugin_connector.list_runners = AsyncMock(return_value=[])
+        ap.plugin_connector.wait_for_runner_plugin = AsyncMock(
+            side_effect=RuntimeError('dependency installation failed')
+        )
+        with pytest.raises(RunnerNotFoundError, match='dependency installation failed'):
+            await RunnerRegistry(ap).get(TEST_CONTEXT, 'plugin:langbot-team/LocalAgent/default')
+
+    async def test_initialized_plugin_missing_component_has_configuration_hint(self):
+        ap = FakeApplication()
+        ap.plugin_connector.list_runners = AsyncMock(return_value=[])
+        ap.plugin_connector.wait_for_runner_plugin = AsyncMock()
+        with pytest.raises(RunnerNotFoundError, match='pipeline AI settings'):
+            await RunnerRegistry(ap).get(TEST_CONTEXT, 'plugin:langbot-team/LocalAgent/default')
+
     @pytest.mark.asyncio
     async def test_get_existing_runner(self):
         """Get existing runner by ID."""
@@ -236,8 +272,9 @@ class TestRegistryGet:
         assert ap.plugin_connector.list_runners.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_get_runner_with_bound_plugins_filter(self):
-        """Get runner with bound plugins authorization."""
+    @pytest.mark.parametrize('plugins', [None, [], ['langbot-team/LocalAgent']])
+    async def test_get_runner_independent_of_extension_filter(self, plugins):
+        """Selecting a Runner must not grant or require extension authorization."""
         ap = FakeApplication()
         registry = RunnerRegistry(ap)
 
@@ -249,13 +286,13 @@ class TestRegistryGet:
         )
         assert descriptor is not None
 
-        # Not authorized - plugin not in bound list
-        with pytest.raises(RunnerNotAuthorizedError):
-            await registry.get(
-                TEST_CONTEXT,
-                'plugin:alice/my-agent/custom',
-                bound_plugins=['langbot-team/LocalAgent'],
-            )
+        descriptor = await registry.get(
+            TEST_CONTEXT,
+            'plugin:alice/my-agent/custom',
+            bound_plugins=plugins,
+        )
+        assert descriptor.id == 'plugin:alice/my-agent/custom'
+        assert plugins in (None, [], ['langbot-team/LocalAgent'])
 
 
 class TestRegistryMetadataForPipeline:

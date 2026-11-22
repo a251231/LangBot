@@ -42,6 +42,7 @@ from langbot_plugin.entities.io.context import ActionContext
 from langbot.pkg.api.http.context import ExecutionContext
 from langbot.pkg.box.service import BoxService
 from langbot.pkg.box.runner import RunBoxBinding
+from langbot.pkg.provider.tools.loaders import skill as skill_loader
 
 _UTC = dt.timezone.utc
 _CONTEXT = ExecutionContext(
@@ -261,6 +262,32 @@ async def test_box_service_without_explicit_client_initializes_internal_connecto
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['offline', 'incompatible', 'wrapped-incompatible'])
+async def test_network_startup_distinguishes_offline_and_incompatible_runtime(failure):
+    from langbot_plugin.box import errors
+
+    compatibility = getattr(errors, 'BoxRuntimeCompatibilityError', None)
+    if compatibility is None:
+        pytest.skip('typed network compatibility requires the coordinated SDK')
+    app = make_app(Mock())
+    app.instance_config.data['box']['file_transfer_mode'] = 'network'
+    error = errors.BoxRuntimeUnavailableError('offline')
+    if failure == 'incompatible':
+        error = compatibility('unsupported protocol')
+    elif failure == 'wrapped-incompatible':
+        error.__cause__ = compatibility('unsupported protocol')
+    client = Mock(spec=BoxRuntimeClient)
+    client.initialize = AsyncMock(side_effect=error)
+    service = BoxService(app, client=client)
+    if failure == 'offline':
+        await service.initialize()
+        assert service.available is False
+    else:
+        with pytest.raises(errors.BoxRuntimeUnavailableError):
+            await service.initialize()
+
+
+@pytest.mark.asyncio
 async def test_cloud_initialize_validation_failure_closes_connector_and_cancels_reconnect(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -307,7 +334,7 @@ class TestSharesFilesystemWithBox:
     - stdio (local child process) → shared filesystem → True
     - WebSocket (Docker / sidecar / --standalone-box / remote) → separated → False
 
-    This drives whether LangBot validates Box-reported skill paths locally.
+    This drives whether LangBot can safely perform local workspace operations.
     Getting it wrong silently drops every skill in separated deployments.
     """
 
@@ -344,7 +371,7 @@ class TestSharesFilesystemWithBox:
 
     def test_false_when_client_injected_without_connector(self):
         # Injected client (no connector) → unknown topology → conservative False
-        # so LangBot never wrongly drops Box-reported skills.
+        # so LangBot does not assume a shared local filesystem.
         service = BoxService(make_app(Mock()), client=Mock(spec=BoxRuntimeClient))
 
         assert service._runtime_connector is None
@@ -422,6 +449,76 @@ def test_separated_box_runtime_allows_box_owned_missing_host_path(tmp_path):
     assert not (host_root / 'default').exists()
 
 
+def test_box_build_spec_injects_local_default_env():
+    logger = Mock()
+    app = make_app(logger)
+    app.instance_config.data['box']['local']['env'] = {'JENKINS_BASE_URL': 'https://jenkins.example.com'}
+    service = BoxService(app, client=Mock())
+
+    spec = service.build_spec({'cmd': 'echo hi', 'session_id': 'default-env'})
+
+    assert spec.env == {'JENKINS_BASE_URL': 'https://jenkins.example.com'}
+
+
+def test_box_build_spec_per_call_env_overrides_local_default():
+    logger = Mock()
+    app = make_app(logger)
+    app.instance_config.data['box']['local']['env'] = {
+        'JENKINS_BASE_URL': 'https://default.example.com',
+        'KEEP_ME': 'yes',
+    }
+    service = BoxService(app, client=Mock())
+
+    spec = service.build_spec(
+        {'cmd': 'echo hi', 'session_id': 'override-env', 'env': {'JENKINS_BASE_URL': 'https://override.example.com'}}
+    )
+
+    assert spec.env == {'JENKINS_BASE_URL': 'https://override.example.com', 'KEEP_ME': 'yes'}
+
+
+def test_box_build_spec_ignores_invalid_local_env_entries():
+    logger = Mock()
+    app = make_app(logger)
+    app.instance_config.data['box']['local']['env'] = {
+        'OK': 'value',
+        '': 'empty-key',
+        '   ': 'blank-key',
+        'BAD_VALUE': 123,
+        3: 'non-string-key',
+    }
+    service = BoxService(app, client=Mock())
+
+    spec = service.build_spec({'cmd': 'echo hi', 'session_id': 'invalid-env'})
+
+    assert spec.env == {'OK': 'value'}
+
+    app.instance_config.data['box']['local']['env'] = 'not-a-dict'
+    service = BoxService(app, client=Mock())
+    spec = service.build_spec({'cmd': 'echo hi', 'session_id': 'non-dict-env'})
+
+    assert spec.env == {}
+
+
+def test_box_build_spec_ignores_local_env_in_multi_workspace_deployment():
+    logger = Mock()
+    app = make_app(logger)
+    app.deployment = SimpleNamespace(multi_workspace_enabled=True)
+    app.instance_config.data['box'].update(
+        {
+            'backend': 'nsjail',
+            'admission': {'required': True, 'workspace_quota_mb': 32},
+        }
+    )
+    app.instance_config.data['box']['local']['env'] = {'JENKINS_BASE_URL': 'https://jenkins.example.com'}
+    service = BoxService(app, client=Mock())
+
+    spec = service.build_spec({'cmd': 'echo hi', 'session_id': 'cloud-env', 'env': {'PER_CALL': '1'}})
+
+    assert service.default_env == {}
+    assert spec.env == {'PER_CALL': '1'}
+    logger.warning.assert_any_call('box.local.env is ignored in multi-workspace deployments.')
+
+
 @pytest.mark.asyncio
 async def test_box_service_get_sessions_delegates_to_client():
     client = Mock()
@@ -433,7 +530,7 @@ async def test_box_service_get_sessions_delegates_to_client():
     sessions = await service.get_sessions(_CONTEXT)
 
     assert sessions == [{'session_id': 'test-session'}]
-    client.get_sessions.assert_awaited_once()
+    client.get_sessions.assert_awaited_once_with(action_context=_ACTION_CONTEXT)
 
 
 @pytest.mark.asyncio
@@ -572,7 +669,6 @@ async def test_box_service_reconnect_restores_workspace_and_runs_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ):
     app = make_app(Mock())
-    app.skill_mgr = SimpleNamespace(reload_skills=AsyncMock())
     service = BoxService(app, client=Mock(spec=BoxRuntimeClient))
     connector = Mock()
     connector.reconnect = AsyncMock()
@@ -585,29 +681,28 @@ async def test_box_service_reconnect_restores_workspace_and_runs_cleanup(
     connector.reconnect.assert_awaited_once()
     service._ensure_default_workspace.assert_called_once()
     service._purge_attachment_dirs.assert_awaited_once()
-    app.skill_mgr.reload_skills.assert_awaited_once_with(_CONTEXT)
     assert service.available is True
 
 
 @pytest.mark.asyncio
-async def test_cloud_box_service_reconnect_does_not_reload_unscoped_skills(
+async def test_cloud_box_service_reconnect_restores_runtime_only(
     monkeypatch: pytest.MonkeyPatch,
 ):
     app = make_app(Mock())
-    app.skill_mgr = SimpleNamespace(reload_skills=AsyncMock())
     service = BoxService(app, client=Mock(spec=BoxRuntimeClient))
     service._cloud_managed = True
     connector = Mock()
     connector.reconnect = AsyncMock()
     service._ensure_default_workspace = Mock()
     service._verify_cloud_runtime = AsyncMock()
+    service._purge_attachment_dirs = AsyncMock()
     monkeypatch.setattr('langbot.pkg.box.service.asyncio.sleep', AsyncMock())
 
     await service._reconnect_loop(connector)
 
     connector.reconnect.assert_awaited_once()
     service._verify_cloud_runtime.assert_awaited_once()
-    app.skill_mgr.reload_skills.assert_not_awaited()
+    service._purge_attachment_dirs.assert_not_awaited()
     assert service.available is True
 
 
@@ -626,6 +721,50 @@ async def test_box_runtime_reuses_request_session():
 
     assert backend.start_calls == ['req-1']
     assert backend.exec_calls == [('req-1', 'echo first'), ('req-1', 'echo second')]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['success', 'exit_error', 'box_error', 'timeout'])
+async def test_execution_telemetry_counts_sandbox_outcomes(outcome):
+    from langbot.pkg.telemetry import trace
+    from tests.unit_tests.telemetry.test_trace import make_counters
+
+    logger = Mock()
+    backend = FakeBackend(logger)
+    runtime = BoxRuntime(logger=logger, backends=[backend], session_ttl_sec=300)
+    app = make_app(logger)
+    _, counters = make_counters()
+    app.telemetry = SimpleNamespace(execution=counters)
+    service = BoxService(app, client=_InProcessBoxRuntimeClient(logger, runtime))
+    await service.initialize()
+    if outcome == 'box_error':
+        service.client.execute = AsyncMock(side_effect=BoxError('backend failed'))
+    elif outcome in {'exit_error', 'timeout'}:
+        service.client.execute = AsyncMock(
+            return_value=BoxExecutionResult(
+                session_id='person_test_user',
+                backend_name='fake',
+                status=BoxExecutionStatus.TIMED_OUT if outcome == 'timeout' else BoxExecutionStatus.COMPLETED,
+                exit_code=None if outcome == 'timeout' else 1,
+                stdout='',
+                stderr='private output',
+                duration_ms=1,
+            )
+        )
+    binding = trace.bind()
+    try:
+        if outcome == 'box_error':
+            with pytest.raises(BoxError):
+                await service.execute_tool({'command': 'private command'}, make_query())
+        else:
+            await service.execute_tool({'command': 'private command'}, make_query())
+        expected = {'execs': 1}
+        if outcome != 'success':
+            expected['errors'] = 1
+        assert binding.state.features == {'sandbox': expected}
+    finally:
+        trace.unbind_root(binding)
+        await service.shutdown()
 
 
 @pytest.mark.asyncio
@@ -677,6 +816,8 @@ async def test_box_service_allows_host_mount_under_configured_root(tmp_path):
 
     assert result['ok'] is True
     assert backend.start_calls == ['person_test_user']
+    assert backend.start_specs[0].host_path == os.path.realpath(host_dir)
+    assert backend.start_specs[0].host_path_mode == BoxHostMountMode.READ_WRITE
 
 
 @pytest.mark.asyncio
@@ -747,15 +888,19 @@ async def test_box_service_rejects_host_mount_outside_allowed_roots(tmp_path):
     service = BoxService(make_app(logger, [str(allowed_root)]), client=_InProcessBoxRuntimeClient(logger, runtime))
     await service.initialize()
 
-    with pytest.raises(BoxValidationError):
+    with pytest.raises(BoxValidationError, match='outside allowed_mount_roots'):
         await service.execute_spec_payload(
             {
                 'cmd': 'pwd',
                 'host_path': str(disallowed_root),
-                'session_id': '12',
+                'session_id': 'person_test_user',
             },
             make_query(12),
         )
+
+    assert backend.start_calls == []
+    assert backend.exec_calls == []
+    assert list(disallowed_root.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -934,20 +1079,21 @@ async def test_truncate_stderr_independently():
 
 
 @pytest.mark.asyncio
-async def test_profile_default_provides_defaults():
+@pytest.mark.parametrize('profile_name,network', [('default', BoxNetworkMode.ON), ('offline', BoxNetworkMode.OFF)])
+async def test_profile_default_provides_defaults(profile_name, network):
     """When tool call omits network/image, profile defaults are used."""
     logger = Mock()
     backend = FakeBackend(logger)
     runtime = BoxRuntime(logger=logger, backends=[backend], session_ttl_sec=300)
-    service = BoxService(make_app(logger), client=_InProcessBoxRuntimeClient(logger, runtime))
+    service = BoxService(make_app(logger, profile=profile_name), client=_InProcessBoxRuntimeClient(logger, runtime))
     await service.initialize()
 
     result = await service.execute_tool({'command': 'echo hi'}, make_query(30))
 
     assert result['ok'] is True
     spec = backend.start_specs[0]
-    profile = BUILTIN_PROFILES['default']
-    assert spec.network == BoxNetworkMode.OFF
+    profile = BUILTIN_PROFILES[profile_name]
+    assert spec.network == network
     assert spec.image == profile.image
     assert spec.timeout_sec == profile.timeout_sec
 
@@ -962,14 +1108,14 @@ async def test_profile_unlocked_field_can_be_overridden():
     await service.initialize()
 
     result = await service.execute_spec_payload(
-        {'cmd': 'echo hi', 'timeout_sec': 60, 'network': 'on', 'session_id': 'person_test_user'},
+        {'cmd': 'echo hi', 'timeout_sec': 60, 'network': 'off', 'session_id': 'person_test_user'},
         make_query(31),
     )
 
     assert result['ok'] is True
     spec = backend.start_specs[0]
     assert spec.timeout_sec == 60
-    assert spec.network == BoxNetworkMode.ON
+    assert spec.network == BoxNetworkMode.OFF
 
 
 @pytest.mark.asyncio
@@ -1037,9 +1183,14 @@ def test_unknown_profile_raises_error():
 def test_builtin_profiles_are_consistent():
     """Basic sanity check on all built-in profiles."""
     assert 'default' in BUILTIN_PROFILES
+    assert 'offline' in BUILTIN_PROFILES
     assert 'offline_readonly' in BUILTIN_PROFILES
     assert 'network_basic' in BUILTIN_PROFILES
     assert 'network_extended' in BUILTIN_PROFILES
+
+    default = BUILTIN_PROFILES['default']
+    assert default.network == BoxNetworkMode.ON
+    assert BUILTIN_PROFILES['offline'] == default.model_copy(update={'name': 'offline', 'network': BoxNetworkMode.OFF})
 
     offline = BUILTIN_PROFILES['offline_readonly']
     assert offline.network == BoxNetworkMode.OFF
@@ -1061,8 +1212,18 @@ def test_builtin_profiles_are_consistent():
 
 
 @pytest.mark.asyncio
-async def test_profile_default_applies_resource_limits():
+async def test_profile_default_applies_resource_limits(monkeypatch):
     """Default profile resource limits are applied to BoxSpec."""
+    profile = BUILTIN_PROFILES['default'].model_copy(
+        update={
+            'cpus': 0.75,
+            'memory_mb': 320,
+            'pids_limit': 37,
+            'read_only_rootfs': False,
+            'workspace_quota_mb': 19,
+        }
+    )
+    monkeypatch.setitem(BUILTIN_PROFILES, 'default', profile)
     logger = Mock()
     backend = FakeBackend(logger)
     runtime = BoxRuntime(logger=logger, backends=[backend], session_ttl_sec=300)
@@ -1470,8 +1631,14 @@ async def test_rpc_client_get_status():
     try:
         status = await client.get_status(action_context=_ACTION_CONTEXT)
 
-        assert 'backend' in status
-        assert 'active_sessions' in status
+        assert status['backend']['name'] == 'fake'
+        assert status['backend']['available'] is True
+        assert status['active_sessions'] == 0
+        await client.execute(BoxSpec(cmd='true', session_id='status-session'), action_context=_ACTION_CONTEXT)
+        status = await client.get_status(action_context=_ACTION_CONTEXT)
+        assert status['active_sessions'] == 1
+        assert status['managed_processes'] == 0
+        assert status['session_ttl_sec'] == 300
     finally:
         server_task.cancel()
         client_task.cancel()
@@ -1512,8 +1679,10 @@ async def test_rpc_client_delete_session():
         spec = BoxSpec.model_validate({'cmd': 'echo hi', 'session_id': 'r-del-1'})
         await client.execute(spec, action_context=_ACTION_CONTEXT)
 
+        physical_session_id = backend.start_calls[0]
         await client.delete_session('r-del-1', action_context=_ACTION_CONTEXT)
 
+        assert backend.stop_calls == [physical_session_id]
         sessions = await client.get_sessions(action_context=_ACTION_CONTEXT)
         assert len(sessions) == 0
     finally:
@@ -1803,99 +1972,89 @@ def test_disconnect_callback_does_not_schedule_without_running_event_loop():
     assert service._reconnecting is False
 
 
-class TestBuildSkillExtraMounts:
-    """Robustness of skill mount construction against a stale skill cache.
+class TestBuildSkillExecutionMounts:
+    """Execution materializes only revisions pinned by this run."""
 
-    The three sandbox backends behave inconsistently when a skill's
-    package_root no longer exists on disk (nsjail aborts the whole sandbox
-    start, Docker silently auto-creates a root-owned empty directory, E2B
-    silently skips). Mount construction must filter these out up front so
-    the backend never sees a bad mount.
-    """
-
-    def _make_service(self, logger, skills, *, shares_filesystem=True):
+    def _make_app(self, logger, skills):
         app = make_app(logger)
         app.skill_mgr = SimpleNamespace(skills=skills, get_skills=Mock(return_value=skills))
-        client = Mock(spec=BoxRuntimeClient)
-        service = BoxService(app, client=client)
-        # Tests construct BoxService with an injected client (no connector), so
-        # set the topology explicitly. Most cases exercise the shared-fs (local
-        # stdio) path where local package_root validation applies.
-        service._shares_filesystem_with_box_override = shares_filesystem
-        return service
+        return app
 
-    def test_skips_skill_with_missing_package_root(self):
+    def test_mounts_only_activated_revision(self):
         logger = Mock()
         with tempfile.TemporaryDirectory() as live_dir:
+            manifest_path = os.path.join(live_dir, 'manifest.json')
+            with open(manifest_path, 'w', encoding='utf-8') as file:
+                file.write('{}')
             skills = {
-                'alive': {'name': 'alive', 'package_root': live_dir},
-                'ghost': {'name': 'ghost', 'package_root': '/nonexistent/path/should/never/exist'},
+                'alive': {
+                    'name': 'alive',
+                    'package_root': live_dir,
+                    'manifest_path': manifest_path,
+                    'revision': 'sha256:' + '1' * 64,
+                },
+                'visible-not-activated': {
+                    'name': 'visible-not-activated',
+                    'package_root': live_dir,
+                    'manifest_path': manifest_path,
+                    'revision': 'sha256:' + '2' * 64,
+                },
             }
-            service = self._make_service(logger, skills)
+            app = self._make_app(logger, skills)
             query = make_query()
+            skill_loader.register_activated_skill(query, skills['alive'])
 
-            mounts = service.build_skill_extra_mounts(query)
+            mounts = skill_loader.build_execution_mounts(app, query)
 
             assert mounts == [
                 {
                     'host_path': live_dir,
-                    'mount_path': '/workspace/.skills/alive',
-                    'mode': 'rw',
+                    'mount_path': '/opt/langbot-artifacts/' + '1' * 64,
+                    'mode': 'ro',
+                    'content_digest': 'sha256:' + '1' * 64,
+                    'manifest_path': manifest_path,
                 }
             ]
-            # Warning logged so operators can see what was dropped
-            assert any(
-                'ghost' in str(call.args[0]) and 'package_root missing' in str(call.args[0])
-                for call in logger.warning.call_args_list
-            )
 
-    def test_trusts_box_paths_when_filesystem_not_shared(self):
-        """In separated deployments (Docker Compose, k8s sidecar,
-        --standalone-box, remote endpoint) the Box runtime owns its own
-        filesystem. package_root values it reports are NOT resolvable on the
-        LangBot side, so LangBot must trust them rather than dropping every
-        skill via a local isdir() check."""
+    def test_missing_pinned_revision_fails_instead_of_being_skipped(self):
         logger = Mock()
         skills = {
-            'a': {'name': 'a', 'package_root': '/box/skills/a'},
-            'b': {'name': 'b', 'package_root': '/box/skills/b'},
+            'a': {
+                'name': 'a',
+                'package_root': '/box/skills/a',
+                'manifest_path': '/box/skills/manifest.json',
+                'revision': 'sha256:' + '1' * 64,
+            }
         }
-        service = self._make_service(logger, skills, shares_filesystem=False)
+        app = self._make_app(logger, skills)
+        query = make_query()
+        skill_loader.register_activated_skill(query, skills['a'])
 
-        mounts = service.build_skill_extra_mounts(make_query())
+        with pytest.raises(ValueError, match='cannot be recovered safely'):
+            skill_loader.build_execution_mounts(app, query)
 
-        assert mounts == [
-            {'host_path': '/box/skills/a', 'mount_path': '/workspace/.skills/a', 'mode': 'rw'},
-            {'host_path': '/box/skills/b', 'mount_path': '/workspace/.skills/b', 'mode': 'rw'},
-        ]
-        # No skill is dropped, so no "missing" warning should be logged.
-        assert not any('package_root missing' in str(call.args[0]) for call in logger.warning.call_args_list)
-
-    def test_skips_skill_with_empty_package_root(self):
+    def test_rejects_activated_skill_with_empty_package_root(self):
         logger = Mock()
         skills = {
-            'no_root': {'name': 'no_root', 'package_root': ''},
-            'whitespace': {'name': 'whitespace', 'package_root': '   '},
+            'no_root': {
+                'name': 'no_root',
+                'package_root': '',
+                'manifest_path': '',
+                'revision': 'sha256:' + '1' * 64,
+            }
         }
-        service = self._make_service(logger, skills)
+        app = self._make_app(logger, skills)
+        query = make_query()
+        skill_loader.register_activated_skill(query, skills['no_root'])
 
-        assert service.build_skill_extra_mounts(make_query()) == []
-
-    def test_empty_package_root_skipped_even_when_not_shared(self):
-        """An empty package_root is always invalid regardless of topology."""
-        logger = Mock()
-        skills = {'no_root': {'name': 'no_root', 'package_root': ''}}
-        service = self._make_service(logger, skills, shares_filesystem=False)
-
-        assert service.build_skill_extra_mounts(make_query()) == []
+        with pytest.raises(ValueError, match='no immutable package root'):
+            skill_loader.build_execution_mounts(app, query)
 
     def test_returns_empty_when_no_skill_manager(self):
         logger = Mock()
         app = make_app(logger)
         # no skill_mgr attribute
-        service = BoxService(app, client=Mock(spec=BoxRuntimeClient))
-
-        assert service.build_skill_extra_mounts(make_query()) == []
+        assert skill_loader.build_execution_mounts(app, make_query()) == []
 
 
 # ── Attachment passthrough (inbound / outbound) ─────────────────────────────
@@ -1919,7 +2078,7 @@ class TestAttachmentHelpers:
             {'name': 'report.pdf', 'b64': 'CCC'},
             {'name': 'sub/dir/photo.JPG', 'b64': 'DDD'},
             {'name': 'noext', 'b64': 'EEE'},
-            {'name': 'skip', 'b64': ''},  # dropped (no payload)
+            {'name': 'empty.txt', 'b64': ''},  # valid zero-byte file
         ]
         out = BoxService._classify_outbound_entries(entries)
         by_name = {a['name']: a for a in out}
@@ -1932,7 +2091,7 @@ class TestAttachmentHelpers:
         # nested path collapses to basename, case-insensitive ext
         assert by_name['photo.JPG']['type'] == 'Image'
         assert by_name['noext']['type'] == 'File'
-        assert 'skip' not in by_name
+        assert by_name['empty.txt']['base64'] == ''
 
     @pytest.mark.asyncio
     async def test_component_to_bytes_from_data_uri(self):
@@ -1965,13 +2124,26 @@ class TestAttachmentHelpers:
 
 
 class TestInboundOutboundRoundTrip:
+    @staticmethod
+    async def _execute_command(command, workspace):
+        process = await asyncio.create_subprocess_exec(
+            '/bin/sh',
+            '-c',
+            command.replace('/workspace', str(workspace)),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        assert process.returncode == 0, stderr.decode()
+        return stdout.decode().replace(str(workspace), '/workspace')
+
     def _service(self) -> BoxService:
         service = BoxService(make_app(Mock()), client=Mock(spec=BoxRuntimeClient))
         service._available = True
         return service
 
     @pytest.mark.asyncio
-    async def test_materialize_inbound_writes_and_describes(self):
+    async def test_materialize_inbound_writes_and_describes(self, tmp_path):
         import base64
 
         import langbot_plugin.api.entities.builtin.platform.message as platform_message
@@ -1989,14 +2161,9 @@ class TestInboundOutboundRoundTrip:
             ]
         )
 
-        # Mock the sandbox write path: echo back the written paths.
         async def fake_execute_tool(parameters, q):
-            assert '/workspace/inbox/' in parameters['command']
-            return {
-                'ok': True,
-                'stdout': '["/workspace/inbox/query-42/image_1.png"]',
-                'stderr': '',
-            }
+            assert q is query
+            return {'ok': True, 'stdout': await self._execute_command(parameters['command'], tmp_path), 'stderr': ''}
 
         service.execute_tool = AsyncMock(side_effect=fake_execute_tool)
 
@@ -2006,6 +2173,7 @@ class TestInboundOutboundRoundTrip:
         assert d['type'] == 'Image'
         assert d['path'] == '/workspace/inbox/query-42/image_1.png'
         assert d['size'] == len(img_bytes)
+        assert (tmp_path / 'inbox/query-42/image_1.png').read_bytes() == img_bytes
 
     @pytest.mark.asyncio
     async def test_materialize_inbound_noop_without_attachments(self):
@@ -2019,44 +2187,40 @@ class TestInboundOutboundRoundTrip:
         service.execute_tool.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_collect_outbound_reads_and_clears(self):
+    async def test_collect_outbound_reads_and_clears(self, tmp_path):
         service = self._service()
         query = make_query()
+        outbox = tmp_path / 'outbox/query-42'
+        outbox.mkdir(parents=True)
+        (outbox / 'out.png').write_bytes(b'ABC')
+        guard = tmp_path / 'outbox/query-other/protected.txt'
+        guard.parent.mkdir()
+        guard.write_bytes(b'other query')
 
-        calls = []
-
-        async def fake_client_execute(spec):
-            cmd = spec.cmd
-            calls.append(cmd)
-            if 'os.scandir' in cmd:
-                return BoxExecutionResult(
-                    session_id='s',
-                    backend_name='test',
-                    status=BoxExecutionStatus.COMPLETED,
-                    exit_code=0,
-                    stdout='[{"name": "out.png", "b64": "QUJD"}]',
-                    duration_ms=10,
-                )
-            # the rm -rf cleanup call
+        async def fake_client_execute(spec, *, action_context=None):
+            assert action_context == _ACTION_CONTEXT
             return BoxExecutionResult(
                 session_id='s',
                 backend_name='test',
                 status=BoxExecutionStatus.COMPLETED,
                 exit_code=0,
-                stdout='',
+                stdout=await self._execute_command(spec.cmd, tmp_path),
                 duration_ms=10,
             )
 
+        async def fake_execute_tool(parameters, q):
+            assert q is query
+            return {'ok': True, 'stdout': await self._execute_command(parameters['command'], tmp_path), 'stderr': ''}
+
         service.client.execute = AsyncMock(side_effect=fake_client_execute)
-        service.execute_tool = AsyncMock(return_value={'ok': True, 'stdout': '', 'stderr': ''})
+        service.execute_tool = AsyncMock(side_effect=fake_execute_tool)
 
         attachments = await service.collect_outbound_attachments(query)
-        assert len(attachments) == 1
-        assert attachments[0]['type'] == 'Image'
-        assert attachments[0]['name'] == 'out.png'
-        # cleanup (rm -rf) must have been issued after a successful collection
-        service.execute_tool.assert_awaited_once()
-        assert 'rm -rf' in service.execute_tool.await_args.args[0]['command']
+
+        assert attachments == [{'type': 'Image', 'name': 'out.png', 'base64': 'data:image/png;base64,QUJD'}]
+        assert not (outbox / 'out.png').exists()
+        assert guard.read_bytes() == b'other query'
+        assert await service.collect_outbound_attachments(query) == []
 
     @pytest.mark.asyncio
     async def test_collect_outbound_empty_still_clears(self):
@@ -2068,7 +2232,8 @@ class TestInboundOutboundRoundTrip:
 
         calls = []
 
-        async def fake_client_execute(spec):
+        async def fake_client_execute(spec, *, action_context):
+            assert action_context == _ACTION_CONTEXT
             cmd = spec.cmd
             calls.append(cmd)
             if 'os.scandir' in cmd:
@@ -2092,9 +2257,9 @@ class TestInboundOutboundRoundTrip:
         service.client.execute = AsyncMock(side_effect=fake_client_execute)
         service.execute_tool = AsyncMock(return_value={'ok': True, 'stdout': '', 'stderr': ''})
         assert await service.collect_outbound_attachments(query) == []
-        # cleanup (rm -rf) is issued unconditionally now
+        # Cleanup is issued even when the outbox is empty.
         service.execute_tool.assert_awaited_once()
-        assert 'rm -rf' in service.execute_tool.await_args.args[0]['command']
+        assert 'clear_directory' in service.execute_tool.await_args.args[0]['command']
 
     @pytest.mark.asyncio
     async def test_passthrough_noop_when_unavailable(self):
@@ -2162,6 +2327,7 @@ class TestAttachmentHostPath:
         stale_dir = os.path.join(ws, 'inbox', 'query-42')
         os.makedirs(stale_dir, exist_ok=True)
         pathlib.Path(stale_dir, 'image_1.png').write_bytes(b'STALE-OLD-IMAGE')
+        pathlib.Path(stale_dir, 'leftover-secret.txt').write_bytes(b'STALE-OTHER-FILE')
 
         new = b'\x89PNG\r\n\x1a\n NEW'
         b64 = 'data:image/png;base64,' + base64.b64encode(new).decode()
@@ -2175,6 +2341,7 @@ class TestAttachmentHostPath:
         assert host_bytes == new
         # No leftover content from the stale image.
         assert b'STALE-OLD-IMAGE' not in host_bytes
+        assert sorted(os.listdir(stale_dir)) == ['image_1.png']
 
     @pytest.mark.asyncio
     async def test_inbound_host_replaces_query_symlink_without_touching_other_workspace(self, tmp_path):
@@ -2267,7 +2434,7 @@ class TestAttachmentHostPath:
         for index in range(513):
             os.symlink(harmless_target, os.path.join(outbox, f'entry-{index}'))
 
-        with pytest.raises(BoxValidationError, match='symbolic link'):
+        with pytest.raises(BoxValidationError, match='directory-entry limit'):
             await service.collect_outbound_attachments(query)
         assert harmless_target.read_bytes() == b'x'
 
@@ -2386,3 +2553,62 @@ async def test_execution_cannot_override_runner_bound_session():
         await service.execute_spec_payload({'cmd': 'true', 'session_id': 'other-box'}, make_query())
 
     assert backend.start_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_preserves_trusted_read_only_mounts(tmp_path):
+    logger = Mock()
+    backend = FakeBackend(logger)
+    runtime = BoxRuntime(logger=logger, backends=[backend], session_ttl_sec=300)
+    service = BoxService(
+        make_app(logger, allowed_mount_roots=[str(tmp_path)]),
+        client=_InProcessBoxRuntimeClient(logger, runtime),
+    )
+    package = tmp_path / 'published'
+    package.mkdir()
+    await service.initialize()
+    try:
+        result = await service.execute_tool(
+            {'command': 'cat /workspace/.skills/demo/SKILL.md'},
+            make_query(),
+            read_only_mounts=[{'host_path': str(package), 'mount_path': '/workspace/.skills/demo', 'mode': 'ro'}],
+        )
+        assert result['exit_code'] == 0
+        assert len(backend.start_specs) == 1
+        mount = backend.start_specs[0].extra_mounts[0]
+        assert mount.host_path == str(package)
+        assert mount.mount_path == '/workspace/.skills/demo'
+        assert mount.mode == BoxHostMountMode.READ_ONLY
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.skipif('backend' not in BoxSpec.model_fields, reason='requires in-tree Box SDK')
+def test_workspace_admin_caps_also_constrain_inherited_defaults_and_numeric_strings():
+    app = make_app(Mock())
+    app.instance_config.data['box']['workspace_limit_caps'] = {
+        'memory_mb': 64,
+        'cpus': 0.5,
+        'pids_limit': 16,
+        'timeout_sec': 5,
+        'idle_ttl_sec': 60,
+        'max_sessions': 2,
+        'workspace_quota_mb': 10,
+    }
+    box = BoxService(app, client=Mock())
+    for payload in ({}, {'memory_mb': '2048', 'cpus': '4', 'pids_limit': '512', 'timeout_sec': '90'}):
+        spec = box.build_spec({'session_id': 'limits', 'backend': 'docker', **payload}, skip_host_mount_validation=True)
+        assert spec.memory_mb == 64 and spec.cpus == 0.5 and spec.pids_limit == 16
+        assert spec.timeout_sec == 5 and spec.idle_ttl_sec == 60 and spec.workspace_max_sessions == 2
+        assert spec.workspace_quota_mb == 10
+
+
+def test_default_template_can_build_a_box_with_the_installed_sdk():
+    import yaml
+
+    template = pathlib.Path(__file__).resolve().parents[3] / 'src/langbot/templates/config.yaml'
+    app = make_app(Mock())
+    app.instance_config.data = yaml.safe_load(template.read_text())
+    box = BoxService(app, client=Mock())
+    spec = box.build_spec({'session_id': 'fresh-install'}, skip_host_mount_validation=True)
+    assert spec.session_id == 'fresh-install' and spec.timeout_sec > 0

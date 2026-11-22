@@ -11,6 +11,7 @@ Official Node.js SDK: https://github.com/WecomTeam/aibot-node-sdk
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import secrets
 import time
@@ -59,10 +60,16 @@ _UPLOAD_CHUNK_SIZE = 512 * 1024
 
 _DEDUP_CACHE_MAX = 4096
 _STREAM_CACHE_MAX = 1024
+_INTERACTION_STREAM_MAX_AGE_SECONDS = 570
 _FEEDBACK_CACHE_MAX = 4096
 _PENDING_FORM_MAX = 1024
 _PENDING_FORM_TTL_SECONDS = 1800
 _MAX_STREAM_CONTENT_CHARS = 200000
+# Minimum spacing between two intermediate stream frames. WeCom replaces the
+# whole bubble on every frame and every frame must carry the complete snapshot,
+# so forwarding each runner chunk re-uploads the growing answer again and
+# again. Final chunks bypass the throttle, so the reply still ends promptly.
+_STREAM_PUSH_MIN_INTERVAL = 0.3
 _MAX_CALLBACK_TASKS = 100
 _MAX_REPLY_WORKERS = 100
 _MAX_REPLY_QUEUE_SIZE = 100
@@ -134,8 +141,16 @@ class WecomBotWsClient:
         self._stream_ids: dict[str, str] = {}  # msg_id -> req_id|stream_id
         # Dedup: skip sending when content hasn't changed
         self._stream_last_content: dict[str, str] = {}  # msg_id -> last content sent
+        # Latest accepted snapshot, including frames skipped by the throttle.
+        self._stream_latest_content: dict[str, str] = {}
+        # Throttle: msg_id -> monotonic timestamp of the last frame sent
+        self._stream_last_push_at: dict[str, float] = {}
+        # Preserve completion identity after removing active stream mappings.
+        # A runner may emit both a final delta and a completed message snapshot.
+        self._completed_stream_content: dict[str, str] = {}
         # Stream session info for feedback tracking
         self._stream_sessions: dict[str, dict] = {}  # msg_id -> session info
+        self._interaction_stream_origins: dict[str, dict] = {}  # msg_id -> original callback context
         # Feedback tracking: feedback_id -> session info
         self._feedback_sessions: dict[str, dict] = {}  # feedback_id -> {msg_id, user_id, chat_id, stream_id, req_id}
         # msg_id -> feedback_id (for associating feedback with message)
@@ -146,6 +161,7 @@ class WecomBotWsClient:
         # context on click).
         # task_id -> {form_data, msg_id, user_id, chat_id, stream_id, req_id}
         self._pending_forms_by_task: dict[str, dict] = {}
+        self._handled_form_tasks: dict[str, float] = {}
         # Reverse: msg_id -> task_id (for cleanup when stream finishes).
         self._task_id_by_msg: dict[str, str] = {}
         # Optional card-action callback registered by the adapter.
@@ -168,9 +184,77 @@ class WecomBotWsClient:
             self._stream_sessions.pop(msg_id, None)
             self._stream_ids.pop(msg_id, None)
             self._stream_last_content.pop(msg_id, None)
+            self._stream_latest_content.pop(msg_id, None)
+            self._stream_last_push_at.pop(msg_id, None)
             task_id = self._task_id_by_msg.pop(msg_id, None)
             if task_id:
                 self._pending_forms_by_task.pop(task_id, None)
+
+    async def finish_stream_for_interaction(self, msg_id: str) -> bool:
+        """Release an unused stream or finish text already shown before a card."""
+        key = self._stream_ids.get(msg_id)
+        if not key:
+            return True
+        session = self._stream_sessions.get(msg_id, {})
+        if not self._stream_sessions.get(msg_id, {}).get('stream_started'):
+            self._remember_interaction_stream_origin(msg_id, session)
+            self._stream_ids.pop(msg_id, None)
+            self._stream_last_content.pop(msg_id, None)
+            self._stream_sessions.pop(msg_id, None)
+            return True
+        req_id, stream_id = key.split('|', 1)
+        content = self._stream_last_content.get(msg_id, '')
+        try:
+            ack = await self.reply_stream(req_id, stream_id, content, finish=True)
+        except Exception:
+            await self.logger.warning(f'Failed to finish WeCom loading stream: {traceback.format_exc()}')
+            return False
+        if not isinstance(ack, dict) or ack.get('errcode', 0) != 0:
+            detail = ack.get('errmsg', ack.get('errcode')) if isinstance(ack, dict) else 'no acknowledgement'
+            await self.logger.warning(f'Failed to finish WeCom loading stream: {detail}')
+            return False
+        self._remember_interaction_stream_origin(msg_id, session)
+        self._stream_ids.pop(msg_id, None)
+        self._stream_last_content.pop(msg_id, None)
+        self._stream_sessions.pop(msg_id, None)
+        return True
+
+    def _remember_interaction_stream_origin(self, msg_id: str, session: dict) -> None:
+        if session.get('req_id'):
+            self._interaction_stream_origins[msg_id] = {
+                key: session.get(key) for key in ('req_id', 'user_id', 'chat_id', 'created_at')
+            }
+            self._cap_mapping(self._interaction_stream_origins, _STREAM_CACHE_MAX)
+
+    def begin_interaction_stream(self, msg_id: str, target_type: str, target_id: str) -> bool:
+        """Use a fresh stream ID so the resumed answer appears after the card."""
+        origin = self._interaction_stream_origins.get(msg_id)
+        if not origin or msg_id in self._stream_ids:
+            return False
+        age = time.monotonic() - float(origin.get('created_at') or 0)
+        if age >= _INTERACTION_STREAM_MAX_AGE_SECONDS:
+            self._interaction_stream_origins.pop(msg_id, None)
+            return False
+        expected = origin.get('chat_id') if target_type == 'group' else origin.get('user_id')
+        if target_type not in {'group', 'person', 'private'} or str(expected or '') != target_id:
+            return False
+        stream_id = _generate_req_id('stream')
+        self._stream_ids[msg_id] = f'{origin["req_id"]}|{stream_id}'
+        self._stream_sessions[msg_id] = {**origin, 'stream_id': stream_id, 'stream_started': False}
+        self._prune_stream_state()
+        return True
+
+    async def push_interaction_stream_chunk(self, msg_id: str, content: str, is_final: bool) -> bool:
+        first_frame = not self._stream_sessions.get(msg_id, {}).get('stream_started')
+        if await self.push_stream_chunk(msg_id, content, is_final=is_final):
+            if first_frame and (is_final or self._stream_sessions.get(msg_id, {}).get('stream_started')):
+                await self.logger.info(f'WeCom interaction reply stream accepted for message {msg_id}')
+            return True
+        await self.logger.warning(f'WeCom interaction reply stream unavailable for message {msg_id}')
+        self._stream_ids.pop(msg_id, None)
+        self._stream_last_content.pop(msg_id, None)
+        self._stream_sessions.pop(msg_id, None)
+        return False
 
     def _prune_pending_forms(self) -> None:
         cutoff = time.monotonic() - _PENDING_FORM_TTL_SECONDS
@@ -248,7 +332,10 @@ class WecomBotWsClient:
         self._callback_tasks.clear()
         self._stream_ids.clear()
         self._stream_last_content.clear()
+        self._stream_latest_content.clear()
+        self._stream_last_push_at.clear()
         self._stream_sessions.clear()
+        self._interaction_stream_origins.clear()
         self._feedback_sessions.clear()
         self._msg_feedback_ids.clear()
         self._pending_forms_by_task.clear()
@@ -319,6 +406,12 @@ class WecomBotWsClient:
             'stream': stream_payload,
         }
         return await self._send_reply(req_id, body)
+
+    async def reply_welcome(self, req_id: str, content: str) -> Optional[dict]:
+        """Reply to enter_chat using the dedicated welcome command."""
+        return await self._send_reply(
+            req_id, {'msgtype': 'text', 'text': {'content': content}}, cmd=CMD_RESPOND_WELCOME
+        )
 
     async def reply_text(self, req_id: str, content: str) -> Optional[dict]:
         """Send a non-streaming text reply.
@@ -426,6 +519,8 @@ class WecomBotWsClient:
 
             self._stream_ids.pop(msg_id, None)
             self._stream_last_content.pop(msg_id, None)
+            self._stream_latest_content.pop(msg_id, None)
+            self._stream_last_push_at.pop(msg_id, None)
             self._stream_sessions.pop(msg_id, None)
             return True, stream_id, None
 
@@ -461,6 +556,8 @@ class WecomBotWsClient:
         # push_stream_chunk calls for this msg_id become no-ops.
         self._stream_ids.pop(msg_id, None)
         self._stream_last_content.pop(msg_id, None)
+        self._stream_latest_content.pop(msg_id, None)
+        self._stream_last_push_at.pop(msg_id, None)
         # Keep _stream_sessions so the button callback can still resolve
         # user/chat context; it gets cleaned up when the click fires.
 
@@ -661,18 +758,24 @@ class WecomBotWsClient:
         """
         key = self._stream_ids.get(msg_id)
         if not key:
+            if is_final and self._completed_stream_content.get(msg_id) == hashlib.sha256(content.encode()).hexdigest():
+                return True
             return False
         req_id, stream_id = key.split('|', 1)
         try:
             previous_content = self._stream_last_content.get(msg_id, '')
-            if previous_content and content.startswith(previous_content):
-                next_content = content
-            elif previous_content and not content:
-                next_content = previous_content
-            else:
-                next_content = previous_content + content if previous_content else content
+            # Pipeline delivery provides complete snapshots, including edits
+            # that need not start with the previous text (e.g. reasoning tags).
+            next_content = content or self._stream_latest_content.get(msg_id, previous_content)
             if len(next_content) > _MAX_STREAM_CONTENT_CHARS:
                 next_content = next_content[-_MAX_STREAM_CONTENT_CHARS:]
+
+            # Remember valid snapshots before deduplication: an edit can revert
+            # a throttled snapshot to the last sent text before an empty final.
+            import re as _re
+
+            if _re.sub(r'[\s\u200b\u200c\u200d\ufeff]', '', next_content):
+                self._stream_latest_content[msg_id] = next_content
 
             # Skip sending if content hasn't changed (e.g. during tool call argument streaming)
             if not is_final and next_content == previous_content:
@@ -703,6 +806,21 @@ class WecomBotWsClient:
                 if not _re.sub(r'[\s\u200b\u200c\u200d\ufeff]', '', next_content):
                     return True
 
+            # Throttle intermediate frames. Every frame carries the complete
+            # snapshot, so dropping one loses nothing; the next frame already
+            # contains everything that was skipped. The final chunk is never
+            # throttled, so a reply always terminates promptly.
+            if not is_final:
+                now = time.monotonic()
+                last_push_at = self._stream_last_push_at.get(msg_id)
+                # A missing entry means "nothing sent yet", not "sent at 0.0":
+                # time.monotonic() has an arbitrary origin, so on a freshly
+                # booted host a raw reading can be smaller than the interval
+                # and the first frame of a message would be dropped.
+                if last_push_at is not None and now - last_push_at < _STREAM_PUSH_MIN_INTERVAL:
+                    return True
+                self._stream_last_push_at[msg_id] = now
+
             # Generate feedback_id for final chunk
             feedback_id = ''
             if is_final:
@@ -717,11 +835,20 @@ class WecomBotWsClient:
 
             # WeCom replaces the displayed stream content on each refresh, so
             # every frame must contain the complete snapshot, not only a delta.
-            await self.reply_stream(req_id, stream_id, next_content, finish=is_final, feedback_id=feedback_id)
+            ack = await self.reply_stream(req_id, stream_id, next_content, finish=is_final, feedback_id=feedback_id)
+            if not isinstance(ack, dict) or ack.get('errcode', 0) != 0:
+                detail = ack.get('errmsg', ack.get('errcode')) if isinstance(ack, dict) else 'no acknowledgement'
+                raise RuntimeError(f'WeCom stream frame rejected: {detail}')
             self._stream_last_content[msg_id] = next_content
+            if msg_id in self._stream_sessions:
+                self._stream_sessions[msg_id]['stream_started'] = True
             if is_final:
+                self._completed_stream_content[msg_id] = hashlib.sha256(next_content.encode()).hexdigest()
+                self._cap_mapping(self._completed_stream_content, _STREAM_CACHE_MAX)
                 self._stream_ids.pop(msg_id, None)
                 self._stream_last_content.pop(msg_id, None)
+                self._stream_latest_content.pop(msg_id, None)
+                self._stream_last_push_at.pop(msg_id, None)
                 self._stream_sessions.pop(msg_id, None)
             return True
         except Exception:
@@ -834,6 +961,12 @@ class WecomBotWsClient:
                 try:
                     await self._send_frame(frame)
                 except Exception:
+                    # A failed ping must also interrupt the listener. Otherwise
+                    # the heartbeat task exits while the receive loop can remain
+                    # blocked on an apparently open socket indefinitely.
+                    await self.logger.warning('Heartbeat send failed; closing WebSocket to reconnect')
+                    if self._ws and not self._ws.closed:
+                        await self._ws.close()
                     break
         except asyncio.CancelledError:
             pass
@@ -950,15 +1083,11 @@ class WecomBotWsClient:
                     'user_id': message_data.get('userid', ''),
                     'chat_id': message_data.get('chatid', ''),
                     'chat_type': message_data.get('type', 'single'),
+                    'stream_started': False,
+                    'created_at': time.monotonic(),
                 }
+                self._remember_interaction_stream_origin(msg_id, self._stream_sessions[msg_id])
                 self._prune_stream_state()
-                # Send an initial empty stream frame so the WeCom client
-                # shows its built-in loading spinner while the pipeline
-                # processes the message (e.g. RAG retrieval).
-                try:
-                    await self.reply_stream(req_id, stream_id, '', finish=False)
-                except Exception:
-                    await self.logger.warning(f'Failed to send initial stream frame: {traceback.format_exc()}')
             message_data['stream_id'] = stream_id
             message_data['req_id'] = req_id
 
@@ -981,6 +1110,7 @@ class WecomBotWsClient:
                 await self.logger.debug(f'Received event_callback event_type={event_type}')
 
             message_data = {
+                **body,
                 'msgtype': 'event',
                 'type': body.get('chattype', 'single'),
                 'event': event_info,
@@ -1064,15 +1194,35 @@ class WecomBotWsClient:
             f'Received template_card_event (ws): task_id={task_id} event_key={event_key!r} card_type={card_type}'
         )
 
+        now = time.monotonic()
+        self._handled_form_tasks = {key: seen for key, seen in self._handled_form_tasks.items() if now - seen < 3600}
+        if task_id in self._handled_form_tasks:
+            return
         pending = self._pending_forms_by_task.get(task_id)
         if pending is None:
-            await self.logger.warning(f'No pending_form found for task_id={task_id} (ws); card event ignored')
+            # Expired managed forms must not start a new business execution.
+            if task_id.startswith('dify-'):
+                return
+            event = wecombotevent.WecomBotEvent(
+                {
+                    **body,
+                    'type': body.get('chattype', 'single'),
+                    'msgtype': 'event',
+                    'eventtype': 'template_card_event',
+                    'req_id': frame.get('headers', {}).get('req_id', ''),
+                }
+            )
+            for handler in self._message_handlers.get('template_card_event', []):
+                await handler(event)
             return
         if time.monotonic() - float(pending.get('created_at', 0.0)) > _PENDING_FORM_TTL_SECONDS:
             self._drop_pending_form_task(task_id, pending)
             await self.logger.warning(f'Pending form expired for task_id={task_id} (ws)')
             return
 
+        self._handled_form_tasks[task_id] = now
+        if len(self._handled_form_tasks) > 2048:
+            self._handled_form_tasks.pop(next(iter(self._handled_form_tasks)))
         req_id_for_update = frame.get('headers', {}).get('req_id', '')
         form_data = pending.get('form_data', {}) or {}
         selections = extract_template_card_selections(tce, form_data)
@@ -1120,6 +1270,9 @@ class WecomBotWsClient:
         self._drop_pending_form_task(task_id, pending)
 
     def _drop_pending_form_task(self, task_id: str, pending: dict) -> None:
+        self._handled_form_tasks[task_id] = time.monotonic()
+        if len(self._handled_form_tasks) > 2048:
+            self._handled_form_tasks.pop(next(iter(self._handled_form_tasks)))
         self._pending_forms_by_task.pop(task_id, None)
         msg_id = pending.get('msg_id', '')
         if msg_id:

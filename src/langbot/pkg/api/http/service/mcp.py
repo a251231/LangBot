@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ....i18n import t
+
 import copy
 import re
 import uuid
@@ -60,6 +62,11 @@ _SENSITIVE_KEY_QUALIFIERS = frozenset(
 )
 
 
+def _validate_mcp_mode(mode: object) -> None:
+    if mode not in ('stdio', 'remote', 'sse', 'http'):
+        raise ValueError('MCP server mode must be one of: stdio, remote, sse, http')
+
+
 def _normalize_config_key(key: object) -> str:
     value = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', str(key or ''))
     return re.sub(r'[^a-zA-Z0-9]+', '_', value).strip('_').lower()
@@ -85,6 +92,26 @@ def _mask_secret_structure(value):
     if value is None or value == '':
         return value
     return _SECRET_MASK
+
+
+_MCP_PLACEHOLDER = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
+
+
+def unfilled_mcp_placeholders(extra_args) -> list[str]:
+    """Return placeholder names still present in a remote MCP's url/headers."""
+
+    if not isinstance(extra_args, dict):
+        return []
+    values = [str(extra_args.get('url') or '')]
+    headers = extra_args.get('headers')
+    if isinstance(headers, dict):
+        values.extend(str(v) for v in headers.values())
+    names: list[str] = []
+    for value in values:
+        for name in _MCP_PLACEHOLDER.findall(value):
+            if name not in names:
+                names.append(name)
+    return names
 
 
 def redact_mcp_secrets(value):
@@ -208,11 +235,15 @@ class MCPService:
         execution_context = await self._execution_context(context)
         workspace_uuid = execution_context.workspace_uuid
 
+        _validate_mcp_mode(server_data.get('mode'))
+
         # This gate is independent of Box availability.  Cloud v2 disables
         # stdio MCP even though Box Runtime itself remains available.
         require_stdio_mcp_enabled(self.ap, server_data)
 
-        limitation = self.ap.instance_config.data.get('system', {}).get('limitation', {})
+        from .workspace_limits import workspace_limits
+
+        limitation = await workspace_limits(self.ap, workspace_uuid)
         max_extensions = limitation.get('max_extensions', -1)
         if max_extensions >= 0:
             mcp_count_result = await self.ap.persistence_mgr.execute_async(
@@ -226,7 +257,9 @@ class MCPService:
                 .where(persistence_plugin.PluginSetting.workspace_uuid == workspace_uuid)
             )
             if (mcp_count_result.scalar() or 0) + (plugin_count_result.scalar() or 0) >= max_extensions:
-                raise ValueError(f'Maximum number of extensions ({max_extensions}) reached')
+                raise ValueError(
+                    t('Maximum number of {resource} ({limit}) reached', resource=t('extensions'), limit=max_extensions)
+                )
 
         payload = dict(server_data)
         payload.pop('workspace_uuid', None)
@@ -244,7 +277,7 @@ class MCPService:
             )
         )
         if existing_result.first() is not None:
-            raise ValueError(f'MCP server already exists: {server_name}')
+            raise ValueError(t('MCP server already exists: {name}', name=server_name))
 
         await self.ap.persistence_mgr.execute_async(sqlalchemy.insert(persistence_mcp.MCPServer).values(payload))
         created = await self._get_mcp_server_by_uuid_raw(execution_context, payload['uuid'])
@@ -295,7 +328,11 @@ class MCPService:
             **server_data,
             'runtime_info': session.get_runtime_info_dict() if session else None,
         }
-        return redact_mcp_secrets(response_data)
+        redacted = redact_mcp_secrets(response_data)
+        # Names (never values) of ``${VAR}`` placeholders left by a community
+        # MCP install (LANG-439); the masked config cannot reveal them.
+        redacted['unfilled_inputs'] = unfilled_mcp_placeholders(server_data.get('extra_args'))
+        return redacted
 
     async def _get_mcp_server_by_name_raw(
         self,
@@ -324,13 +361,15 @@ class MCPService:
         payload.pop('uuid', None)
         payload.pop('workspace_uuid', None)
         payload = restore_mcp_secret_placeholders(payload, old_server)
+        if 'mode' in payload:
+            _validate_mcp_mode(payload['mode'])
         if 'name' in payload:
             payload['name'] = str(payload['name'] or '').strip()
             if not payload['name']:
                 raise ValueError('MCP server name is required')
             duplicate = await self._get_mcp_server_by_name_raw(execution_context, payload['name'])
             if duplicate is not None and duplicate['uuid'] != server_uuid:
-                raise ValueError(f'MCP server already exists: {payload["name"]}')
+                raise ValueError(t('MCP server already exists: {name}', name=payload['name']))
 
         effective_server = {**old_server, **payload}
         # Existing disabled rows remain readable/deletable.  Switching away

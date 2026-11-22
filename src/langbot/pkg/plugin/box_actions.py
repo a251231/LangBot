@@ -3,6 +3,7 @@
 from langbot_plugin.entities.io.actions.enums import PluginToRuntimeAction as Action
 from langbot_plugin.runtime.io.handler import ActionResponse
 from ..box.runner import RunnerBoxService
+from ..box.export_errors import BoxExportError
 from .agent_run_support import _validate_agent_run_session
 
 
@@ -14,7 +15,13 @@ def register(h):
         context = h._execution_context(action_context)
         query = None
         run_id = data.get('run_id')
-        context_actions = {Action.BIND_BOX, Action.IMPORT_BOX_ATTACHMENTS, Action.EXPORT_BOX_FILES}
+        context_actions = {
+            Action.BIND_BOX,
+            Action.IMPORT_BOX_ATTACHMENTS,
+            Action.EXPORT_BOX_FILES,
+            Action.READ_RUN_FILE,
+            Action.COMMIT_RUN_FILES,
+        }
         if action in context_actions and not run_id:
             return ActionResponse.error('run_id is required for Box context operations')
         if run_id:
@@ -45,7 +52,21 @@ def register(h):
         if action == Action.IMPORT_BOX_ATTACHMENTS:
             return ActionResponse.success(await service.import_attachments(query, data.get('attachment_ids')))
         if action == Action.EXPORT_BOX_FILES:
-            return ActionResponse.success(await service.export_files(query))
+            return ActionResponse.success(await service.export_files(query, data.get('paths')))
+        if action == Action.READ_RUN_FILE:
+            return ActionResponse.success(
+                await service.read_file(
+                    query,
+                    data['file_id'],
+                    **{
+                        key: data[key]
+                        for key in ('mode', 'offset', 'max_chars', 'page_start', 'page_end')
+                        if key in data
+                    },
+                )
+            )
+        if action == Action.COMMIT_RUN_FILES:
+            return ActionResponse.success(await service.commit_files(query, data.get('file_ids')))
         raise ValueError('Unsupported Box action')
 
     def register_action(action):
@@ -53,6 +74,8 @@ def register(h):
         async def invoke(data):
             try:
                 return await dispatch(action, data)
+            except BoxExportError as exc:
+                return ActionResponse.error(str(exc), data={'error': exc.error.model_dump(mode='json')})
             except Exception as exc:
                 return ActionResponse.error(f'{type(exc).__name__}: {exc}')
 
@@ -63,5 +86,7 @@ def register(h):
         Action.BIND_BOX,
         Action.IMPORT_BOX_ATTACHMENTS,
         Action.EXPORT_BOX_FILES,
+        Action.READ_RUN_FILE,
+        Action.COMMIT_RUN_FILES,
     ):
         register_action(action)

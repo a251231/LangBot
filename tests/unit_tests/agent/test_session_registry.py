@@ -51,6 +51,107 @@ class TestSessionRegistryBasic:
         assert '_authorized_ids' not in result
 
     @pytest.mark.asyncio
+    async def test_cancel_task_stops_registered_run_owner(self):
+        """Cancel the task captured when the run session was registered."""
+
+        registry = AgentRunSessionRegistry()
+        registered = asyncio.Event()
+        blocker = asyncio.Event()
+
+        async def run_owner():
+            await registry.register(
+                run_id='run_cancel',
+                runner_id='plugin:test/my-runner/default',
+                query_id=1,
+                plugin_identity='test/my-runner',
+                resources=make_resources(),
+                conversation_id='person_1',
+                bot_id='bot_1',
+                workspace_id='workspace_1',
+            )
+            registered.set()
+            await blocker.wait()
+
+        task = asyncio.create_task(run_owner())
+        await registered.wait()
+
+        execution_query = type('Query', (), {'variables': {}})()
+        (await registry.get('run_cancel'))['execution_query'] = execution_query
+
+        assert await registry.cancel_task('run_cancel', reason='stop_command') is True
+        assert execution_query.variables['_runner_cancel_reason'] == 'stop_command'
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await registry.cancel_task('run_cancel') is False
+        await registry.unregister('run_cancel')
+
+    @pytest.mark.asyncio
+    async def test_find_active_target_selects_oldest_matching_scope(self):
+        registry = AgentRunSessionRegistry()
+        cases = [
+            ('wrong_runner', 'plugin:test/other/default', 'conv', 'bot', 'workspace', 'thread'),
+            ('wrong_conversation', 'plugin:test/runner/default', 'other', 'bot', 'workspace', 'thread'),
+            ('wrong_bot', 'plugin:test/runner/default', 'conv', 'other', 'workspace', 'thread'),
+            ('wrong_workspace', 'plugin:test/runner/default', 'conv', 'bot', 'other', 'thread'),
+            ('wrong_thread', 'plugin:test/runner/default', 'conv', 'bot', 'workspace', 'other'),
+            ('newer', 'plugin:test/runner/default', 'conv', 'bot', 'workspace', 'thread'),
+            ('oldest', 'plugin:test/runner/default', 'conv', 'bot', 'workspace', 'thread'),
+        ]
+        for run_id, runner_id, conversation_id, bot_id, workspace_id, thread_id in cases:
+            await registry.register(
+                run_id=run_id,
+                runner_id=runner_id,
+                query_id=1,
+                plugin_identity='test/runner',
+                resources=make_resources(),
+                conversation_id=conversation_id,
+                bot_id=bot_id,
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+                actor_id='actor' if run_id != 'oldest' else 'owner',
+            )
+        (await registry.get('newer'))['status']['started_at'] = 20
+        (await registry.get('oldest'))['status']['started_at'] = 10
+
+        assert (
+            await registry.find_active_target(
+                conversation_id='conv',
+                runner_id='plugin:test/runner/default',
+                bot_id='bot',
+                workspace_id='workspace',
+                thread_id='thread',
+            )
+            == 'oldest'
+        )
+        assert (
+            await registry.find_active_target(
+                conversation_id='conv',
+                runner_id='plugin:test/runner/default',
+                bot_id='bot',
+                workspace_id='workspace',
+                thread_id='thread',
+                actor_id='actor',
+            )
+            == 'newer'
+        )
+        assert (
+            await registry.find_active_target(
+                conversation_id='missing',
+                runner_id='plugin:test/runner/default',
+                bot_id='bot',
+                workspace_id='workspace',
+                thread_id='thread',
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_task_rejects_unknown_run(self):
+        registry = AgentRunSessionRegistry()
+
+        assert await registry.cancel_task('missing') is False
+
+    @pytest.mark.asyncio
     async def test_register_keeps_host_execution_query_by_identity(self):
         """The runtime registry keeps the Host Query view in memory only."""
         registry = AgentRunSessionRegistry()
@@ -294,6 +395,62 @@ class TestSessionRegistryBasic:
 
         assert [item['event']['event_id'] for item in first] == ['event_1']
         assert [item['event']['event_id'] for item in second] == ['event_2']
+
+    @pytest.mark.asyncio
+    async def test_claimed_steering_is_retried_until_acknowledged(self):
+        """Claimed steering survives a repeated pull and is removed only by ack."""
+        registry = AgentRunSessionRegistry()
+        await registry.register(
+            run_id='run_steering_claim',
+            runner_id='plugin:test/my-runner/default',
+            query_id=1,
+            plugin_identity='test/my-runner',
+            resources=make_resources(),
+            conversation_id='conv_1',
+            available_apis={'steering_pull': True, 'steering_ack': True},
+        )
+        await registry.enqueue_steering(
+            'run_steering_claim',
+            {'event': {'event_id': 'event_claimed'}},
+        )
+
+        first = await registry.pull_steering('run_steering_claim', claim=True)
+        assert len(first) == 1
+        delivery_id = first[0]['delivery_id']
+        assert await registry.pull_steering('run_steering_claim', claim=True) == []
+        acknowledged, unknown = await registry.ack_steering('run_steering_claim', [delivery_id, 'missing'])
+        assert acknowledged == [delivery_id]
+        assert unknown == ['missing']
+        assert await registry.pull_steering('run_steering_claim', claim=True) == []
+
+    @pytest.mark.asyncio
+    async def test_restore_steering_rehydrates_after_session_restart(self):
+        """Durable pending input can be restored into a replacement run session."""
+        registry = AgentRunSessionRegistry()
+        await registry.register(
+            run_id='run_steering_restarted',
+            runner_id='plugin:test/my-runner/default',
+            query_id=1,
+            plugin_identity='test/my-runner',
+            resources=make_resources(),
+            conversation_id='conv_1',
+            available_apis={'steering_pull': True, 'steering_ack': True},
+        )
+        assert (
+            await registry.restore_steering(
+                'run_steering_restarted',
+                [
+                    {
+                        'event': {'event_id': 'event_recovered'},
+                        'input': {'text': 'recover me'},
+                    }
+                ],
+            )
+            == 1
+        )
+
+        claimed = await registry.pull_steering('run_steering_restarted', claim=True)
+        assert claimed[0]['event']['event_id'] == 'event_recovered'
 
     @pytest.mark.asyncio
     async def test_enqueue_steering_rejects_when_queue_is_full(self):

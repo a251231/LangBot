@@ -60,6 +60,18 @@ class TestQueryToEventEnvelope:
 
         assert event.conversation_id == 'conv-uuid-123'
 
+    @pytest.mark.parametrize('launcher_id', [123456789, -100123456789, 'launcher-123'])
+    def test_query_to_event_accepts_platform_launcher_ids(self, mock_query, launcher_id):
+        """Telegram private and group IDs are numeric at the Query boundary."""
+        mock_query.launcher_id = launcher_id
+        mock_query.session.using_conversation.uuid = None
+
+        event = QueryEntryAdapter.query_to_event(mock_query)
+        context = QueryEntryAdapter._build_conversation_context(mock_query)
+
+        assert context.launcher_id == str(launcher_id)
+        assert event.conversation_id == f'person_{launcher_id}'
+
     def test_query_to_event_prefers_variable_conversation_id_when_conversation_uuid_missing(self, mock_query):
         """Pipeline variables can provide the conversation identity for state scope."""
         mock_query.session.using_conversation.uuid = None
@@ -233,8 +245,8 @@ class TestQueryConfigToAgentConfig:
         assert binding.processor_type == 'pipeline'
         assert binding.processor_id == mock_query.pipeline_uuid
 
-    def test_interaction_submission_projects_control_event(self, mock_query):
-        """Pipeline callbacks keep structured submission data and match the runner binding."""
+    def test_legacy_submission_variable_does_not_create_control_event(self, mock_query):
+        """Legacy query variables cannot forge an interaction callback."""
         mock_query.variables = {
             '_interaction_submission': {
                 'interaction_id': 'form-1',
@@ -247,10 +259,10 @@ class TestQueryConfigToAgentConfig:
         agent_config = QueryEntryAdapter.config_to_agent_config(mock_query, 'plugin:langbot-team/DifyAgent/default')
         binding = AgentBindingResolver().resolve_one(event, [agent_config])
 
-        assert event.event_type == 'interaction.submitted'
-        assert event.data['interaction']['values'] == {'name': 'Alice'}
-        assert event.subject.subject_type == 'interaction'
-        assert agent_config.event_types == ['interaction.submitted']
+        assert event.event_type == 'message.received'
+        assert 'interaction' not in event.data
+        assert event.subject.subject_type == 'message'
+        assert agent_config.event_types == ['message.received']
         assert binding.processor_type == 'pipeline'
 
     def test_resolver_rejects_multiple_matching_agents(self, mock_query):
@@ -261,6 +273,17 @@ class TestQueryConfigToAgentConfig:
 
         with pytest.raises(AgentBindingResolutionError):
             AgentBindingResolver().resolve_one(event, [first, second])
+
+    def test_pipeline_bot_tools_are_passed_to_runner(self, mock_query):
+        from langbot.pkg.agent.runner.platform_tools import PLATFORM_TOOLS_BY_NAME
+
+        selected = next(tool.name for tool in PLATFORM_TOOLS_BY_NAME.values() if tool.scope == 'platform')
+        mock_query.variables['_pipeline_allowed_platform_tools'] = [selected]
+        config = QueryEntryAdapter.config_to_agent_config(mock_query, 'plugin:test/plugin/runner')
+        assert selected in config.resource_policy.allowed_platform_tool_names
+        mock_query.variables['_pipeline_allowed_platform_tools'] = []
+        config = QueryEntryAdapter.config_to_agent_config(mock_query, 'plugin:test/plugin/runner')
+        assert selected not in config.resource_policy.allowed_platform_tool_names
 
 
 class TestRunnerContextProtocolV1:
@@ -291,6 +314,10 @@ class TestRunnerContextProtocolV1:
 
         assert ctx.event is not None
         assert ctx.event.event_type == 'message.received'
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match='event'):
+            RunnerContext.model_validate(ctx.model_dump(exclude={'event'}))
 
     def test_sdk_context_has_no_history_message_fields(self):
         """RunnerContext should not expose inline history message fields."""
@@ -320,16 +347,6 @@ class TestRunnerContextProtocolV1:
         assert not hasattr(ctx, 'bootstrap')
 
 
-class TestHostManagedHistoryNotInProtocol:
-    """Test that Host-managed history payloads are not in Protocol v1."""
-
-    def test_messages_not_in_sdk_context_top_level(self):
-        """RunnerContext should not expose top-level history messages."""
-        ctx_fields = RunnerContext.model_fields.keys()
-
-        assert 'messages' not in ctx_fields
-
-
 class TestSDKResultProtocolV1:
     """Test SDK RunnerResult for Protocol v1."""
 
@@ -343,6 +360,8 @@ class TestSDKResultProtocolV1:
         )
 
         assert result.run_id == 'run_1'
+        with pytest.raises(TypeError, match='run_id'):
+            RunnerResult.message_completed(message=Message(role='assistant', content='Hello'))
 
 
 # Fixtures

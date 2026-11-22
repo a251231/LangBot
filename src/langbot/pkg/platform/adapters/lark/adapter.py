@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from langbot.pkg.i18n.adapters import adapter_t, localized_adapter
+
 from langbot.pkg.platform.sources.lark import (
     LarkAdapter as LegacyLarkAdapter,
     NonBlockingLarkWSClient,
@@ -9,6 +11,7 @@ import threading
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import time
 import traceback
@@ -46,6 +49,8 @@ from lark_oapi.api.im.v1 import (
     CreateMessageResponse,
     EventMessage,
     EventSender,
+    GetChatRequest,
+    GetMessageRequest,
     P2ImMessageReceiveV1,
     P2ImMessageReceiveV1Data,
     ReplyMessageRequest,
@@ -55,6 +60,8 @@ from lark_oapi.api.im.v1 import (
 import lark_oapi.ws.exception
 import pydantic
 import quart
+
+from .stream_card import build_card, streaming_text
 
 import langbot_plugin.api.definition.abstract.platform.adapter as abstract_platform_adapter
 import langbot_plugin.api.definition.abstract.platform.event_logger as abstract_platform_logger
@@ -73,6 +80,11 @@ from langbot_plugin.api.entities.builtin.platform import entities as platform_en
 from langbot_plugin.api.entities.builtin.platform import events as platform_events
 from langbot_plugin.api.entities.builtin.platform import message as platform_message
 from langbot_plugin.api.entities.builtin.platform.errors import NotSupportedError
+from langbot_plugin.api.entities.builtin.runner.interaction import (
+    InteractionHandle,
+    InteractionRequest,
+    InteractionSubmission,
+)
 
 
 class AESCipher:
@@ -140,13 +152,15 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
     _message_cache: dict[str, platform_events.MessageReceivedEvent] = pydantic.PrivateAttr(default_factory=dict)
     _user_cache: dict[str, platform_entities.User] = pydantic.PrivateAttr(default_factory=dict)
     _group_cache: dict[str, platform_entities.UserGroup] = pydantic.PrivateAttr(default_factory=dict)
+    _bot_open_ids: dict[str, str] = pydantic.PrivateAttr(default_factory=dict)
+    _bot_identity_lock: asyncio.Lock = pydantic.PrivateAttr(default_factory=asyncio.Lock)
     _monitoring_mapping_ttl: int = 600
 
     class Config:
         arbitrary_types_allowed = True
 
     def __init__(self, config: dict, logger: abstract_platform_logger.AbstractEventLogger, **kwargs):
-        required_keys = ['app_id', 'app_secret', 'bot_name']
+        required_keys = ['app_id', 'app_secret']
         missing_keys = [key for key in required_keys if not config.get(key)]
         if missing_keys:
             raise ValueError(f'Lark missing required config: {", ".join(missing_keys)}')
@@ -165,7 +179,7 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             config=config,
             logger=logger,
             lark_tenant_key=config.get('lark_tenant_key', ''),
-            bot_account_id=config['bot_name'],
+            bot_account_id=config['app_id'],
             bot=bot,
             api_client=api_client,
             quart_app=quart.Quart(__name__),
@@ -195,18 +209,34 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
         def sync_on_card_action(event):
             return self._handle_card_action_sync(event)
 
-        return (
+        def sync_on_bot_added(event):
+            self._submit_coro(self._handle_bot_added_event(event))
+
+        def sync_on_standard_event(event):
+            self._submit_coro(self._handle_standard_event(json.loads(lark_oapi.JSON.marshal(event))))
+
+        builder = (
             lark_oapi.EventDispatcherHandler.builder('', '')
             .register_p2_im_message_receive_v1(sync_on_message)
+            .register_p2_im_chat_member_bot_added_v1(sync_on_bot_added)
             .register_p2_card_action_trigger(sync_on_card_action)
-            .build()
         )
+        for registration in LarkEventConverter.STANDARD_EVENT_CALLBACKS.values():
+            getattr(builder, registration)(sync_on_standard_event)
+        return builder.build()
 
     def get_supported_events(self) -> list[str]:
         return [
             'message.received',
             'bot.invited_to_group',
+            'bot.removed_from_group',
+            'group.member_joined',
+            'group.member_left',
+            'group.info_updated',
+            'message.deleted',
+            'message.reaction',
             'platform.specific',
+            'interaction.callback',
         ]
 
     def get_supported_apis(self) -> list[str]:
@@ -219,12 +249,52 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             'get_user_info',
             'get_file_url',
             'call_platform_api',
-            'interaction.request',
-            'interaction.acknowledge',
+            'send_interaction',
+            'update_interaction',
+            'get_interaction_capabilities',
         ]
 
     def get_interaction_capabilities(self) -> dict[str, typing.Any]:
         return interaction_delivery_capabilities()
+
+    async def send_interaction(
+        self,
+        target_type: str,
+        target_id: str,
+        request: InteractionRequest,
+        callback_token: str,
+        reply_to: str | None = None,
+    ) -> InteractionHandle:
+        result = await send_interaction(
+            self,
+            {
+                'request': request.model_dump(mode='json'),
+                'callback_token': callback_token,
+                'reply_target': {'target_type': target_type, 'target_id': target_id, 'message_id': reply_to},
+            },
+        )
+        handle = InteractionHandle.model_validate(result)
+        handle.context['request'] = request.model_dump(mode='json')
+        return handle
+
+    async def update_interaction(
+        self,
+        handle: InteractionHandle,
+        state: str,
+        submission: InteractionSubmission | None = None,
+    ) -> InteractionHandle:
+        result = await acknowledge_interaction(
+            self,
+            {
+                'update_target': handle.model_dump(mode='json'),
+                'request': handle.context['request'],
+                'submission': submission.model_dump(mode='json') if submission else {},
+                'state': state,
+            },
+        )
+        updated = InteractionHandle.model_validate(result)
+        updated.context.update(handle.context)
+        return updated
 
     @staticmethod
     def _plain_message(text: str) -> platform_message.MessageChain:
@@ -326,6 +396,7 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             self.request_tenant_access_token(tenant_key)
         return self.tenant_access_tokens.get(tenant_key, {}).get('token')
 
+    @localized_adapter
     async def send_message(
         self,
         target_type: str,
@@ -359,6 +430,7 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             message_id=message_ids[-1] if message_ids else '', raw={'message_ids': message_ids}
         )
 
+    @localized_adapter
     async def reply_message(
         self,
         message_source: platform_events.MessageEvent,
@@ -464,6 +536,31 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             self.reply_to_monitoring_msg.pop(next(iter(self.reply_to_monitoring_msg)), None)
         return True
 
+    async def create_message_card_for_target(self, message_id: str, target_type: str, target_id: str) -> bool:
+        if target_type not in {'group', 'person'} or not target_id:
+            raise ValueError('Lark streaming card requires a group or person target')
+        card_id = await self.create_card_id(message_id)
+        content = {'type': 'card', 'data': {'card_id': card_id, 'template_variable': {'content': 'Thinking...'}}}
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type('chat_id' if target_type == 'group' else 'open_id')
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(target_id)
+                .content(json.dumps(content))
+                .msg_type('interactive')
+                .uuid(str(uuid.uuid4()))
+                .build()
+            )
+            .build()
+        )
+        response: CreateMessageResponse = await self.api_client.im.v1.message.acreate(request)
+        if not response.success():
+            self.card_id_dict.pop(message_id, None)
+            self.card_sequence_dict.pop(card_id, None)
+            raise RuntimeError(f'Lark create_message_card_for_target failed: {response.code} {response.msg}')
+        return True
+
     async def create_card_id(self, message_id) -> str:
         while len(self.card_id_dict) >= 1000:
             old_key = next(iter(self.card_id_dict))
@@ -471,28 +568,13 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             self.card_sequence_dict.pop(old_card, None)
             self.card_last_update_dict.pop(old_card, None)
             self.closed_streaming_cards.discard(old_card)
-        card_data = {
-            'schema': '2.0',
-            'config': {
-                'update_multi': True,
-                'streaming_mode': True,
-                'streaming_config': {
-                    'print_step': {'default': 1},
-                    'print_frequency_ms': {'default': 70},
-                    'print_strategy': 'fast',
-                },
-            },
-            'body': {
-                'direction': 'vertical',
-                'elements': [{'tag': 'markdown', 'content': '', 'element_id': 'streaming_txt'}],
-            },
-        }
+        card_data = build_card(streaming=True)
         request = (
             CreateCardRequest.builder()
             .request_body(CreateCardRequestBody.builder().type('card_json').data(json.dumps(card_data)).build())
             .build()
         )
-        response: CreateCardResponse = self.api_client.cardkit.v1.card.create(request)
+        response: CreateCardResponse = await self.api_client.cardkit.v1.card.acreate(request)
         if not response.success():
             raise RuntimeError(f'Lark create_card failed: {response.code} {response.msg}')
         card_id = str(response.data.card_id)
@@ -512,16 +594,9 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
     def _streaming_mode_closed(response: ContentCardElementResponse) -> bool:
         return response.code == 300309 or 'streaming mode is closed' in str(response.msg).lower()
 
-    async def _replace_streaming_card(self, card_id: str, content: str) -> None:
+    async def _replace_streaming_card(self, card_id: str, content: str, *, finished: bool = True) -> None:
         sequence = self._next_card_sequence(card_id)
-        card_data = {
-            'schema': '2.0',
-            'config': {'update_multi': True},
-            'body': {
-                'direction': 'vertical',
-                'elements': [{'tag': 'markdown', 'content': content}],
-            },
-        }
+        card_data = build_card(content, finished=finished)
         request = (
             UpdateCardRequest.builder()
             .card_id(card_id)
@@ -539,6 +614,7 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             raise RuntimeError(f'Lark card update failed: {response.code} {response.msg}')
         self.closed_streaming_cards.add(card_id)
 
+    @localized_adapter
     async def reply_message_chunk(
         self,
         message_source: platform_events.MessageEvent,
@@ -547,13 +623,6 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
         quote_origin: bool = False,
         is_final: bool = False,
     ):
-        card_id = self.card_id_dict[bot_message.resp_message_id]
-        has_sent_update = self.card_sequence_dict.get(card_id, 0) > 0
-        now = time.monotonic()
-        last_update = self.card_last_update_dict.get(card_id, 0.0)
-        is_high_frequency_chunk = now - last_update < 1.0
-        if has_sent_update and is_high_frequency_chunk and bot_message.msg_sequence % 8 != 0 and not is_final:
-            return
         cumulative_content = getattr(bot_message, 'all_content', None)
         if isinstance(cumulative_content, str) and cumulative_content:
             content = cumulative_content
@@ -563,37 +632,65 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
                 ''.join(ele.get('text', '') for ele in paragraph if ele.get('tag') in {'text', 'md'})
                 for paragraph in text_elements
             )
-        if (is_final and not bot_message.tool_calls) or card_id in self.closed_streaming_cards:
-            await self._replace_streaming_card(card_id, content)
+        await self._update_streaming_card(
+            bot_message.resp_message_id,
+            content,
+            is_final=is_final,
+            tool_calls=bot_message.tool_calls,
+            msg_sequence=bot_message.msg_sequence,
+            tenant_key=self._tenant_key_from_source(message_source),
+        )
+
+    async def reply_message_chunk_for_target(self, *, message_id: str, content: str, is_final: bool) -> None:
+        await self._update_streaming_card(message_id, content, is_final=is_final, msg_sequence=1)
+
+    async def _update_streaming_card(
+        self,
+        message_id: str,
+        content: str,
+        *,
+        is_final: bool,
+        msg_sequence: int,
+        tool_calls: typing.Any = None,
+        tenant_key: str | None = None,
+    ) -> None:
+        card_id = self.card_id_dict[message_id]
+        has_sent_update = self.card_sequence_dict.get(card_id, 0) > 0
+        now = time.monotonic()
+        last_update = self.card_last_update_dict.get(card_id, 0.0)
+        is_high_frequency_chunk = now - last_update < 1.0
+        if has_sent_update and is_high_frequency_chunk and msg_sequence % 8 != 0 and not is_final:
+            return
+        if (is_final and not tool_calls) or card_id in self.closed_streaming_cards:
+            await self._replace_streaming_card(card_id, content, finished=is_final and not tool_calls)
         else:
             sequence = self._next_card_sequence(card_id)
             request = (
                 ContentCardElementRequest.builder()
                 .card_id(card_id)
                 .element_id('streaming_txt')
-                .request_body(ContentCardElementRequestBody.builder().content(content).sequence(sequence).build())
+                .request_body(
+                    ContentCardElementRequestBody.builder().content(streaming_text(content)).sequence(sequence).build()
+                )
                 .build()
             )
             response: ContentCardElementResponse = await self.api_client.cardkit.v1.card_element.acontent(
-                request, self.request_option(self._tenant_key_from_source(message_source))
+                request, self.request_option(tenant_key)
             )
             if not response.success():
                 if self._streaming_mode_closed(response):
-                    await self._replace_streaming_card(card_id, content)
+                    await self._replace_streaming_card(card_id, content, finished=is_final and not tool_calls)
                 else:
                     raise RuntimeError(f'Lark card_element update failed: {response.code} {response.msg}')
         self.card_last_update_dict[card_id] = now
-        if is_final and bot_message.tool_calls is None:
-            self.card_id_dict.pop(bot_message.resp_message_id, None)
+        if is_final and tool_calls is None:
+            self.card_id_dict.pop(message_id, None)
             self.card_sequence_dict.pop(card_id, None)
             self.card_last_update_dict.pop(card_id, None)
             self.closed_streaming_cards.discard(card_id)
 
+    @localized_adapter
     async def call_platform_api(self, action: str, params: dict = {}) -> dict:
-        if action == 'interaction.request':
-            return await send_interaction(self, params)
-        if action == 'interaction.acknowledge':
-            return await acknowledge_interaction(self, params)
         handler = PLATFORM_API_MAP.get(action)
         if handler is None:
             raise NotSupportedError(f'call_platform_api:{action}')
@@ -629,9 +726,56 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             return f'{event.group.id}_{thread_id}'
         return None
 
+    def _verify_webhook_signature(self, request, raw_body: bytes) -> bool:
+        """Verify the Lark/Feishu event-subscription callback signature.
+
+        Per Lark's own event-security-verification protocol, a callback is
+        authentic only if its ``X-Lark-Signature`` header equals
+        sha256(timestamp + nonce + encrypt_key + body). Without this check
+        any caller who reaches this webhook path can inject fabricated
+        events (spoofed messages, card actions) regardless of whether they
+        hold the app's Encrypt Key.
+        """
+        encrypt_key = self.config.get('encrypt-key', '') or ''
+        if not encrypt_key:
+            return False
+        timestamp = request.headers.get('X-Lark-Request-Timestamp', '')
+        nonce = request.headers.get('X-Lark-Request-Nonce', '')
+        signature = request.headers.get('X-Lark-Signature', '')
+        if not timestamp or not nonce or not signature:
+            return False
+        expected = hashlib.sha256((timestamp + nonce + encrypt_key).encode('utf-8') + raw_body).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+    def _verify_webhook_token(self, data) -> bool:
+        """Authenticate plaintext callbacks when encryption is not configured."""
+        expected = self.config.get('verification-token', '')
+        if not isinstance(expected, str) or not expected or not isinstance(data, dict) or 'encrypt' in data:
+            return False
+        if data.get('schema') == '2.0':
+            header = data.get('header')
+            token = header.get('token') if isinstance(header, dict) else None
+        else:
+            token = data.get('token')
+        return isinstance(token, str) and hmac.compare_digest(expected.encode('utf-8'), token.encode('utf-8'))
+
+    @localized_adapter
     async def handle_unified_webhook(self, bot_uuid: str, path: str, request):
         try:
-            data = await request.json
+            raw_body = await request.get_data()
+            encrypted_mode = bool(self.config.get('encrypt-key'))
+            if encrypted_mode and not self._verify_webhook_signature(request, raw_body):
+                await self.logger.error('Lark webhook signature verification failed, rejecting callback')
+                return {'code': 403, 'message': 'signature verification failed'}, 403
+            try:
+                data = json.loads(raw_body)
+            except (ValueError, UnicodeDecodeError):
+                return {'code': 400, 'message': 'invalid JSON body'}, 400
+            if not isinstance(data, dict):
+                return {'code': 400, 'message': 'invalid callback body'}, 400
+            if not encrypted_mode and not self._verify_webhook_token(data):
+                await self.logger.error('Lark webhook token verification failed, rejecting callback')
+                return {'code': 403, 'message': 'token verification failed'}, 403
             if 'encrypt' in data:
                 data = json.loads(self.cipher.decrypt_string(data['encrypt']))
             event_type = self.get_event_type(data)
@@ -639,6 +783,9 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
                 return {'challenge': data.get('challenge')}
             if event_type == 'app_ticket':
                 self.app_ticket = self._webhook_event(data).get('app_ticket')
+                return {'code': 200, 'message': 'ok'}
+            if event_type in LarkEventConverter.STANDARD_EVENT_CALLBACKS:
+                await self._handle_standard_event(data)
                 return {'code': 200, 'message': 'ok'}
             if event_type == 'im.message.receive_v1':
                 p2v1 = P2ImMessageReceiveV1()
@@ -652,11 +799,7 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
                 await self._handle_message_event(p2v1)
                 return {'code': 200, 'message': 'ok'}
             if event_type == 'im.chat.member.bot.added_v1':
-                raw_event = self._webhook_event(data)
-                header = self._webhook_header(data)
-                chat_id = raw_event.get('chat_id', '')
-                await self._send_bot_added_welcome(chat_id, getattr(header, 'tenant_key', None))
-                await self._dispatch_eba_event(LarkEventConverter.bot_invited_to_group(data, chat_id))
+                await self._handle_bot_added_event(lark_oapi.im.v1.P2ImChatMemberBotAddedV1(data))
                 return {'code': 200, 'message': 'ok'}
             if event_type == 'card.action.trigger':
                 interaction_event = interaction_event_from_webhook(data)
@@ -666,7 +809,7 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
                 feedback_event = self._feedback_event_from_webhook(data)
                 if feedback_event and platform_events.FeedbackEvent in self.listeners:
                     await self.listeners[platform_events.FeedbackEvent](feedback_event, self)
-                return {'toast': {'type': 'success', 'content': '感谢您的反馈'}}
+                return {'toast': {'type': 'success', 'content': adapter_t(self, 'Thank you for your feedback')}}
             await self._dispatch_eba_event(LarkEventConverter.platform_specific(data, event_type, data))
             return {'code': 200, 'message': 'ok'}
         except Exception:
@@ -687,8 +830,14 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
     def _webhook_header(self, data: dict):
         return type('LarkWebhookHeader', (), data.get('header', {}))()
 
+    @localized_adapter
     async def run_async(self):
         self.event_loop = asyncio.get_running_loop()
+        if self.config.get('app_type', 'self') != 'isv':
+            try:
+                await self._get_bot_open_id(None)
+            except Exception as exc:
+                await self.logger.warning(f'Lark bot identity lookup failed; will retry on incoming message: {exc}')
         if not self.config.get('enable-webhook', False):
             try:
                 await self.bot._connect()
@@ -733,13 +882,118 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
     async def is_muted(self, group_id: int | None = None) -> bool:
         return False
 
+    async def _standard_message_context(self, raw: dict) -> dict:
+        data = raw['event']
+        cached = self._message_cache.get(data['message_id'])
+        if cached:
+            return {'chat_type': cached.chat_type, 'chat_id': cached.chat_id, 'group': cached.group}
+        tenant_key = (raw.get('header') or {}).get('tenant_key')
+        option = await asyncio.to_thread(self.request_option, tenant_key)
+        chat_id = data.get('chat_id')
+        if not chat_id:
+            request = GetMessageRequest.builder().message_id(data['message_id']).build()
+            response = await self.api_client.im.v1.message.aget(request, option)
+            if not response.success() or not response.data or not response.data.items:
+                raise RuntimeError(f'Lark message context lookup failed: {response.code} {response.msg}')
+            chat_id = response.data.items[0].chat_id
+        request = GetChatRequest.builder().chat_id(chat_id).build()
+        response = await self.api_client.im.v1.chat.aget(request, option)
+        if not response.success() or not response.data:
+            raise RuntimeError(f'Lark chat context lookup failed: {response.code} {response.msg}')
+        mode = response.data.chat_mode
+        if mode not in {'group', 'p2p'}:
+            raise RuntimeError(f'Lark chat context has unknown chat mode: {mode}')
+        is_group = mode == 'group'
+        return {
+            'chat_type': platform_entities.ChatType.GROUP if is_group else platform_entities.ChatType.PRIVATE,
+            'chat_id': chat_id,
+            'group': platform_entities.UserGroup(id=chat_id, name=response.data.name or '') if is_group else None,
+        }
+
+    async def _handle_standard_event(self, raw: dict):
+        event_type = (raw.get('header') or {}).get('event_type', 'unknown')
+        await self.logger.info(f'Lark event received: {event_type}')
+        try:
+            await self._process_standard_event(raw)
+        except Exception:
+            await self.logger.error(f'Lark event processing failed ({event_type}): {traceback.format_exc()}')
+            raise
+
+    async def _process_standard_event(self, raw: dict):
+        event_type = raw['header']['event_type']
+        context = None
+        if event_type.startswith('im.message.'):
+            try:
+                context = await self._standard_message_context(raw)
+            except Exception as exc:
+                # Preserve the event without falsely classifying an unknown conversation as a private chat.
+                await self.logger.warning(f'Lark {event_type}: {exc}; forwarding original platform event')
+                await self._dispatch_eba_event(LarkEventConverter.platform_specific(raw, event_type, raw))
+                return
+        events = LarkEventConverter.standard_events(raw, context)
+        if not events:
+            await self.logger.warning(f'Lark {event_type}: no standard events could be extracted')
+        for event in events:
+            if isinstance(event, (platform_events.GroupInfoUpdatedEvent, platform_events.BotRemovedFromGroupEvent)):
+                self._group_cache.pop(str(event.group.id), None)
+            await self._dispatch_eba_event(event)
+        await self.logger.info(f'Lark event dispatched: {event_type}, count={len(events)}')
+        if event_type == 'im.message.recalled_v1':
+            self._message_cache.pop(raw['event']['message_id'], None)
+
+    async def _handle_bot_added_event(self, event: lark_oapi.im.v1.P2ImChatMemberBotAddedV1):
+        chat_id = event.event.chat_id
+        operator = event.event.operator_id
+        operator_id = getattr(operator, 'open_id', None) or getattr(operator, 'user_id', None)
+        await self._dispatch_eba_event(LarkEventConverter.bot_invited_to_group(event, chat_id, operator_id))
+        try:
+            await self._send_bot_added_welcome(chat_id, getattr(event.header, 'tenant_key', None))
+        except Exception:
+            await self.logger.warning(f'Lark bot_added_welcome failed: {traceback.format_exc()}')
+
+    async def _get_bot_open_id(self, tenant_key: str | None) -> str:
+        key = tenant_key or ''
+        async with self._bot_identity_lock:
+            if key in self._bot_open_ids:
+                return self._bot_open_ids[key]
+            request = (
+                lark_oapi.BaseRequest.builder()
+                .http_method(lark_oapi.HttpMethod.GET)
+                .uri('/open-apis/bot/v3/info')
+                .token_types({lark_oapi.AccessTokenType.TENANT})
+                .build()
+            )
+            option = await asyncio.to_thread(self.request_option, tenant_key)
+            response = await self.api_client.arequest(request, option)
+            if not response.success():
+                raise RuntimeError(f'Lark bot identity lookup failed: {response.code} {response.msg}')
+            bot_info = json.loads(response.raw.content).get('bot') or {}
+            open_id = bot_info.get('open_id') or bot_info.get('openid')
+            if not isinstance(open_id, str) or not open_id:
+                raise RuntimeError('Lark bot identity response is missing open_id')
+            # Keep a stable adapter identity across tenant-specific callbacks.
+            if not self._bot_open_ids:
+                self.bot_account_id = open_id
+            self._bot_open_ids[key] = open_id
+            return open_id
+
+    def _normalize_bot_mention(self, event, open_id: str) -> None:
+        if event is not None:
+            for component in event.message_chain:
+                if isinstance(component, platform_message.At) and str(component.target) == open_id:
+                    component.target = self.bot_account_id
+
     async def _handle_message_event(self, event: lark_oapi.im.v1.P2ImMessageReceiveV1):
         try:
+            tenant_key = getattr(getattr(event, 'header', None), 'tenant_key', None)
+            open_id = await self._get_bot_open_id(tenant_key if self.config.get('app_type', 'self') == 'isv' else None)
             if platform_events.FriendMessage in self.listeners or platform_events.GroupMessage in self.listeners:
                 legacy_event = await self.event_converter.target2legacy(event, self.api_client)
+                self._normalize_bot_mention(legacy_event, open_id)
                 if legacy_event and type(legacy_event) in self.listeners:
                     await self.listeners[type(legacy_event)](legacy_event, self)
             eba_event = await self.event_converter.target2yiri(event, self.api_client)
+            self._normalize_bot_mention(eba_event, open_id)
             if eba_event:
                 self._cache_event(eba_event)
                 await self._dispatch_eba_event(eba_event)
@@ -780,14 +1034,15 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
             self._submit_coro(self.listeners[platform_events.FeedbackEvent](feedback_event, self))
         from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
 
-        return P2CardActionTriggerResponse({'toast': {'type': 'success', 'content': '感谢您的反馈'}})
+        return P2CardActionTriggerResponse(
+            {'toast': {'type': 'success', 'content': adapter_t(self, 'Thank you for your feedback')}}
+        )
 
-    @staticmethod
-    def _interaction_action_response(event: platform_events.PlatformSpecificEvent) -> dict[str, typing.Any]:
+    def _interaction_action_response(self, event: platform_events.InteractionCallbackEvent) -> dict[str, typing.Any]:
         response: dict[str, typing.Any] = {
-            'toast': {'type': 'success', 'content': 'Submitted / 已提交'},
+            'toast': {'type': 'success', 'content': adapter_t(self, 'Submitted')},
         }
-        if not event.data.get('cardkit'):
+        if not event.raw_submission.get('cardkit'):
             response['card'] = {
                 'type': 'raw',
                 'data': {
@@ -795,7 +1050,7 @@ class LarkAdapter(LarkAPIMixin, abstract_platform_adapter.AbstractPlatformAdapte
                     'elements': [
                         {
                             'tag': 'div',
-                            'text': {'tag': 'lark_md', 'content': '**Submitted / 已提交**'},
+                            'text': {'tag': 'lark_md', 'content': '**' + adapter_t(self, 'Submitted') + '**'},
                         }
                     ],
                 },

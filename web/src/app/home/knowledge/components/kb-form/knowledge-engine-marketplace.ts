@@ -13,9 +13,7 @@ const INSTALL_INTENT_KEY_PREFIX = 'langbot-knowledge-engine-install';
 const INSTALL_INTENT_EVENT = 'langbot-knowledge-engine-install-change';
 
 export type KnowledgeEngineMarketplaceErrorCode =
-  | 'version-unavailable'
-  | 'install-timeout'
-  | 'registration-timeout';
+  'version-unavailable' | 'install-timeout' | 'registration-timeout';
 
 export class KnowledgeEngineMarketplaceError extends Error {
   constructor(public readonly code: KnowledgeEngineMarketplaceErrorCode) {
@@ -203,6 +201,8 @@ export async function installMarketplaceKnowledgeEngine(
     plugin.author,
     plugin.name,
     plugin.latest_version,
+    // Inline installs confirm the declared permissions for the member.
+    true,
   );
   const pending: PendingKnowledgeEngineInstall = {
     taskId,

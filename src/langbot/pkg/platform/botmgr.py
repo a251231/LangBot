@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from ..cloud.plan_policy import require_workspace_platform
+
+from ..i18n import language_scope
+from ..i18n.workspace import get_workspace_language
+
 import asyncio
 import contextlib
 import dataclasses
 import functools
+import hashlib
 import json
 import re
 import time
@@ -28,6 +34,9 @@ from ..agent.runner.host_models import (
 )
 from ..agent.runner.resource_policy import ResourcePolicyProjector
 from ..agent.runner.platform_tools import resolve_agent_platform_tool_names
+from ..agent.runner import input_media
+from ..agent.runner.interaction_store import InteractionAlreadySubmittedError, InteractionExpiredError
+from langbot_plugin.api.entities.builtin.runner.interaction import InteractionHandle
 from ..entity.persistence import workspace as persistence_workspace
 
 from ..api.http.context import ExecutionContext, PrincipalContext, PrincipalType, RequestContext
@@ -35,6 +44,7 @@ from ..api.http.authz import WorkspaceRequiredError
 from ..workspace.errors import WorkspaceInvariantError
 
 from .logger import EventLogger
+from ..utils import constants
 from .adapter_names import canonical_adapter_name
 from . import custom_events
 
@@ -86,6 +96,7 @@ class RuntimeBot:
     ):
         if not isinstance(execution_context, ExecutionContext):
             raise WorkspaceRequiredError('RuntimeBot requires an ExecutionContext')
+        self._ingress_dedup_lock = asyncio.Lock()
         if not execution_context.instance_uuid.strip() or not execution_context.workspace_uuid.strip():
             raise WorkspaceRequiredError('RuntimeBot requires an instance and Workspace')
         if execution_context.placement_generation <= 0:
@@ -113,6 +124,7 @@ class RuntimeBot:
     async def assert_execution_active(self) -> None:
         """Fail closed when this long-lived adapter belongs to a stale placement."""
 
+        await require_workspace_platform(self.ap, self.workspace_uuid, self.bot_entity.adapter)
         await self.ap.workspace_service.get_execution_binding(
             self.workspace_uuid,
             expected_generation=self.placement_generation,
@@ -159,7 +171,7 @@ class RuntimeBot:
 
     @classmethod
     def _is_message_event_type(cls, event_type: str) -> bool:
-        return cls._match_event_pattern(event_type, 'message.*')
+        return event_type == 'message.received'
 
     @classmethod
     def _agent_supports_event_type(
@@ -221,6 +233,7 @@ class RuntimeBot:
     def _augment_event_data(
         cls,
         event_data: dict[str, typing.Any],
+        bot_account_id: str | None = None,
     ) -> dict[str, typing.Any]:
         """Inject virtual computed fields to simplify common filter patterns."""
         message_chain = event_data.get('message_chain')
@@ -232,6 +245,13 @@ class RuntimeBot:
             event_data['message_element_types'] = [
                 comp.get('type', '') for comp in message_chain if isinstance(comp, dict)
             ]
+            if bot_account_id:
+                event_data['is_at_bot'] = any(
+                    isinstance(comp, dict)
+                    and comp.get('type') == 'At'
+                    and str(comp.get('target', '')) == str(bot_account_id)
+                    for comp in message_chain
+                )
         if 'group' in event_data:
             event_data['chat_type'] = 'group' if event_data.get('group') is not None else 'person'
         return event_data
@@ -241,13 +261,14 @@ class RuntimeBot:
         cls,
         event: platform_events.EBAEvent,
         filters: typing.Any,
+        bot_account_id: str | None = None,
     ) -> bool:
         if not filters:
             return True
         if not isinstance(filters, list):
             return False
 
-        event_data = cls._augment_event_data(cls._safe_model_dump(event))
+        event_data = cls._augment_event_data(cls._safe_model_dump(event), bot_account_id=bot_account_id)
         return all(
             cls._match_event_filter(event_data, event_filter)
             for event_filter in filters
@@ -275,6 +296,7 @@ class RuntimeBot:
         bindings: list[dict[str, typing.Any]],
         event: platform_events.EBAEvent,
         event_type: str,
+        bot_account_id: str | None = None,
     ) -> tuple[dict[str, typing.Any] | None, list[dict[str, typing.Any]]]:
         """Evaluate Bot event bindings with the same precedence used at runtime."""
         matched: list[tuple[int, int, dict[str, typing.Any], dict[str, typing.Any]]] = []
@@ -311,7 +333,13 @@ class RuntimeBot:
                 step['reason'] = 'Event type does not match binding event_pattern'
                 diagnostic_steps.append(step)
                 continue
-            if not cls._match_event_filters(event, binding.get('filters')):
+            if binding.get('target_type') == 'pipeline' and not cls._is_message_event_type(event_type):
+                step['failure_code'] = 'processor_incompatible'
+                step['reason'] = 'Pipeline targets only support message.received'
+                diagnostic_steps.append(step)
+                continue
+
+            if not cls._match_event_filters(event, binding.get('filters'), bot_account_id=bot_account_id):
                 step['failure_code'] = 'filters_mismatch'
                 step['reason'] = 'Event data does not satisfy binding filters'
                 diagnostic_steps.append(step)
@@ -342,7 +370,10 @@ class RuntimeBot:
         event_type: str,
     ) -> dict[str, typing.Any] | None:
         """Resolve the highest priority Bot event binding for a platform event."""
-        selected, _ = self._evaluate_eba_event_bindings(self._get_event_bindings(), event, event_type)
+        bot_account_id = getattr(getattr(self, 'adapter', None), 'bot_account_id', None) or None
+        selected, _ = self._evaluate_eba_event_bindings(
+            self._get_event_bindings(), event, event_type, bot_account_id=bot_account_id
+        )
         return selected
 
     def diagnose_eba_event_binding(
@@ -351,7 +382,10 @@ class RuntimeBot:
         event_type: str,
     ) -> tuple[dict[str, typing.Any] | None, list[dict[str, typing.Any]]]:
         """Return the selected event binding plus per-binding diagnostic steps."""
-        return self._evaluate_eba_event_bindings(self._get_event_bindings(), event, event_type)
+        bot_account_id = getattr(getattr(self, 'adapter', None), 'bot_account_id', None) or None
+        return self._evaluate_eba_event_bindings(
+            self._get_event_bindings(), event, event_type, bot_account_id=bot_account_id
+        )
 
     @staticmethod
     def _route_ref(
@@ -380,8 +414,16 @@ class RuntimeBot:
         failure_code: str | None = None,
         reason: str | None = None,
         run_id: str | None = None,
+        node: str | None = None,
+        error: str = '',
     ) -> dict[str, typing.Any]:
-        """Record structured event routing state while preserving the human log."""
+        """Record structured event routing state while preserving the human log.
+
+        ``node`` is the routing step opened by the caller *before* it delivered
+        the event, so the Pipeline or Agent it delivered to nests under it and
+        the step's interval covers the delivery. Without it the step is opened
+        here.
+        """
         binding = binding or {}
         metadata = {
             'kind': 'event_route_trace',
@@ -397,28 +439,45 @@ class RuntimeBot:
         }
         log_method = getattr(self.logger, level, self.logger.info)
         await log_method(text, metadata=metadata)
-        if status in {'delivered', 'failed', 'discarded', 'not_matched'}:
+        if status in {'delivered', 'failed'}:
             from ..telemetry import trace as trace_mod
             from ..telemetry.execution import record
 
+            state = trace_mod.current()
+            detail = ''
+            if status == 'failed':
+                detail = error or ': '.join(part for part in (failure_code or 'route_failed', reason or '') if part)
+            if status == 'failed' and state is not None and state.reportable and not trace_mod.reporting_suppressed():
+                # The root event can finish successfully after a delivery failed.
+                # Preserve that failure for closure reporting in failures mode.
+                state.mark_failure(detail)
+
+            def _record_route(route_node: str) -> None:
+                record(
+                    getattr(self, 'ap', None),
+                    getattr(self, 'execution_context', None),
+                    family='event_route',
+                    operation=event_type,
+                    adapter=type(getattr(self, 'adapter', None)).__name__,
+                    mode=target_type if target_type in {'pipeline', 'agent', 'event_processor'} else 'none',
+                    outcome={'delivered': 'success', 'failed': 'failed'}.get(status, 'skipped'),
+                    error=detail,
+                    node=route_node,
+                )
+
             with trace_mod.scope(route_ref=self._route_ref(binding, target_type, target_uuid)):
-                # The routing decision is its own workflow step; the Pipeline or
-                # processor it delivers to hangs under this node.
-                with trace_mod.stage_scope() as node:
-                    record(
-                        getattr(self, 'ap', None),
-                        getattr(self, 'execution_context', None),
-                        family='event_route',
-                        operation=event_type,
-                        adapter=type(getattr(self, 'adapter', None)).__name__,
-                        mode=target_type if target_type in {'pipeline', 'agent', 'event_processor'} else 'none',
-                        outcome={'delivered': 'success', 'failed': 'failed'}.get(status, 'skipped'),
-                        node=node,
-                    )
+                if node is not None:
+                    _record_route(node)
+                else:
+                    # The routing decision is its own workflow step.
+                    with trace_mod.stage_scope() as opened:
+                        _record_route(opened)
         return metadata
 
     def get_pipeline_target_for_event_type(self, event_type: str = 'message.received') -> str | None:
         """Return the first Pipeline target configured for an event type."""
+        if not self._is_message_event_type(event_type):
+            return None
         matched: list[tuple[int, int, str]] = []
         for index, binding in enumerate(self._get_event_bindings()):
             if not binding.get('enabled', True):
@@ -446,10 +505,13 @@ class RuntimeBot:
             return {}
         if hasattr(model, 'model_dump'):
             try:
-                return model.model_dump(mode='json')
+                # Native adapter objects are for replying, not event logging.
+                # Exclude them before JSON serialization, since some (OAEvent,
+                # for example) cannot be serialized by Pydantic.
+                return model.model_dump(mode='json', exclude={'source_platform_object'})
             except TypeError:
                 try:
-                    return model.model_dump()
+                    return model.model_dump(exclude={'source_platform_object'})
                 except Exception:
                     return {}
             except Exception:
@@ -617,7 +679,6 @@ class RuntimeBot:
         group_id = cls._get_entity_id(group)
         if group_id:
             metadata['group_id'] = group_id
-            return 'group', group_id, metadata
 
         chat_id = getattr(event, 'chat_id', None)
         chat_type = getattr(event, 'chat_type', None)
@@ -627,6 +688,11 @@ class RuntimeBot:
             if chat_type_value == 'group':
                 return 'group', str(chat_id), metadata
             return 'person', str(chat_id), metadata
+
+        # A guild can contain multiple delivery channels. Keep its id for
+        # membership APIs, but prefer the event's explicit chat for replies.
+        if group_id:
+            return 'group', group_id, metadata
 
         session_target_type, session_target_id = cls._session_to_reply_target(getattr(event, 'session_id', None))
         if session_target_type and session_target_id:
@@ -700,41 +766,23 @@ class RuntimeBot:
 
     @classmethod
     def _build_agent_input(cls, event: platform_events.EBAEvent) -> AgentInput:
-        text = None
-        contents: list[dict[str, typing.Any]] = []
-
+        rendered = None
         message_chain = getattr(event, 'message_chain', None)
         if message_chain:
-            text_parts: list[str] = []
-            try:
-                for component in message_chain:
-                    if isinstance(component, platform_message.Plain):
-                        text_parts.append(component.text)
-                    elif isinstance(component, platform_message.Image):
-                        if component.url:
-                            contents.append({'type': 'image_url', 'image_url': {'url': component.url}})
-                        elif component.base64:
-                            contents.append({'type': 'image_base64', 'image_base64': component.base64})
-            except TypeError:
-                text_parts.append(str(message_chain))
-            text = ''.join(text_parts) or str(message_chain)
+            rendered = input_media.render_input(message_chain, include_quotes=True, include_other_text=True)
 
-        if text is None:
-            feedback_content = getattr(event, 'feedback_content', None)
-            if feedback_content:
-                text = str(feedback_content)
-            elif getattr(event, 'action', None):
-                text = str(getattr(event, 'action'))
-            else:
-                text = str(getattr(event, 'type', 'event'))
-
-        if text:
-            contents.insert(0, {'type': 'text', 'text': text})
+        text = (rendered.text if rendered else '') or platform_events.event_summary(event)
+        if rendered and rendered.contents:
+            contents = [item.model_dump(mode='json') for item in rendered.contents]
+        else:
+            contents = [{'type': 'text', 'text': text}] if text else []
 
         return AgentInput(
             text=text,
             contents=contents,
-            attachments=[],
+            # The envelope is Host-internal: inline payloads ride along until
+            # prepare_input_files registers them and clears the descriptors.
+            attachments=rendered.attachments(include_content=True) if rendered else [],
         )
 
     def _eba_event_to_agent_envelope(
@@ -822,7 +870,7 @@ class RuntimeBot:
         adapter: abstract_platform_adapter.AbstractMessagePlatformAdapter,
         supported_apis: list[str],
     ) -> dict[str, typing.Any] | None:
-        if 'interactions' not in DeliveryContext.model_fields or 'interaction.request' not in supported_apis:
+        if 'interactions' not in DeliveryContext.model_fields or 'send_interaction' not in supported_apis:
             return None
         get_capabilities = getattr(adapter, 'get_interaction_capabilities', None)
         if not callable(get_capabilities):
@@ -863,11 +911,12 @@ class RuntimeBot:
                 allowed_platform_tool_names=resolve_agent_platform_tool_names(config, event_type),
                 allowed_host_tool_names=config.get('allowed_tools'),
                 override_runner_tools='allowed_tools' in config,
+                allowed_workspace_operations=config.get('allowed_workspace_operations'),
             ),
             state_policy=StatePolicy(state_scopes=['conversation', 'actor', 'subject', 'runner']),
             delivery_policy=DeliveryPolicy(
-                enable_streaming=False,
-                enable_reply=False,
+                enable_streaming=agent.get('kind') == 'agent' and event_type == 'message.received',
+                enable_reply=agent.get('kind') == 'agent' and event_type == 'message.received',
                 enable_interactions=agent.get('kind') != 'event_processor',
             ),
             agent_id=agent.get('uuid'),
@@ -886,6 +935,18 @@ class RuntimeBot:
     @staticmethod
     def _platform_event_raw_id(event: platform_events.EBAEvent) -> str:
         event_type = getattr(event, 'type', None) or event.__class__.__name__
+        if isinstance(event, platform_events.MessageDeletedEvent) and event.message_id:
+            # A recall is distinct from the original message.
+            return f'{event_type}:{event.message_id}'
+        if getattr(event, 'adapter_name', None) == 'wecomcs-omni':
+            source = getattr(event, 'source_platform_object', None)
+            if isinstance(source, dict):
+                if source.get('msgid'):
+                    return str(source['msgid'])
+                # Native service events can lack msgid. Preserve their identity
+                # across sync retries and process restarts instead of using UUIDs.
+                payload = json.dumps(source, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+                return f'{event_type}:{hashlib.sha256(payload.encode()).hexdigest()}'
         return str(
             getattr(event, 'message_id', None) or getattr(event, 'feedback_id', None) or f'{event_type}:{uuid.uuid4()}'
         )
@@ -900,9 +961,29 @@ class RuntimeBot:
         from ..telemetry import trace as trace_mod
         from ..telemetry.execution import ingress
 
+        await self.assert_execution_active()
         event.bot_uuid = self.bot_entity.uuid
         execution_id = self._platform_event_execution_id(event)
-        with ingress(getattr(self, 'ap', None), 'event_done', getattr(self, 'execution_context', None), execution_id):
+        if getattr(event, 'adapter_name', None) == 'wecomcs-omni':
+            from ..agent.runner.event_log_store import EventLogStore
+
+            # The sync API can replay history after an adapter restart. Reuse
+            # the durable ingress journal, including records from earlier runs.
+            async with self._ingress_dedup_lock:
+                store = EventLogStore(self.ap.persistence_mgr.get_db_engine())
+                if await store.get_event(execution_id):
+                    return
+                await self._persist_monitoring_ingress(event, adapter, execution_id)
+        with ingress(
+            getattr(self, 'ap', None),
+            'completed',
+            getattr(self, 'execution_context', None),
+            execution_id,
+            require_route=True,
+        ) as binding:
+            if binding.created:
+                # The platform is known at ingress, whatever the route does next.
+                binding.state.adapter = adapter.__class__.__name__
             # The inbound event is the root workflow step: everything recorded
             # while handling it hangs under this node.
             with trace_mod.stage_scope() as node:
@@ -910,13 +991,24 @@ class RuntimeBot:
 
     @staticmethod
     def _summarize_event_delivery(results: list[typing.Any]) -> tuple[str, str]:
-        outcome = 'success'
-        error_detail = ''
+        from ..telemetry.execution import describe_exception, is_cancellation
+
+        failure_detail = ''
+        cancel_detail = ''
         for result in results:
-            if isinstance(result, BaseException):
-                outcome = 'failed'
-                error_detail = error_detail or f'{type(result).__name__}: {result}'
-        return outcome, error_detail
+            if not isinstance(result, BaseException):
+                continue
+            if is_cancellation(result):
+                # A cancelled delivery (stopped run, superseding message,
+                # shutdown) is not a failed one.
+                cancel_detail = cancel_detail or describe_exception(result)
+            else:
+                failure_detail = failure_detail or describe_exception(result)
+        if failure_detail:
+            return 'failed', failure_detail
+        if cancel_detail:
+            return 'cancelled', cancel_detail
+        return 'success', ''
 
     def _record_platform_event(self, event, adapter, outcome: str, error_detail: str, node: str = '') -> None:
         from ..telemetry.execution import record
@@ -932,6 +1024,34 @@ class RuntimeBot:
             node=node,
         )
 
+    async def _persist_monitoring_ingress(self, event, adapter, execution_id, status='running', routes=None):
+        service = getattr(getattr(self, 'ap', None), 'monitoring_service', None)
+        if service is None or not execution_id:
+            return
+        try:
+            sender = getattr(event, 'sender', None) or getattr(event, 'user', None) or getattr(event, 'operator', None)
+            target_type, target_id, _ = self._infer_reply_target(event)
+            await service.record_ingress_event(
+                self.execution_context,
+                event_id=execution_id,
+                event_type=getattr(event, 'type', None) or event.__class__.__name__,
+                bot_id=self.bot_entity.uuid,
+                bot_name=self.bot_entity.name,
+                platform=getattr(self.bot_entity, 'adapter', None) or adapter.__class__.__name__,
+                payload={
+                    key: value
+                    for key, value in self._safe_model_dump(event).items()
+                    if key != 'source_platform_object' and not key.startswith('_')
+                },
+                actor_id=self._get_entity_id(sender),
+                actor_name=self._get_entity_name(sender),
+                conversation_id=f'{target_type}_{target_id}' if target_type and target_id else None,
+                status=status,
+                routes=routes,
+            )
+        except Exception as exc:
+            await self.logger.warning(f'Failed to persist monitoring ingress: {exc}')
+
     async def _handle_platform_event_body(
         self,
         event: platform_events.EBAEvent,
@@ -942,26 +1062,36 @@ class RuntimeBot:
         results: list[typing.Any] = []
         try:
             await self._record_adapter_event(event, adapter)
+            await self._persist_monitoring_ingress(event, adapter, execution_id)
 
-            primary = (
-                self._handle_interaction_submission(event, adapter, execution_id)
-                if isinstance(event, platform_events.PlatformSpecificEvent) and event.action == 'interaction.submitted'
-                else self._dispatch_eba_event_to_processor(event, adapter, execution_id=execution_id)
+            primary_handler = (
+                self._handle_interaction_submission
+                if isinstance(event, platform_events.InteractionCallbackEvent)
+                else self._dispatch_eba_event_to_processor
             )
             subscriptions = self._get_event_bindings_from_value(getattr(self.bot_entity, 'plugin_processors', []))
             seen = set()
-            tasks = [primary]
+            tasks = [self._run_event_delivery(primary_handler, event, adapter, execution_id=execution_id)]
             for subscription in subscriptions:
                 processor_uuid = subscription.get('processor_uuid')
                 if not processor_uuid or processor_uuid in seen or not subscription.get('enabled', True):
                     continue
                 seen.add(processor_uuid)
-                tasks.append(self._dispatch_plugin_subscription(event, adapter, processor_uuid, execution_id))
+                tasks.append(
+                    self._run_event_delivery(
+                        self._dispatch_plugin_subscription, event, adapter, processor_uuid, execution_id
+                    )
+                )
             # Start all deliveries together. A slow or failed subscriber cannot block
             # another subscriber or the primary route from receiving the event.
             results = await asyncio.gather(*tasks, return_exceptions=True)
         except BaseException as exc:
-            self._record_platform_event(event, adapter, 'failed', f'{type(exc).__name__}: {exc}', node)
+            from ..telemetry.execution import describe_exception, is_cancellation
+
+            self._record_platform_event(
+                event, adapter, 'cancelled' if is_cancellation(exc) else 'failed', describe_exception(exc), node
+            )
+            await self._persist_monitoring_ingress(event, adapter, execution_id, 'failed', [exc])
             raise
 
         # Recorded after handling so the inbound stage carries the real outcome
@@ -974,6 +1104,25 @@ class RuntimeBot:
                 except Exception:
                     pass
         self._record_platform_event(event, adapter, outcome, error_detail, node)
+        await self._persist_monitoring_ingress(
+            event,
+            adapter,
+            execution_id,
+            {'success': 'completed', 'skipped': 'ignored'}.get(outcome, 'failed'),
+            results,
+        )
+
+    async def _run_event_delivery(self, handler, *args, **kwargs):
+        # gather creates child tasks. Each delivery needs its own database scope;
+        # copying the listener's ContextVar does not transfer task ownership.
+        persistence = getattr(getattr(self, 'ap', None), 'persistence_mgr', None)
+        if getattr(getattr(persistence, 'mode', None), 'value', None) == 'cloud_runtime':
+            tenant_scope = getattr(persistence, 'tenant_scope', None)
+            if not callable(tenant_scope):
+                raise RuntimeError('Cloud event deliveries require a tenant scope')
+            async with tenant_scope(self.workspace_uuid):
+                return await handler(*args, **kwargs)
+        return await handler(*args, **kwargs)
 
     async def _dispatch_plugin_subscription(self, event, adapter, processor_uuid, execution_id=None):
         event_type = event.type
@@ -994,22 +1143,29 @@ class RuntimeBot:
             patterns = descriptor.supported_event_patterns
             if not patterns or not self._agent_supports_event_type(patterns, event_type):
                 return
-            agent = {**agent, 'supported_event_patterns': patterns}
-            return await self._dispatch_eba_event_to_processor(
-                event, adapter, event_binding, agent, execution_id=execution_id
-            )
         except Exception as exc:
-            return await self._record_event_route_trace(
-                event_type=event_type,
-                status='failed',
-                level='error',
-                binding=event_binding,
-                target_type='event_processor',
-                target_uuid=processor_uuid,
-                failure_code='runner_failed',
-                reason=str(exc),
-                text=f'Plugin processor {processor_uuid} failed: {exc}',
-            )
+            from ..telemetry import trace as trace_mod
+            from ..telemetry.execution import describe_exception
+
+            # No matching declaration was resolved: log locally without
+            # reporting a failed delivery for every unrelated incoming event.
+            with trace_mod.suppress_reporting():
+                return await self._record_event_route_trace(
+                    event_type=event_type,
+                    status='failed',
+                    level='error',
+                    binding=event_binding,
+                    target_type='event_processor',
+                    target_uuid=processor_uuid,
+                    failure_code='runner_failed',
+                    reason=str(exc),
+                    text=f'Plugin processor {processor_uuid} failed: {exc}',
+                    error=describe_exception(exc),
+                )
+        agent = {**agent, 'supported_event_patterns': patterns}
+        return await self._dispatch_eba_event_to_processor(
+            event, adapter, event_binding, agent, execution_id=execution_id
+        )
 
     async def _dispatch_eba_event_to_processor(
         self,
@@ -1020,6 +1176,28 @@ class RuntimeBot:
         execution_id: str | None = None,
     ) -> dict[str, typing.Any]:
         event_type = getattr(event, 'type', None) or event.__class__.__name__
+
+        if isinstance(event, platform_events.MessageReceivedEvent):
+            interaction_manager = getattr(getattr(self.ap, 'agent_run_orchestrator', None), 'interaction_manager', None)
+        else:
+            interaction_manager = None
+        if callable(getattr(interaction_manager, 'consume_text_message', None)):
+            target_type_for_text, target_id_for_text, _ = self._infer_reply_target(event)
+            sender_for_text = getattr(event, 'sender', None) or getattr(event, 'user', None)
+            actor_id_for_text = self._get_entity_id(sender_for_text)
+            text_for_interaction = ''.join(
+                part.text for part in event.message_chain if isinstance(part, platform_message.Plain)
+            )
+            if target_type_for_text and target_id_for_text and actor_id_for_text and text_for_interaction:
+                consumed = await interaction_manager.consume_text_message(
+                    workspace_id=self.execution_context.workspace_uuid,
+                    bot_id=self.bot_entity.uuid,
+                    conversation_id=f'{target_type_for_text}_{target_id_for_text}',
+                    actor_id=str(actor_id_for_text),
+                    text=text_for_interaction,
+                )
+                if consumed:
+                    return {'status': 'delivered', 'interaction': 'text_reply'}
 
         if event_binding is None:
             event_binding = self._resolve_eba_event_binding(event, event_type)
@@ -1033,6 +1211,12 @@ class RuntimeBot:
             )
 
         target_type = event_binding.get('target_type')
+        from ..telemetry import trace as trace_mod
+
+        if target_type != 'discard':
+            # Matching precedes target lookup/execution, so genuine delivery
+            # failures remain observable even when the target is unavailable.
+            trace_mod.admit()
         await self._record_event_route_trace(
             event_type=event_type,
             status='matched',
@@ -1045,7 +1229,7 @@ class RuntimeBot:
             if isinstance(event, platform_events.MessageReceivedEvent):
                 from ..telemetry import trace as trace_mod
 
-                with trace_mod.scope(route_ref=self._route_ref(event_binding)):
+                with trace_mod.suppress_reporting(), trace_mod.scope(route_ref=self._route_ref(event_binding)):
                     await self._dispatch_eba_message_to_pipeline(
                         event,
                         adapter,
@@ -1079,25 +1263,44 @@ class RuntimeBot:
                     reason='Pipeline targets only support message events',
                     text=f'Event {event_type} ignored Pipeline target for non-message event',
                 )
+            pipeline_uuid = event_binding.get('target_uuid')
+            if not await self._pipeline_target_exists(pipeline_uuid):
+                # A binding left pointing at a deleted Pipeline must fail
+                # visibly instead of queueing a query that is later dropped.
+                return await self._record_event_route_trace(
+                    event_type=event_type,
+                    status='failed',
+                    level='warning',
+                    binding=event_binding,
+                    target_type=target_type,
+                    target_uuid=pipeline_uuid,
+                    failure_code='processor_not_found',
+                    reason='Pipeline target not found',
+                    text=f'Event {event_type} target Pipeline not found: {pipeline_uuid or ""}'.strip(),
+                )
             from ..telemetry import trace as trace_mod
 
-            with trace_mod.scope(
-                route_ref=self._route_ref(event_binding, target_type, event_binding.get('target_uuid'))
-            ):
-                await self._dispatch_eba_message_to_pipeline(
-                    event,
-                    adapter,
-                    pipeline_uuid=event_binding.get('target_uuid'),
-                    routed_by_event_binding=True,
+            # The routing step opens before delivery so the queued Pipeline
+            # lane nests under it and runs after it in the chain order.
+            with trace_mod.stage_scope() as route_node:
+                with trace_mod.scope(
+                    route_ref=self._route_ref(event_binding, target_type, event_binding.get('target_uuid'))
+                ):
+                    await self._dispatch_eba_message_to_pipeline(
+                        event,
+                        adapter,
+                        pipeline_uuid=event_binding.get('target_uuid'),
+                        routed_by_event_binding=True,
+                    )
+                return await self._record_event_route_trace(
+                    event_type=event_type,
+                    status='delivered',
+                    binding=event_binding,
+                    target_type=target_type,
+                    target_uuid=event_binding.get('target_uuid'),
+                    text=f'Event {event_type} delivered to Pipeline {event_binding.get("target_uuid") or ""}'.strip(),
+                    node=route_node,
                 )
-            return await self._record_event_route_trace(
-                event_type=event_type,
-                status='delivered',
-                binding=event_binding,
-                target_type=target_type,
-                target_uuid=event_binding.get('target_uuid'),
-                text=f'Event {event_type} delivered to Pipeline {event_binding.get("target_uuid") or ""}'.strip(),
-            )
         if target_type not in {'agent', 'event_processor'}:
             return await self._record_event_route_trace(
                 event_type=event_type,
@@ -1155,7 +1358,9 @@ class RuntimeBot:
 
         try:
             binding = self._agent_product_to_binding(agent, event_binding, event_type, self.bot_entity.uuid)
-        except Exception:
+        except Exception as exc:
+            from ..telemetry.execution import describe_exception
+
             return await self._record_event_route_trace(
                 event_type=event_type,
                 status='failed',
@@ -1166,6 +1371,7 @@ class RuntimeBot:
                 failure_code='runner_failed',
                 reason='Agent configuration is invalid',
                 text=f'Failed to build Agent binding for EBA event {event_type}: {traceback.format_exc()}',
+                error=describe_exception(exc),
             )
         if binding is None:
             return await self._record_event_route_trace(
@@ -1181,43 +1387,74 @@ class RuntimeBot:
             )
 
         envelope = self._eba_event_to_agent_envelope(event, adapter, execution_id)
+        if target_type == 'agent' and isinstance(event, platform_events.MessageReceivedEvent):
+            envelope.delivery.supports_streaming = True
         if target_type == 'event_processor':
             envelope.data = event.model_dump(mode='json', exclude={'source_platform_object', 'legacy_event'})
+            if isinstance(event, platform_events.MessageReceivedEvent):
+                # Use the SDK wire format for Source timestamps and nested chains.
+                # Pydantic's enclosing event serializer bypasses model_dump overrides.
+                envelope.data['message_chain'] = event.message_chain.model_dump()
         from ..telemetry import trace as trace_mod
 
-        try:
-            with trace_mod.scope(route_ref=self._route_ref(event_binding, target_type, target_uuid)):
-                async for _ in self.ap.agent_run_orchestrator.run(
-                    envelope,
-                    binding,
-                    adapter_context={
-                        '_delivery_adapter': adapter,
-                        '_platform_event': event,
-                        '_execution_context': self.execution_context,
-                    },
-                ):
-                    # Results are journaled by the orchestrator; platform sends require explicit actions.
-                    pass
-        except Exception:
+        # The routing step opens before the Agent runs, so the run nests under it.
+        with trace_mod.stage_scope() as route_node:
+            try:
+                with trace_mod.scope(route_ref=self._route_ref(event_binding, target_type, target_uuid)):
+                    if target_type == 'agent' and await self.ap.agent_run_orchestrator.try_claim_steering_from_event(
+                        envelope, binding, self.execution_context
+                    ):
+                        return await self._record_event_route_trace(
+                            event_type=event_type,
+                            status='delivered',
+                            binding=event_binding,
+                            target_type=target_type,
+                            target_uuid=target_uuid,
+                            text=f'Event {event_type} queued as steering',
+                            node=route_node,
+                        )
+                    from .processing_indicator import processing_indicator
+
+                    reply_type, reply_id = (None, None)
+                    if isinstance(event, platform_events.MessageReceivedEvent):
+                        reply_type, reply_id, _ = self._infer_reply_target(event)
+                    async with processing_indicator(adapter, reply_type, reply_id):
+                        async for _ in self.ap.agent_run_orchestrator.run(
+                            envelope,
+                            binding,
+                            adapter_context={
+                                '_delivery_adapter': adapter,
+                                '_platform_event': event,
+                                '_execution_context': self.execution_context,
+                            },
+                        ):
+                            # Results are journaled by the orchestrator; platform sends require explicit actions.
+                            pass
+            except Exception as exc:
+                from ..telemetry.execution import describe_exception
+
+                return await self._record_event_route_trace(
+                    event_type=event_type,
+                    status='failed',
+                    level='error',
+                    binding=event_binding,
+                    target_type=target_type,
+                    target_uuid=target_uuid,
+                    failure_code='runner_failed',
+                    reason='Agent runner failed',
+                    text=f'Failed to run Agent for EBA event {event_type}: {traceback.format_exc()}',
+                    error=describe_exception(exc),
+                    node=route_node,
+                )
             return await self._record_event_route_trace(
                 event_type=event_type,
-                status='failed',
-                level='error',
+                status='delivered',
                 binding=event_binding,
                 target_type=target_type,
                 target_uuid=target_uuid,
-                failure_code='runner_failed',
-                reason='Agent runner failed',
-                text=f'Failed to run Agent for EBA event {event_type}: {traceback.format_exc()}',
+                text=f'Event {event_type} delivered to Agent {target_uuid}',
+                node=route_node,
             )
-        return await self._record_event_route_trace(
-            event_type=event_type,
-            status='delivered',
-            binding=event_binding,
-            target_type=target_type,
-            target_uuid=target_uuid,
-            text=f'Event {event_type} delivered to Agent {target_uuid}',
-        )
 
     def resolve_event_pipeline_uuid(
         self,
@@ -1252,23 +1489,17 @@ class RuntimeBot:
         """Record a discarded message in the monitoring system."""
         try:
             if hasattr(message_chain, 'model_dump'):
-                chain_dump = message_chain.model_dump()
-                if hasattr(self.ap, 'storage_mgr') and hasattr(self.ap.storage_mgr, 'media_cache'):
-                    chain_dump = await self.ap.storage_mgr.media_cache.externalize_chain_dump(chain_dump)
-                message_content = json.dumps(chain_dump, ensure_ascii=False)
+                message_content = message_chain.model_dump()
             else:
                 message_content = str(message_chain)
 
-            sender_name = None
-            if hasattr(message_event, 'sender'):
-                if hasattr(message_event.sender, 'nickname'):
-                    sender_name = message_event.sender.nickname
-                elif hasattr(message_event.sender, 'member_name'):
-                    sender_name = message_event.sender.member_name
+            from ..pipeline.monitoring_helper import build_monitoring_session_id, extract_sender_name
+
+            sender_name = extract_sender_name(message_event)
 
             # Use the same session_id format as monitoring_helper.py
-            session_id = f'{launcher_type}_{launcher_id}'
             platform = launcher_type.value if hasattr(launcher_type, 'value') else str(launcher_type)
+            session_id = build_monitoring_session_id(platform, launcher_id, sender_id)
 
             await self.ap.monitoring_service.record_message(
                 self.execution_context,
@@ -1285,26 +1516,6 @@ class RuntimeBot:
                 user_name=sender_name,
             )
 
-            # Ensure the session exists so the message appears in the session monitor.
-            # Don't overwrite pipeline info — a session may have messages from
-            # multiple pipelines; discarding shouldn't change the displayed pipeline.
-            session_updated = await self.ap.monitoring_service.update_session_activity(
-                self.execution_context,
-                session_id,
-            )
-            if not session_updated:
-                # No session yet (first message for this launcher was discarded).
-                await self.ap.monitoring_service.record_session_start(
-                    self.execution_context,
-                    session_id=session_id,
-                    bot_id=self.bot_entity.uuid,
-                    bot_name=self.bot_entity.name or self.bot_entity.uuid,
-                    pipeline_id=self.PIPELINE_DISCARD,
-                    pipeline_name=self.PIPELINE_DISCARD_DISPLAY_NAME,
-                    platform=platform,
-                    user_id=str(sender_id),
-                    user_name=sender_name,
-                )
         except Exception as e:
             await self.logger.error(f'Failed to record discarded message: {e}')
 
@@ -1395,200 +1606,75 @@ class RuntimeBot:
 
     async def _handle_interaction_submission(
         self,
-        event: platform_events.PlatformSpecificEvent,
+        event: platform_events.InteractionCallbackEvent,
         adapter: abstract_platform_adapter.AbstractMessagePlatformAdapter,
         execution_id: str | None = None,
     ) -> None:
-        """Consume a platform interaction callback and resume its original processor."""
-        data = event.data if isinstance(event.data, dict) else {}
-        callback_token = str(data.get('callback_token') or '')
-        actor_id = str(data.get('actor_id') or data.get('user_id') or '') or None
-        target_type = str(data.get('target_type') or '') or None
-        target_id = str(data.get('target_id') or data.get('chat_id') or '') or None
+        """Validate a callback and wake the Runner waiting in the original run."""
+        del execution_id
+        manager = self.ap.agent_run_orchestrator.interaction_manager
+        target_type = event.target_type
+        target_id = event.target_id
         conversation_id = f'{target_type}_{target_id}' if target_type and target_id else None
-        submission = {
-            'interaction_id': data.get('interaction_id'),
-            'action_id': data.get('action_id'),
-            'values': data.get('values') if isinstance(data.get('values'), dict) else {},
-            'submitted_at': int(event.timestamp) if event.timestamp else None,
+        submission: dict[str, typing.Any] = {
+            'action_id': event.action_id,
+            'values': event.values,
         }
         for ref_name in ('action_ref', 'field_ref', 'option_ref'):
-            if data.get(ref_name) is not None:
-                submission[ref_name] = data[ref_name]
+            value = event.raw_submission.get(ref_name)
+            if value is not None:
+                submission[ref_name] = value
 
-        record = await self.ap.agent_run_orchestrator.interaction_manager.consume_callback(
-            callback_token=callback_token,
-            submission=submission,
-            bot_id=self.bot_entity.uuid,
-            conversation_id=conversation_id,
-            actor_id=actor_id,
-        )
-        await self.ap.agent_run_orchestrator.interaction_manager.acknowledge_submission(record, adapter)
-
-        if record['processor_type'] == 'agent':
-            await self._resume_agent_interaction(record, event, adapter, actor_id, execution_id)
+        try:
+            record = await manager.consume_callback(
+                callback_token=event.callback_token,
+                submission=submission,
+                bot_id=self.bot_entity.uuid,
+                conversation_id=conversation_id,
+                actor_id=event.actor_id,
+            )
+        except InteractionAlreadySubmittedError:
             return
-        if record['processor_type'] != 'pipeline':
-            raise ValueError(f'Unsupported interaction processor type: {record["processor_type"]}')
+        except InteractionExpiredError:
+            stale = await manager.store.get_by_callback_token(event.callback_token)
+            delivery_result = stale.get('delivery_result') if stale else None
+            if isinstance(delivery_result, dict) and callable(getattr(adapter, 'update_interaction', None)):
+                try:
+                    handle = InteractionHandle.model_validate(delivery_result)
+                    handle.context.setdefault('request', stale.get('request') or {})
+                    handle.context['callback_context'] = event.callback_context
+                    await adapter.update_interaction(handle, 'expired')
+                except Exception as exc:
+                    await self.logger.warning(f'Failed to invalidate stale interaction card: {exc}')
+            return
 
-        pipeline = await self.ap.pipeline_service.get_pipeline(
-            self.execution_context,
-            record['processor_id'],
-            include_secret=True,
-        )
-        if not pipeline:
-            raise ValueError(f'Interaction target Pipeline is unavailable: {record["processor_id"]}')
-        current_runner_id = RunnerConfigResolver.resolve_runner_id(pipeline.get('config') or {})
-        if current_runner_id != record['runner_id']:
-            raise ValueError('Interaction target Pipeline runner changed after the request was created')
+        if not manager.wake_waiter(record, event.actor_id, event.callback_context):
+            delivery_result = record.get('delivery_result')
+            if isinstance(delivery_result, dict) and callable(getattr(adapter, 'update_interaction', None)):
+                try:
+                    handle = InteractionHandle.model_validate(delivery_result)
+                    handle.context.setdefault('request', record.get('request') or {})
+                    handle.context['callback_context'] = event.callback_context
+                    await adapter.update_interaction(handle, 'cancelled')
+                except Exception as exc:
+                    await self.logger.warning(f'Failed to invalidate orphaned interaction card: {exc}')
 
-        message_components: list[platform_message.MessageComponent] = []
-        callback_message_id = data.get('message_id')
-        if callback_message_id:
-            message_components.append(
-                platform_message.Source(
-                    id=str(callback_message_id),
-                    time=int(event.timestamp) if event.timestamp else int(time.time()),
-                )
-            )
-        message_components.append(
-            platform_message.Plain(text=str(data.get('display_text') or data.get('action_id') or 'submitted'))
-        )
-        message_chain = platform_message.MessageChain(message_components)
-        delivery_target = record.get('delivery_target') or {}
-        original_target_type = delivery_target.get('target_type')
-        original_target_id = delivery_target.get('target_id')
-        if original_target_type == 'group':
-            group = platform_entities.Group(
-                id=original_target_id,
-                name='',
-                permission=platform_entities.Permission.Member,
-            )
-            message_event: platform_events.MessageEvent = platform_events.GroupMessage(
-                sender=platform_entities.GroupMember(
-                    id=actor_id or '',
-                    member_name='',
-                    permission=platform_entities.Permission.Member,
-                    group=group,
-                ),
-                message_chain=message_chain,
-                time=event.timestamp,
-                source_platform_object=event.source_platform_object,
-            )
-        else:
-            message_event = platform_events.FriendMessage(
-                sender=platform_entities.Friend(id=actor_id or '', nickname='', remark=''),
-                message_chain=message_chain,
-                time=event.timestamp,
-                source_platform_object=event.source_platform_object,
-            )
+    async def _pipeline_target_exists(self, pipeline_uuid: str | None) -> bool:
+        """Whether a bound Pipeline target still exists in this Workspace.
 
-        launcher_type = (
-            provider_session.LauncherTypes.GROUP
-            if original_target_type == 'group'
-            else provider_session.LauncherTypes.PERSON
-        )
-        await self.ap.msg_aggregator.add_message(
-            bot_uuid=self.bot_entity.uuid,
-            launcher_type=launcher_type,
-            launcher_id=original_target_id or target_id or actor_id or '',
-            sender_id=actor_id or '',
-            message_event=message_event,
-            message_chain=message_chain,
-            adapter=adapter,
-            pipeline_uuid=record['processor_id'],
-            routed_by_rule=True,
-            variables={'_interaction_submission': record['submission']},
-            execution_context=self.execution_context,
-        )
-
-    async def _resume_agent_interaction(
-        self,
-        record: dict[str, typing.Any],
-        event: platform_events.PlatformSpecificEvent,
-        adapter: abstract_platform_adapter.AbstractMessagePlatformAdapter,
-        actor_id: str | None,
-        execution_id: str | None = None,
-    ) -> None:
-        """Resume the exact independent Agent that produced an interaction."""
-        agent = await self.ap.agent_service.get_agent(
-            self.execution_context,
-            record['processor_id'],
-        )
-        if not agent or agent.get('kind') != 'agent':
-            raise ValueError(f'Interaction target Agent is unavailable: {record["processor_id"]}')
-
-        binding = self._agent_product_to_binding(
-            agent,
-            {'id': record['binding_id']},
-            'interaction.submitted',
-            self.bot_entity.uuid,
-        )
-        if binding is None or binding.runner_id != record['runner_id']:
-            raise ValueError('Interaction target Agent runner changed after the request was created')
-        binding.binding_id = record['binding_id']
-
-        submission = record['submission']
-        display_text = str(
-            (submission or {}).get('action_id')
-            or (event.data if isinstance(event.data, dict) else {}).get('display_text')
-            or 'submitted'
-        )
-        input_data: dict[str, typing.Any] = {
-            'text': display_text,
-            'contents': [{'type': 'text', 'text': display_text}],
-            'attachments': [],
-        }
-        if 'interaction' in AgentInput.model_fields:
-            input_data['interaction'] = submission
-
-        delivery_target = record.get('delivery_target') or {}
-        supported_apis = self._get_adapter_supported_apis(adapter)
-        delivery_data: dict[str, typing.Any] = {
-            'surface': 'platform',
-            'reply_target': delivery_target,
-            'supports_streaming': False,
-            'supports_edit': 'edit_message' in supported_apis,
-            'supports_reaction': bool({'add_reaction', 'remove_reaction'} & set(supported_apis)),
-            'platform_capabilities': {
-                'adapter': adapter.__class__.__name__,
-                'event_type': 'interaction.submitted',
-                'supported_apis': supported_apis,
-            },
-        }
-        interaction_capabilities = self._get_adapter_interaction_capabilities(adapter, supported_apis)
-        if interaction_capabilities is not None:
-            delivery_data['interactions'] = interaction_capabilities
-
-        envelope = AgentEventEnvelope(
-            event_id=execution_id or f'interaction:{record["id"]}:{uuid.uuid4()}',
-            event_type='interaction.submitted',
-            event_time=int(event.timestamp) if event.timestamp else int(time.time()),
-            source='platform',
-            source_event_type='interaction.submitted',
-            bot_id=self.bot_entity.uuid,
-            workspace_id=record.get('workspace_id'),
-            conversation_id=record.get('conversation_id'),
-            thread_id=record.get('thread_id'),
-            actor=ActorContext(actor_type='user', actor_id=actor_id),
-            subject=SubjectContext(
-                subject_type='interaction',
-                subject_id=record['interaction_id'],
-                data={'action_id': (submission or {}).get('action_id')},
-            ),
-            input=AgentInput.model_validate(input_data),
-            delivery=DeliveryContext.model_validate(delivery_data),
-            raw_ref=RawEventRef(ref_id=f'interaction:{record["id"]}', storage_key=None),
-            data={'interaction': submission},
-        )
-
-        async for _ in self.ap.agent_run_orchestrator.run(
-            envelope,
-            binding,
-            adapter_context={'_delivery_adapter': adapter},
-        ):
-            # Resuming an interaction follows the same explicit-action delivery policy.
-            pass
+        The loaded Pipeline answers the common case; only a miss falls back to
+        the database, so a Pipeline being reloaded is never reported missing.
+        """
+        pipeline_uuid = str(pipeline_uuid or '').strip()
+        if not pipeline_uuid:
+            return False
+        try:
+            if await self.ap.pipeline_mgr.get_pipeline_by_uuid(self.execution_context, pipeline_uuid) is not None:
+                return True
+            return await self.ap.pipeline_service.get_pipeline(self.execution_context, pipeline_uuid) is not None
+        except Exception:
+            # An inconclusive lookup keeps the previous delivery behaviour.
+            return True
 
     async def _dispatch_eba_message_to_pipeline(
         self,
@@ -1617,21 +1703,22 @@ class RuntimeBot:
         def tenant_scoped_listener(listener):
             @functools.wraps(listener)
             async def wrapped(*args, **kwargs):
-                tenant_scope = getattr(self.ap.persistence_mgr, 'tenant_scope', None)
-                cloud_runtime = (
-                    getattr(
-                        getattr(self.ap.persistence_mgr, 'mode', None),
-                        'value',
-                        None,
+                with language_scope(await get_workspace_language(self.ap, self.workspace_uuid)):
+                    tenant_scope = getattr(self.ap.persistence_mgr, 'tenant_scope', None)
+                    cloud_runtime = (
+                        getattr(
+                            getattr(self.ap.persistence_mgr, 'mode', None),
+                            'value',
+                            None,
+                        )
+                        == 'cloud_runtime'
                     )
-                    == 'cloud_runtime'
-                )
-                if cloud_runtime:
-                    if not callable(tenant_scope):
-                        raise RuntimeError('Cloud platform callbacks require a tenant scope')
-                    async with tenant_scope(self.workspace_uuid):
-                        return await listener(*args, **kwargs)
-                return await listener(*args, **kwargs)
+                    if cloud_runtime:
+                        if not callable(tenant_scope):
+                            raise RuntimeError('Cloud platform callbacks require a tenant scope')
+                        async with tenant_scope(self.workspace_uuid):
+                            return await listener(*args, **kwargs)
+                    return await listener(*args, **kwargs)
 
             return wrapped
 
@@ -1767,10 +1854,34 @@ class RuntimeBot:
             tenant_scoped_listener(on_eba_event),
         )
 
+    def _observe_alert(self, *, error: Exception | None = None, recovered: bool = False) -> None:
+        """Report adapter crashes and restarts to Workspace alerts."""
+
+        alert_service = getattr(self.ap, 'alert_service', None)
+        bot_entity = getattr(self, 'bot_entity', None)
+        if alert_service is None or bot_entity is None:
+            return
+        workspace_uuid = getattr(self.execution_context, 'workspace_uuid', None)
+        try:
+            if recovered:
+                alert_service.observe_recovery(workspace_uuid, 'bot_offline', bot_entity.uuid)
+            else:
+                alert_service.observe_failure(
+                    workspace_uuid,
+                    'bot_offline',
+                    bot_entity.uuid,
+                    getattr(bot_entity, 'name', None) or bot_entity.uuid,
+                    error_type=type(error).__name__ if error else None,
+                    error_message=str(error) if error else None,
+                )
+        except Exception:
+            pass
+
     async def run(self):
         async def exception_wrapper():
             try:
                 self.task_context.set_current_action('Running...')
+                self._observe_alert(recovered=True)
                 await self.adapter.run_async()
                 self.task_context.set_current_action('Exited.')
             except Exception as e:
@@ -1780,6 +1891,7 @@ class RuntimeBot:
 
                 traceback_str = traceback.format_exc()
                 self.task_context.set_current_action('Exited with error.')
+                self._observe_alert(error=e)
                 await self.logger.error(f'平台适配器运行出错:\n{e}\n{traceback_str}')
 
         self.task_wrapper = self.ap.task_mgr.create_task(
@@ -1974,12 +2086,7 @@ class PlatformManager:
         }
 
         self.adapter_components = self.ap.discover.get_components_by_kind('MessagePlatformAdapter')
-        adapter_dict: dict[str, type[abstract_platform_adapter.AbstractMessagePlatformAdapter]] = {}
-        for component in self.adapter_components:
-            if component.metadata.name in disabled_adapters:
-                continue
-            adapter_dict[component.metadata.name] = component.get_python_component_class()
-        self.adapter_dict = adapter_dict
+        self.adapter_dict = {}
 
         # Filter out disabled adapters from components list (for API responses)
         if disabled_adapters:
@@ -2050,6 +2157,15 @@ class PlatformManager:
             updates['pipeline_uuid'] = pipeline_uuid
         return dataclasses.replace(context, **updates) if updates else context
 
+    def has_websocket_proxy_bot(self, workspace_uuid: str) -> bool:
+        """Whether this Workspace currently has a live WebSocket debug proxy.
+
+        Never creates one. The proxy is in-memory only, so callers that would
+        otherwise look a bot up in the ``bots`` table use this for its reserved
+        UUID instead.
+        """
+        return workspace_uuid in self.websocket_proxy_bots
+
     async def get_websocket_proxy_bot(
         self,
         context: ExecutionContext | RequestContext,
@@ -2077,23 +2193,23 @@ class PlatformManager:
                 execution_context.workspace_uuid,
                 expected_generation=execution_context.placement_generation,
             )
-            websocket_adapter_class = self.adapter_dict['websocket']
+            websocket_adapter_class = self._get_adapter_class('websocket')
             websocket_logger = EventLogger(
                 name='websocket-adapter',
                 ap=self.ap,
                 execution_context=execution_context,
-                owner='websocket-proxy-bot',
+                owner=constants.WEBSOCKET_PROXY_BOT_UUID,
             )
             websocket_adapter_inst = websocket_adapter_class({}, websocket_logger, ap=self.ap)
             proxy_context = dataclasses.replace(
                 execution_context,
                 instance_uuid=binding.instance_uuid,
-                bot_uuid='websocket-proxy-bot',
+                bot_uuid=constants.WEBSOCKET_PROXY_BOT_UUID,
             )
             runtime_bot = RuntimeBot(
                 ap=self.ap,
                 bot_entity=persistence_bot.Bot(
-                    uuid='websocket-proxy-bot',
+                    uuid=constants.WEBSOCKET_PROXY_BOT_UUID,
                     workspace_uuid=binding.workspace_uuid,
                     name='WebSocket',
                     description='',
@@ -2212,6 +2328,10 @@ class PlatformManager:
         )
         binding = _binding
         for bot in result.all():
+            # Disabled drafts may not have the credentials needed to construct
+            # an adapter. They become runtime bots when explicitly enabled.
+            if not bot.enable:
+                continue
             try:
                 if binding is None:
                     binding = await self.ap.workspace_service.get_execution_binding(workspace_uuid)
@@ -2246,6 +2366,7 @@ class PlatformManager:
             bot_entity = persistence_bot.Bot(**bot_entity)
 
         execution_context = self._normalize_execution_context(context, bot_uuid=bot_entity.uuid)
+        await require_workspace_platform(self.ap, execution_context.workspace_uuid, bot_entity.adapter)
         if bot_entity.workspace_uuid != execution_context.workspace_uuid:
             raise WorkspaceRequiredError('Bot entity Workspace does not match its runtime context')
         if not _binding_validated:
@@ -2269,10 +2390,7 @@ class PlatformManager:
             )
 
             bot_entity.adapter = canonical_adapter_name(bot_entity.adapter)
-            if bot_entity.adapter not in self.adapter_dict:
-                raise platform_errors.AdapterNotFoundError(bot_entity.adapter)
-
-            adapter_inst = self.adapter_dict[bot_entity.adapter](
+            adapter_inst = self._get_adapter_class(bot_entity.adapter)(
                 bot_entity.adapter_config,
                 logger,
             )
@@ -2290,6 +2408,9 @@ class PlatformManager:
                 logger=logger,
                 execution_context=execution_context,
             )
+
+            if hasattr(adapter_inst, 'bind_runtime'):
+                adapter_inst.bind_runtime(runtime_bot)
 
             await runtime_bot.initialize()
 
@@ -2332,6 +2453,7 @@ class PlatformManager:
         )
         if bot is None or bot.placement_generation != execution_context.placement_generation:
             return None
+        await require_workspace_platform(self.ap, execution_context.workspace_uuid, bot.bot_entity.adapter)
         return bot
 
     async def resolve_public_bot(self, route_key: str) -> RuntimeBot | None:
@@ -2385,6 +2507,16 @@ class PlatformManager:
                 if bot.enable:
                     await bot.shutdown()
                 self._pop_runtime_bot(key)
+
+    def _get_adapter_class(self, name: str) -> type[abstract_platform_adapter.AbstractMessagePlatformAdapter]:
+        name = canonical_adapter_name(name)
+        if name not in self.adapter_dict:
+            component = self.get_available_adapter_manifest_by_name(name)
+            if component is None:
+                raise platform_errors.AdapterNotFoundError(name)
+            # Keep unused platform SDKs out of the process until a Bot needs them.
+            self.adapter_dict[name] = component.get_python_component_class()
+        return self.adapter_dict[name]
 
     def get_available_adapters_info(self) -> list[dict]:
         return [

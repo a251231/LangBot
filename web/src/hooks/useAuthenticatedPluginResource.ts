@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { httpClient } from '@/app/infra/http/HttpClient';
 import { useCurrentWorkspace } from '@/app/infra/http';
+import { useInstalledPluginIcon } from '@/app/infra/hooks/useInstalledPluginIcon';
 
 type AuthenticatedResourceState = {
   key: string;
@@ -14,50 +15,21 @@ const EMPTY_RESOURCE: AuthenticatedResourceState = {
   error: false,
 };
 
+/**
+ * Backwards-compatible wrapper around the shared installed-plugin icon hook.
+ * Kept for callers that want a `{ url, error }` shape; the url is '' while
+ * loading or when the icon is unavailable.
+ */
 export function useAuthenticatedPluginIcon(
   author: string,
   name: string,
   enabled = true,
 ): { url: string; error: boolean } {
-  const [resource, setResource] =
-    useState<AuthenticatedResourceState>(EMPTY_RESOURCE);
-  const currentWorkspace = useCurrentWorkspace();
-  const workspaceUuid = currentWorkspace?.workspace.uuid;
-  const resourceKey = `${workspaceUuid ?? ''}:${author}/${name}`;
-
-  useEffect(() => {
-    if (!enabled) {
-      setResource({ key: resourceKey, url: '', error: false });
-      return;
-    }
-    let active = true;
-    let objectURL = '';
-    setResource({ key: resourceKey, url: '', error: false });
-    httpClient
-      .getAuthenticatedPluginIconURL(author, name)
-      .then((nextURL) => {
-        objectURL = nextURL;
-        if (active) {
-          setResource({ key: resourceKey, url: nextURL, error: false });
-        } else {
-          URL.revokeObjectURL(nextURL);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setResource({ key: resourceKey, url: '', error: true });
-        }
-      });
-    return () => {
-      active = false;
-      if (objectURL) URL.revokeObjectURL(objectURL);
-    };
-  }, [author, enabled, name, resourceKey]);
-
-  return {
-    url: resource.key === resourceKey ? resource.url : '',
-    error: resource.key === resourceKey && resource.error,
-  };
+  const url = useInstalledPluginIcon(
+    enabled ? author : null,
+    enabled ? name : null,
+  );
+  return { url: url ?? '', error: false };
 }
 
 export function useAuthenticatedPluginAsset(
@@ -76,7 +48,10 @@ export function useAuthenticatedPluginAsset(
     let objectURL = '';
     setResource({ key: resourceKey, url: '', error: false });
     httpClient
-      .getAuthenticatedPluginAssetURL(author, name, filepath)
+      // Pin the Workspace this render resolved. The interceptor would otherwise
+      // read the global uuid at send time, which can already be the next
+      // Workspace while this effect still belongs to the previous one.
+      .getAuthenticatedPluginAssetURL(author, name, filepath, workspaceUuid)
       .then((nextURL) => {
         objectURL = nextURL;
         if (active) {
@@ -94,7 +69,7 @@ export function useAuthenticatedPluginAsset(
       active = false;
       if (objectURL) URL.revokeObjectURL(objectURL);
     };
-  }, [author, name, filepath, resourceKey]);
+  }, [author, name, filepath, resourceKey, workspaceUuid]);
 
   return {
     url: resource.key === resourceKey ? resource.url : '',

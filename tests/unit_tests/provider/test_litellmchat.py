@@ -12,6 +12,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 
 import litellm
+import httpx
 
 from langbot.pkg.provider.modelmgr.requesters import litellmchat
 from langbot.pkg.provider.modelmgr import errors
@@ -24,6 +25,7 @@ class MockRuntimeModel:
         self.model_entity = Mock()
         self.model_entity.name = model_name
         self.model_entity.extra_args = {}
+        self.model_entity.abilities = []
         self.provider = Mock()
         self.provider.token_mgr = Mock()
         self.provider.token_mgr.get_token = Mock(return_value=api_key)
@@ -51,6 +53,37 @@ class MockRuntimeRerankModel:
         self.provider = Mock()
         self.provider.token_mgr = Mock()
         self.provider.token_mgr.get_token = Mock(return_value=api_key)
+
+
+@pytest.mark.asyncio
+async def test_closing_consumer_closes_provider_http_stream():
+    import asyncio
+    from types import SimpleNamespace
+
+    app = Mock()
+    app.tool_mgr.generate_tools_for_openai = AsyncMock(return_value=None)
+    requester = litellmchat.LiteLLMRequester(ap=app, config={})
+    closed = asyncio.Event()
+
+    async def provider():
+        try:
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(model_dump=lambda: {'role': 'assistant', 'content': 'first'}),
+                        finish_reason=None,
+                    )
+                ]
+            )
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    with patch.object(litellmchat, 'acompletion', new=AsyncMock(side_effect=lambda **kw: provider())):
+        output = requester.invoke_llm_stream(query=None, model=MockRuntimeModel(), messages=[])
+        assert (await anext(output)).content == 'first'
+        await output.aclose()
+    assert closed.is_set()
 
 
 class TestBuildLiteLLMModelName:
@@ -348,43 +381,33 @@ class TestInvokeLLMStreamUsage:
         assert ''.join(chunk.content or '' for chunk in collected) == 'Visible answer'
 
     @pytest.mark.asyncio
-    async def test_stream_removes_initial_orphan_think_close(self):
-        """Initial reasoning content without an open tag is removed until </think>."""
-        import langbot_plugin.api.entities.builtin.pipeline.query as pipeline_query
-        import langbot_plugin.api.entities.builtin.provider.message as provider_message
-
+    @pytest.mark.parametrize('separate_reasoning', [False, True])
+    async def test_remove_think_preserves_incremental_plain_text(self, separate_reasoning):
+        """Visible text must arrive before the provider produces the next delta."""
         mock_ap = Mock()
-        mock_ap.tool_mgr = Mock()
         mock_ap.tool_mgr.generate_tools_for_openai = AsyncMock(return_value=None)
         requester = litellmchat.LiteLLMRequester(ap=mock_ap, config={})
-        model = MockRuntimeModel('minimax-m3', 'test-api-key')
+        model = MockRuntimeModel('gpt-4o', 'test-api-key')
+        consumed = []
 
-        chunks = [
-            self._make_chunk(content='hidden reasoning'),
-            self._make_chunk(content=' still hidden</thi'),
-            self._make_chunk(content='nk>Visible answer', finish_reason='stop'),
-        ]
+        async def provider_stream():
+            if separate_reasoning:
+                reasoning_chunk = self._make_chunk()
+                reasoning_chunk.choices[0].delta.model_dump.return_value['reasoning_content'] = 'hidden reasoning'
+                yield reasoning_chunk
+            for text in ['Hello', ' world']:
+                consumed.append(text)
+                yield self._make_chunk(content=text)
+            yield self._make_chunk(content=None, finish_reason='stop')
 
-        async def _aiter(*args, **kwargs):
-            for c in chunks:
-                yield c
-
-        query = Mock(spec=pipeline_query.Query)
-        query.variables = {}
-        messages = [provider_message.Message(role='user', content='Hi')]
-
-        with patch.object(litellmchat, 'acompletion', new=AsyncMock(side_effect=lambda **kw: _aiter())):
-            collected = [
-                chunk
-                async for chunk in requester.invoke_llm_stream(
-                    query=query,
-                    model=model,
-                    messages=messages,
-                    remove_think=True,
-                )
-            ]
-
-        assert ''.join(chunk.content or '' for chunk in collected) == 'Visible answer'
+        with patch.object(litellmchat, 'acompletion', new=AsyncMock(side_effect=lambda **kw: provider_stream())):
+            received = []
+            async for chunk in requester.invoke_llm_stream(query=None, model=model, messages=[], remove_think=True):
+                if chunk.content:
+                    received.append(chunk.content)
+                    assert received == consumed
+                    assert not chunk.is_final
+            assert received == ['Hello', ' world']
 
     @pytest.mark.asyncio
     async def test_stream_removes_non_leading_think_content(self):
@@ -746,7 +769,7 @@ class TestHandleLiteLLMError:
         with pytest.raises(errors.RequesterError) as exc_info:
             requester._handle_litellm_error(error)
 
-        assert '请求参数错误' in str(exc_info.value)
+        assert 'Invalid request parameters' in str(exc_info.value)
 
     def test_authentication_error(self):
         """Test AuthenticationError translation"""
@@ -757,7 +780,7 @@ class TestHandleLiteLLMError:
         with pytest.raises(errors.RequesterError) as exc_info:
             requester._handle_litellm_error(error)
 
-        assert 'API key 无效' in str(exc_info.value)
+        assert 'Invalid API key' in str(exc_info.value)
 
     def test_rate_limit_error(self):
         """Test RateLimitError translation"""
@@ -768,7 +791,7 @@ class TestHandleLiteLLMError:
         with pytest.raises(errors.RequesterError) as exc_info:
             requester._handle_litellm_error(error)
 
-        assert '请求过于频繁' in str(exc_info.value)
+        assert 'Rate limit exceeded' in str(exc_info.value)
 
     def test_timeout_error(self):
         """Test Timeout translation"""
@@ -779,7 +802,7 @@ class TestHandleLiteLLMError:
         with pytest.raises(errors.RequesterError) as exc_info:
             requester._handle_litellm_error(error)
 
-        assert '请求超时' in str(exc_info.value)
+        assert 'Request timed out' in str(exc_info.value)
 
     def test_context_window_error(self):
         """Test ContextWindowExceededError translation"""
@@ -790,7 +813,34 @@ class TestHandleLiteLLMError:
         with pytest.raises(errors.RequesterError) as exc_info:
             requester._handle_litellm_error(error)
 
-        assert '上下文长度超限' in str(exc_info.value)
+        assert 'Context length exceeded' in str(exc_info.value)
+
+    def test_internal_server_error(self):
+        """Test InternalServerError translation"""
+        requester = litellmchat.LiteLLMRequester(ap=Mock(), config={})
+
+        error = litellm.InternalServerError(message='server error', model='gpt-4o', llm_provider='openai')
+
+        with pytest.raises(errors.RequesterError) as exc_info:
+            requester._handle_litellm_error(error)
+
+        assert 'Internal server error' in str(exc_info.value)
+        assert exc_info.value.retryable
+
+    def test_permission_denied_error(self):
+        """Test PermissionDeniedError translation"""
+        requester = litellmchat.LiteLLMRequester(ap=Mock(), config={})
+
+        response = httpx.Response(403, request=httpx.Request('POST', 'https://example.com'))
+        error = litellm.PermissionDeniedError(
+            message='forbidden', model='gpt-4o', llm_provider='openai', response=response
+        )
+
+        with pytest.raises(errors.RequesterError) as exc_info:
+            requester._handle_litellm_error(error)
+
+        assert 'Permission denied' in str(exc_info.value)
+        assert not exc_info.value.retryable
 
     def test_unknown_error(self):
         """Test unknown error translation"""
@@ -799,7 +849,7 @@ class TestHandleLiteLLMError:
         with pytest.raises(errors.RequesterError) as exc_info:
             requester._handle_litellm_error(Exception('unknown'))
 
-        assert '未知错误' in str(exc_info.value)
+        assert 'Unknown error' in str(exc_info.value)
 
 
 class TestInvokeLLM:
@@ -955,7 +1005,7 @@ class TestInvokeLLM:
                     messages=messages,
                 )
 
-            assert 'API key 无效' in str(exc_info.value)
+            assert 'Invalid API key' in str(exc_info.value)
 
 
 class TestInvokeEmbedding:
@@ -1027,10 +1077,8 @@ class TestInvokeRerank:
                 documents=['Paris is the capital.', 'London is a city.', 'France is in Europe.'],
             )
 
-            assert len(results) == 3
-            # Scores should be normalized
-            assert results[0]['index'] == 0
-            assert results[0]['relevance_score'] >= 0 and results[0]['relevance_score'] <= 1
+            assert [result['index'] for result in results] == [0, 1, 2]
+            assert [result['relevance_score'] for result in results] == pytest.approx([1.0, 0.0, 0.76923076923])
 
     @pytest.mark.asyncio
     async def test_invoke_rerank_normalization(self):
@@ -1276,8 +1324,8 @@ class TestConvertMessages:
         result = requester._convert_messages(messages)
 
         assert len(result) == 1
-        # LiteLLM handles multiple text parts, we pass them through
-        assert isinstance(result[0]['content'], list)
+        assert result[0]['role'] == 'user'
+        assert result[0]['content'] == [{'type': 'text', 'text': 'Hello'}, {'type': 'text', 'text': 'World'}]
 
 
 class TestScanModels:
@@ -1509,3 +1557,33 @@ class TestScanModels:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestStreamingThinkFilter:
+    @pytest.mark.parametrize(
+        'opening,closing',
+        [
+            ('<think>', '</think>'),
+            ('CRETIRE_REASONING_BEGINk', 'CRETIRE_REASONING_ENDk'),
+        ],
+    )
+    def test_split_tags_and_repeated_blocks(self, opening, closing):
+        state = litellmchat._ThinkStripState()
+        assert state.feed('Before ') == 'Before '
+        for char in opening + 'hidden' + closing:
+            assert state.feed(char) == ''
+        assert state.feed('Answer ') == 'Answer '
+        assert state.feed(opening + 'more hidden' + closing + 'end') == 'end'
+        assert state.flush() == ''
+
+    def test_unclosed_think_is_discarded(self):
+        state = litellmchat._ThinkStripState()
+        assert state.feed('<think>hidden') == ''
+        assert state.flush() == ''
+
+    def test_partial_non_tag_is_released(self):
+        state = litellmchat._ThinkStripState()
+        assert state.feed('Answer <thi') == 'Answer '
+        assert state.feed('ng>') == '<thing>'
+        assert state.feed(' <') == ' '
+        assert state.flush() == '<'

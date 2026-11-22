@@ -1,3 +1,14 @@
+import { useCurrentWorkspace } from '@/app/infra/http';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import LoadErrorState from '@/components/LoadErrorState';
 import React, {
   useState,
   useEffect,
@@ -12,6 +23,7 @@ import { httpClient } from '@/app/infra/http/HttpClient';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import {
+  RotateCcw,
   Ban,
   Bot,
   Copy,
@@ -25,6 +37,8 @@ import {
   ShieldCheck,
   ShieldOff,
   Wrench,
+  Users,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import BotAdminsDialog, {
@@ -41,6 +55,11 @@ import {
   Voice,
 } from '@/app/infra/entities/message';
 import { PIPELINE_DISCARD } from '@/app/home/bots/components/bot-form/EventBindingsEditor';
+import {
+  parseGroupMemberSessionId,
+  parseSessionType,
+  sessionGroupId,
+} from './session-scope';
 
 interface SessionInfo {
   session_id: string;
@@ -142,6 +161,27 @@ const BotSessionMonitor = forwardRef<
   BotSessionMonitorProps
 >(function BotSessionMonitor({ botId }, ref) {
   const { t } = useTranslation();
+  const workspace = useCurrentWorkspace();
+  const canReset = workspace?.permissions.includes('resource.manage') ?? false;
+  const [resetTarget, setResetTarget] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
+  // How far a reset reaches for the selected group session: one member, or the
+  // whole group when its Chat shares context (or the session predates per-member
+  // records). null = not a group session, or the Chat could not be read.
+  const [resetScope, setResetScope] = useState<'member' | 'group' | null>(null);
+  const resetContext = async () => {
+    if (!resetTarget || resetting) return;
+    setResetting(true);
+    try {
+      await httpClient.resetSessionContext(botId, resetTarget);
+      toast.success(t('bots.sessionMonitor.resetSuccess'));
+      setResetTarget(null);
+    } catch {
+      toast.error(t('bots.sessionMonitor.resetError'));
+    } finally {
+      setResetting(false);
+    }
+  };
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionTotal, setSessionTotal] = useState(0);
   const [sessionPage, setSessionPage] = useState(0);
@@ -149,6 +189,7 @@ const BotSessionMonitor = forwardRef<
   const [endDate, setEndDate] = useState('');
   const [userQuery, setUserQuery] = useState('');
   const [appliedUserQuery, setAppliedUserQuery] = useState('');
+  const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
@@ -171,19 +212,19 @@ const BotSessionMonitor = forwardRef<
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const sessionRequestIdRef = useRef(0);
   const messageRequestIdRef = useRef(0);
+  const retriedImageMessagesRef = useRef(new Set<string>());
+  const imageRefreshRef = useRef<Promise<void> | null>(null);
   const { admins, reload: reloadAdmins } = useBotAdmins(botId);
   const [adminsDialogOpen, setAdminsDialogOpen] = useState(false);
   const [togglingAdmin, setTogglingAdmin] = useState<string | null>(null);
 
-  const parseSessionType = (sessionId: string): string | null => {
-    const lower = sessionId.toLowerCase();
-    if (lower.includes('person')) return 'person';
-    if (lower.includes('group')) return 'group';
-    return null;
-  };
+  // Bot admins are people, not group chats. Group sessions never map to an
+  // admin target, so the UI cannot grant a whole group admin privileges.
+  const adminLauncherType = (sessionId: string): 'person' | null =>
+    parseSessionType(sessionId) === 'person' ? 'person' : null;
 
   const isSessionAdmin = (session: SessionInfo): boolean => {
-    const type = parseSessionType(session.session_id);
+    const type = adminLauncherType(session.session_id);
     const lid =
       session.user_id ??
       session.session_id.replace(
@@ -196,7 +237,7 @@ const BotSessionMonitor = forwardRef<
   };
 
   const toggleAdmin = async (session: SessionInfo) => {
-    const type = parseSessionType(session.session_id);
+    const type = adminLauncherType(session.session_id);
     if (!type) return;
     const lid =
       session.user_id ??
@@ -252,6 +293,7 @@ const BotSessionMonitor = forwardRef<
           ? localDateBoundaryToISOString(endDate, true)
           : undefined,
         userQuery: appliedUserQuery || undefined,
+        launcherId: groupFilter ?? undefined,
       });
       if (requestId !== sessionRequestIdRef.current) return;
       setSessions(response.sessions ?? []);
@@ -266,7 +308,7 @@ const BotSessionMonitor = forwardRef<
         setLoadingSessions(false);
       }
     }
-  }, [appliedUserQuery, botId, endDate, sessionPage, startDate]);
+  }, [appliedUserQuery, botId, endDate, groupFilter, sessionPage, startDate]);
 
   useImperativeHandle(
     ref,
@@ -319,7 +361,7 @@ const BotSessionMonitor = forwardRef<
 
         // Collect user message IDs for feedback matching
         const userMsgIds = new Set(
-          sorted.filter((m) => !m.role || m.role === 'user').map((m) => m.id),
+          sorted.filter(isUserMessage).map((m) => m.id),
         );
 
         if (userMsgIds.size > 0) {
@@ -367,9 +409,11 @@ const BotSessionMonitor = forwardRef<
   useEffect(() => {
     setSelectedSessionId(null);
     setMessagePage(0);
-  }, [appliedUserQuery, botId, endDate, sessionPage, startDate]);
+  }, [appliedUserQuery, botId, endDate, groupFilter, sessionPage, startDate]);
 
   useEffect(() => {
+    retriedImageMessagesRef.current.clear();
+    imageRefreshRef.current = null;
     if (selectedSessionId) {
       loadMessages(selectedSessionId, messagePage);
     } else {
@@ -389,9 +433,10 @@ const BotSessionMonitor = forwardRef<
   }, [selectedSessionId, messagePage, loadMessages]);
 
   useEffect(() => {
+    if (loadingMessages || messageError) return;
     if (messages.length === 0 && toolCalls.length === 0) return;
-    // Wait for DOM to render the new messages before scrolling
-    requestAnimationFrame(() => {
+    // The timeline is hidden until all message data has finished loading.
+    const frame = requestAnimationFrame(() => {
       const container = messagesContainerRef.current;
       if (container) {
         const viewport = container.querySelector(
@@ -401,7 +446,8 @@ const BotSessionMonitor = forwardRef<
         scrollTarget.scrollTop = scrollTarget.scrollHeight;
       }
     });
-  }, [messages, toolCalls]);
+    return () => cancelAnimationFrame(frame);
+  }, [loadingMessages, messageError, messages, toolCalls]);
 
   const parseMessageChain = (content: string): MessageChainComponent[] => {
     try {
@@ -409,21 +455,80 @@ const BotSessionMonitor = forwardRef<
       if (Array.isArray(parsed)) {
         return parsed as MessageChainComponent[];
       }
+      if (parsed && typeof parsed === 'object') {
+        const chain = parsed.message_chain ?? parsed.event?.message_chain;
+        if (Array.isArray(chain)) return chain as MessageChainComponent[];
+        if (Array.isArray(chain?.root))
+          return chain.root as MessageChainComponent[];
+        if (Array.isArray(parsed.contents)) {
+          const components: MessageChainComponent[] = [];
+          for (const part of parsed.contents) {
+            if (part.type === 'text' && typeof part.text === 'string') {
+              components.push({ type: 'Plain', text: part.text } as Plain);
+            } else if (part.type === 'image' && part.image_url) {
+              components.push({
+                type: 'Image',
+                url: part.image_url,
+              } as MessageChainComponent);
+            }
+          }
+          if (components.length) return components;
+        }
+        if (typeof parsed.text === 'string') {
+          return [{ type: 'Plain', text: parsed.text } as Plain];
+        }
+      }
     } catch {
       // Not JSON, return as plain text
     }
     return [{ type: 'Plain', text: content } as Plain];
   };
 
-  const isUserMessage = (msg: SessionMessage): boolean => {
+  function isUserMessage(msg: SessionMessage): boolean {
+    // Older processing-error records inherited the default user role.
+    if (msg.status === 'error' && msg.message_content.startsWith('Error: ')) {
+      return false;
+    }
     if (msg.role === 'assistant') return false;
     if (msg.role === 'user') return true;
     return !msg.runner_name;
+  }
+
+  const refreshFailedImage = (messageId: string) => {
+    if (!selectedSessionId || retriedImageMessagesRef.current.has(messageId))
+      return;
+    retriedImageMessagesRef.current.add(messageId);
+    if (imageRefreshRef.current) return;
+    const requestId = messageRequestIdRef.current;
+    const request = httpClient
+      .getSessionMessages(
+        selectedSessionId,
+        MESSAGE_PAGE_SIZE,
+        messagePage * MESSAGE_PAGE_SIZE,
+        botId,
+      )
+      .then((response) => {
+        if (requestId !== messageRequestIdRef.current) return;
+        setMessages(
+          (response.messages ?? []).sort(
+            (a, b) =>
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+          ),
+        );
+      })
+      .catch(() => {
+        /* Keep the failed image visible until the next manual refresh. */
+      })
+      .finally(() => {
+        if (imageRefreshRef.current === request) imageRefreshRef.current = null;
+      });
+    imageRefreshRef.current = request;
   };
 
   const renderMessageComponent = (
     component: MessageChainComponent,
     index: number,
+    messageId: string,
   ) => {
     switch (component.type) {
       case 'Plain':
@@ -471,6 +576,8 @@ const BotSessionMonitor = forwardRef<
             <img
               src={imageUrl}
               alt="Image"
+              referrerPolicy="no-referrer"
+              onError={() => refreshFailedImage(messageId)}
               className="max-w-full max-h-52 rounded-lg"
             />
           </div>
@@ -479,7 +586,7 @@ const BotSessionMonitor = forwardRef<
 
       case 'Voice': {
         const voice = component as Voice;
-        const voiceUrl = voice.url || (voice.base64 ? voice.base64 : '');
+        const voiceUrl = voice.base64 || voice.url || '';
         if (!voiceUrl) {
           return (
             <span
@@ -506,7 +613,11 @@ const BotSessionMonitor = forwardRef<
           >
             <div className="text-sm">
               {quote.origin?.map((comp, idx) =>
-                renderMessageComponent(comp as MessageChainComponent, idx),
+                renderMessageComponent(
+                  comp as MessageChainComponent,
+                  idx,
+                  messageId,
+                ),
               )}
             </div>
           </div>
@@ -539,7 +650,7 @@ const BotSessionMonitor = forwardRef<
     return (
       <div className="whitespace-pre-wrap break-words">
         {chain.map((component, index) =>
-          renderMessageComponent(component, index),
+          renderMessageComponent(component, index, msg.id),
         )}
       </div>
     );
@@ -644,6 +755,45 @@ const BotSessionMonitor = forwardRef<
   const selectedSession = sessions.find(
     (s) => s.session_id === selectedSessionId,
   );
+  const selectedGroupId = selectedSessionId
+    ? sessionGroupId(selectedSessionId)
+    : null;
+
+  const resetScopeRequestRef = useRef(0);
+  const openReset = (session: SessionInfo) => {
+    const requestId = ++resetScopeRequestRef.current;
+    setResetTarget(session.session_id);
+    setResetScope(null);
+    if (!parseGroupMemberSessionId(session.session_id)) {
+      // Whole-group IDs always reset the shared group conversation.
+      if (sessionGroupId(session.session_id)) setResetScope('group');
+      return;
+    }
+    if (!session.pipeline_id) {
+      setResetScope('member');
+      return;
+    }
+    httpClient
+      .getPipeline(session.pipeline_id)
+      .then((resp) => {
+        if (requestId !== resetScopeRequestRef.current) return;
+        const runner = (
+          resp.pipeline.config?.ai as
+            { runner?: Record<string, unknown> } | undefined
+        )?.runner;
+        setResetScope(
+          runner?.['group-context'] === 'group' ? 'group' : 'member',
+        );
+      })
+      .catch(() => {
+        // Keep the generic description when the Chat cannot be read.
+      });
+  };
+
+  const applyGroupFilter = (groupId: string | null) => {
+    setSessionPage(0);
+    setGroupFilter(groupId);
+  };
   const sessionPageCount = Math.max(
     1,
     Math.ceil(sessionTotal / SESSION_PAGE_SIZE),
@@ -664,7 +814,7 @@ const BotSessionMonitor = forwardRef<
         {/* Left Panel: Session List */}
         <div className="max-h-48 md:max-h-none md:w-60 flex-shrink-0 border-b md:border-b-0 md:border-r flex flex-col min-h-0">
           {/* Admin header */}
-          <div className="px-2 py-1.5 border-b shrink-0 flex items-center justify-between">
+          <div className="px-2 py-1.5 border-b shrink-0 flex items-center justify-between gap-4">
             <button
               type="button"
               className="inline-flex items-center gap-1.5 text-sm font-medium hover:text-foreground transition-colors"
@@ -730,6 +880,25 @@ const BotSessionMonitor = forwardRef<
                 className="h-7 min-w-0 rounded border bg-background px-1 text-[10px]"
               />
             </div>
+            {groupFilter && (
+              <div className="flex items-center gap-1 rounded border bg-muted/50 px-2 py-1 text-[11px]">
+                <Users className="size-3 shrink-0" />
+                <span className="min-w-0 flex-1 truncate" title={groupFilter}>
+                  {t('bots.sessionMonitor.groupFilterActive', {
+                    group: abbreviateId(groupFilter),
+                  })}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => applyGroupFilter(null)}
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  aria-label={t('bots.sessionMonitor.clearGroupFilter')}
+                  title={t('bots.sessionMonitor.clearGroupFilter')}
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            )}
           </div>
           {/* Session List */}
           <ScrollArea className="flex-1 min-h-0">
@@ -738,19 +907,11 @@ const BotSessionMonitor = forwardRef<
                 {t('bots.sessionMonitor.loading')}
               </div>
             ) : sessionError ? (
-              <div
-                role="alert"
-                className="p-3 space-y-2 text-sm text-destructive"
-              >
-                <p>{t('monitoring.loadError')}</p>
-                <button
-                  type="button"
-                  onClick={loadSessions}
-                  className="rounded border px-2 py-1 text-foreground"
-                >
-                  {t('common.retry')}
-                </button>
-              </div>
+              <LoadErrorState
+                compact
+                title={t('monitoring.loadError')}
+                onRetry={loadSessions}
+              />
             ) : sessions.length === 0 ? (
               <div className="text-center text-muted-foreground py-12 text-sm">
                 {t('bots.sessionMonitor.noSessions')}
@@ -761,6 +922,9 @@ const BotSessionMonitor = forwardRef<
                   const isSelected = selectedSessionId === session.session_id;
                   const sessionType = parseSessionType(session.session_id);
                   const sessionIsAdmin = isSessionAdmin(session);
+                  const memberGroup = parseGroupMemberSessionId(
+                    session.session_id,
+                  )?.groupId;
                   return (
                     <div
                       key={session.session_id}
@@ -789,6 +953,16 @@ const BotSessionMonitor = forwardRef<
                         {sessionType && (
                           <span className="px-1 py-0.5 rounded bg-muted text-[10px]">
                             {sessionType}
+                          </span>
+                        )}
+                        {memberGroup && (
+                          <span
+                            className="truncate text-[10px]"
+                            title={memberGroup}
+                          >
+                            {t('bots.sessionMonitor.inGroup', {
+                              group: abbreviateId(memberGroup),
+                            })}
                           </span>
                         )}
 
@@ -850,7 +1024,7 @@ const BotSessionMonitor = forwardRef<
                       selectedSession?.user_id ||
                       selectedSessionId.slice(0, 20)}
                   </div>
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
                     {parseSessionType(selectedSessionId) && (
                       <span>{parseSessionType(selectedSessionId)}</span>
                     )}
@@ -883,36 +1057,65 @@ const BotSessionMonitor = forwardRef<
                         </span>
                       </>
                     )}
-                    {selectedSession && parseSessionType(selectedSessionId) && (
+                    {selectedSession &&
+                      adminLauncherType(selectedSessionId) && (
+                        <>
+                          <span>·</span>
+                          <button
+                            type="button"
+                            className={cn(
+                              'inline-flex items-center gap-1 transition-colors',
+                              isSessionAdmin(selectedSession)
+                                ? 'text-blue-500'
+                                : 'text-muted-foreground hover:text-blue-500',
+                            )}
+                            disabled={togglingAdmin === selectedSessionId}
+                            title={
+                              isSessionAdmin(selectedSession)
+                                ? t('bots.admins.removeAdminTitle')
+                                : t('bots.admins.setAdminTitle')
+                            }
+                            onClick={() => toggleAdmin(selectedSession)}
+                          >
+                            {isSessionAdmin(selectedSession) ? (
+                              <ShieldCheck className="size-3.5" />
+                            ) : (
+                              <ShieldOff className="size-3.5" />
+                            )}
+                            <span>{t('bots.admins.adminBadge')}</span>
+                          </button>
+                        </>
+                      )}
+                    {selectedGroupId && groupFilter !== selectedGroupId && (
                       <>
                         <span>·</span>
                         <button
                           type="button"
-                          className={cn(
-                            'inline-flex items-center gap-1 transition-colors',
-                            isSessionAdmin(selectedSession)
-                              ? 'text-blue-500'
-                              : 'text-muted-foreground hover:text-blue-500',
-                          )}
-                          disabled={togglingAdmin === selectedSessionId}
-                          title={
-                            isSessionAdmin(selectedSession)
-                              ? t('bots.admins.removeAdminTitle')
-                              : t('bots.admins.setAdminTitle')
-                          }
-                          onClick={() => toggleAdmin(selectedSession)}
+                          className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
+                          title={selectedGroupId}
+                          onClick={() => applyGroupFilter(selectedGroupId)}
                         >
-                          {isSessionAdmin(selectedSession) ? (
-                            <ShieldCheck className="size-3.5" />
-                          ) : (
-                            <ShieldOff className="size-3.5" />
-                          )}
-                          <span>{t('bots.admins.adminBadge')}</span>
+                          <Users className="size-3.5" />
+                          <span>{t('bots.sessionMonitor.filterByGroup')}</span>
                         </button>
                       </>
                     )}
                   </div>
                 </div>
+                {canReset && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 shrink-0 gap-1.5"
+                    disabled={resetting}
+                    onClick={() =>
+                      selectedSession && openReset(selectedSession)
+                    }
+                  >
+                    <RotateCcw className="size-3.5" />
+                    {t('bots.sessionMonitor.resetContext')}
+                  </Button>
+                )}
               </div>
 
               {/* Messages Area */}
@@ -922,45 +1125,25 @@ const BotSessionMonitor = forwardRef<
               >
                 <div className="space-y-4">
                   {analysisError && !loadingMessages && (
-                    <div
-                      role="alert"
-                      className="text-sm text-destructive space-y-2"
-                    >
-                      <p>
-                        {t('monitoring.toolCalls.title')}:{' '}
-                        {t('monitoring.loadError')}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          loadMessages(selectedSessionId, messagePage)
-                        }
-                        className="rounded border px-2 py-1 text-foreground"
-                      >
-                        {t('common.retry')}
-                      </button>
-                    </div>
+                    <LoadErrorState
+                      compact
+                      title={`${t('monitoring.toolCalls.title')}: ${t('monitoring.loadError')}`}
+                      onRetry={() =>
+                        loadMessages(selectedSessionId, messagePage)
+                      }
+                    />
                   )}
                   {loadingMessages ? (
                     <div className="text-center text-muted-foreground py-12 text-sm">
                       {t('bots.sessionMonitor.loading')}
                     </div>
                   ) : messageError ? (
-                    <div
-                      role="alert"
-                      className="text-sm text-destructive space-y-2"
-                    >
-                      <p>{t('monitoring.loadError')}</p>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          loadMessages(selectedSessionId, messagePage)
-                        }
-                        className="rounded border px-2 py-1 text-foreground"
-                      >
-                        {t('common.retry')}
-                      </button>
-                    </div>
+                    <LoadErrorState
+                      title={t('monitoring.loadError')}
+                      onRetry={() =>
+                        loadMessages(selectedSessionId, messagePage)
+                      }
+                    />
                   ) : timelineItems.length === 0 ? (
                     <div className="text-center text-muted-foreground py-12 text-sm">
                       {t('bots.sessionMonitor.noMessages')}
@@ -1181,38 +1364,80 @@ const BotSessionMonitor = forwardRef<
                   )}
                 </div>
               </ScrollArea>
-              <div className="h-9 border-t px-3 flex items-center justify-center gap-3 shrink-0 text-xs">
-                <button
-                  type="button"
-                  disabled={messagePage === 0 || loadingMessages}
-                  onClick={() =>
-                    setMessagePage((page) => Math.max(0, page - 1))
-                  }
-                  className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-accent disabled:opacity-40"
-                >
-                  <ChevronLeft className="size-3.5" />
-                  {t('common.previous')}
-                </button>
-                <span className="tabular-nums text-muted-foreground">
-                  {messagePage + 1} / {messagePageCount} · {messageTotal}
-                </span>
-                <button
-                  type="button"
-                  disabled={
-                    messagePage + 1 >= messagePageCount || loadingMessages
-                  }
-                  onClick={() => setMessagePage((page) => page + 1)}
-                  className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-accent disabled:opacity-40"
-                >
-                  {t('common.next')}
-                  <ChevronRight className="size-3.5" />
-                </button>
-              </div>
+              {messagePageCount > 1 && (
+                <div className="h-9 border-t px-3 flex items-center justify-center gap-3 shrink-0 text-xs">
+                  <button
+                    type="button"
+                    disabled={messagePage === 0 || loadingMessages}
+                    onClick={() =>
+                      setMessagePage((page) => Math.max(0, page - 1))
+                    }
+                    className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-accent disabled:opacity-40"
+                  >
+                    <ChevronLeft className="size-3.5" />
+                    {t('operationTrace.previousPage')}
+                  </button>
+                  <span className="tabular-nums text-muted-foreground">
+                    {messagePage + 1} / {messagePageCount} · {messageTotal}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={
+                      messagePage + 1 >= messagePageCount || loadingMessages
+                    }
+                    onClick={() => setMessagePage((page) => page + 1)}
+                    className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-accent disabled:opacity-40"
+                  >
+                    {t('operationTrace.nextPage')}
+                    <ChevronRight className="size-3.5" />
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
       </div>
 
+      <Dialog
+        open={resetTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !resetting) setResetTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('bots.sessionMonitor.resetContext')}</DialogTitle>
+            <DialogDescription>
+              {t('bots.sessionMonitor.resetDescription')}
+            </DialogDescription>
+            {resetScope && (
+              <p className="text-sm text-muted-foreground">
+                {resetScope === 'member'
+                  ? t('bots.sessionMonitor.resetScopeMember')
+                  : t('bots.sessionMonitor.resetScopeGroup')}
+              </p>
+            )}
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={resetting}
+              onClick={() => setResetTarget(null)}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button disabled={resetting} onClick={resetContext}>
+              <RotateCcw
+                className={cn(
+                  'size-4',
+                  resetting && 'animate-spin motion-reduce:animate-none',
+                )}
+              />
+              {t('bots.sessionMonitor.resetContext')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <BotAdminsDialog
         botId={botId}
         open={adminsDialogOpen}

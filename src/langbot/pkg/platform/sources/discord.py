@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from langbot.pkg.i18n import t
+from langbot.pkg.i18n.adapters import adapter_t, localized_adapter
+
 import discord
 from discord import ui as discord_ui
 
@@ -219,11 +222,13 @@ class VoiceConnectionManager:
                 # 获取服务器和频道对象
                 guild = self.bot.get_guild(guild_id)
                 if not guild:
-                    raise VoiceConnectionError(f'无法找到服务器 {guild_id}', 'GUILD_NOT_FOUND', guild_id)
+                    raise VoiceConnectionError(t('Resource not found') + f': {guild_id}', 'GUILD_NOT_FOUND', guild_id)
 
                 channel = guild.get_channel(channel_id)
                 if not channel or not isinstance(channel, discord.VoiceChannel):
-                    raise VoiceConnectionError(f'无法找到语音频道 {channel_id}', 'CHANNEL_NOT_FOUND', guild_id)
+                    raise VoiceConnectionError(
+                        t('Resource not found') + f': {channel_id}', 'CHANNEL_NOT_FOUND', guild_id
+                    )
 
                 # 验证用户是否在语音频道中（如果提供了用户ID）
                 if user_id:
@@ -258,12 +263,14 @@ class VoiceConnectionManager:
                 return voice_client
 
             except discord.ClientException as e:
-                raise VoiceNetworkError(f'Discord 客户端错误: {str(e)}')
+                raise VoiceNetworkError(t('Voice connection failed') + f': {e}')
             except discord.opus.OpusNotLoaded as e:
-                raise VoiceConnectionError(f'Opus 编码器未加载: {str(e)}', 'OPUS_NOT_LOADED', guild_id)
+                raise VoiceConnectionError(
+                    t('Voice service is unavailable') + f': Opus: {e}', 'OPUS_NOT_LOADED', guild_id
+                )
             except Exception as e:
                 await self.logger.error(f'连接语音频道时发生未知错误: {str(e)}')
-                raise VoiceConnectionError(f'连接失败: {str(e)}', 'UNKNOWN_ERROR', guild_id)
+                raise VoiceConnectionError(t('Voice connection failed') + f': {e}', 'UNKNOWN_ERROR', guild_id)
 
     async def leave_voice_channel(self, guild_id: int) -> bool:
         """
@@ -494,11 +501,13 @@ class VoiceConnectionManager:
         """
         member = guild.get_member(user_id)
         if not member:
-            raise VoicePermissionError(f'无法找到用户 {user_id}', ['member_not_found'], user_id, channel.id)
+            raise VoicePermissionError(
+                t('Resource not found') + f': {user_id}', ['member_not_found'], user_id, channel.id
+            )
 
         if not member.voice or member.voice.channel != channel:
             raise VoicePermissionError(
-                f'用户 {member.display_name} 不在语音频道 {channel.name} 中',
+                t('User is not in the voice channel') + f': {member.display_name}, {channel.name}',
                 ['user_not_in_channel'],
                 user_id,
                 channel.id,
@@ -528,7 +537,7 @@ class VoiceConnectionManager:
 
         if missing_permissions:
             raise VoicePermissionError(
-                f'机器人在频道 {channel.name} 中缺少权限: {", ".join(missing_permissions)}',
+                t('Permission denied') + f': {channel.name}: {", ".join(missing_permissions)}',
                 missing_permissions,
                 channel_id=channel.id,
             )
@@ -650,33 +659,15 @@ class DiscordMessageConverter(abstract_platform_adapter.AbstractMessageConverter
                 text_string += ele.text
             elif isinstance(ele, platform_message.Voice):
                 file_bytes = None
-                filename = f'{uuid.uuid4()}.mp3'
+                filename = getattr(ele, 'name', '') or ''
                 if ele.base64:
-                    if ele.base64.startswith('data:'):
-                        data_header = ele.base64.split(',')[0]
-                        if 'wav' in data_header:
-                            filename = f'{uuid.uuid4()}.wav'
-                        elif 'mp3' in data_header:
-                            filename = f'{uuid.uuid4()}.mp3'
-                        elif 'ogg' in data_header:
-                            filename = f'{uuid.uuid4()}.ogg'
-                        elif 'm4a' in data_header:
-                            filename = f'{uuid.uuid4()}.m4a'
-                        elif 'aac' in data_header:
-                            filename = f'{uuid.uuid4()}.aac'
-                        elif 'flac' in data_header:
-                            filename = f'{uuid.uuid4()}.flac'
-                        elif 'alac' in data_header:
-                            filename = f'{uuid.uuid4()}.alac'
-                        elif 'opus' in data_header:
-                            filename = f'{uuid.uuid4()}.opus'
-                        elif 'webm' in data_header:
-                            filename = f'{uuid.uuid4()}.webm'
-
                     file_bytes = await asyncio.to_thread(
                         _decode_discord_base64_limited,
                         ele.base64,
                     )
+                elif getattr(ele, 'path', None):
+                    with open(ele.path, 'rb') as f:
+                        file_bytes = await asyncio.to_thread(f.read)
                 elif ele.url:
                     session = httpclient.get_session()
                     async with session.get(ele.url) as response:
@@ -685,6 +676,19 @@ class DiscordMessageConverter(abstract_platform_adapter.AbstractMessageConverter
                             max_bytes=_MAX_DISCORD_MEDIA_BYTES,
                         )
                 if file_bytes:
+                    from langbot.pkg.utils import audio as audio_utils
+
+                    fmt = audio_utils.detect_audio_format(file_bytes)
+                    # If format is silk or amr, Discord client cannot decode it; transcode to mp3
+                    if fmt in ('silk', 'amr') and audio_utils.is_ffmpeg_available():
+                        try:
+                            file_bytes = await audio_utils.transcode_audio(file_bytes, 'mp3', fmt)
+                            fmt = 'mp3'
+                        except Exception:
+                            pass
+                    if not filename:
+                        ext = fmt if fmt != 'unknown' else 'mp3'
+                        filename = f'{uuid.uuid4()}.{ext}'
                     files.append(discord.File(fp=io.BytesIO(file_bytes), filename=filename))
             elif isinstance(ele, platform_message.File):
                 file_bytes = None
@@ -758,15 +762,67 @@ class DiscordMessageConverter(abstract_platform_adapter.AbstractMessageConverter
         for attachment in message.attachments:
             session = httpclient.get_session(trust_env=True)
             async with session.get(attachment.url) as response:
-                image_data = await httpclient.read_limited(
+                media_data = await httpclient.read_limited(
                     response,
                     max_bytes=_MAX_DISCORD_MEDIA_BYTES,
                 )
-                image_base64 = (await asyncio.to_thread(base64.b64encode, image_data)).decode('utf-8')
-                image_format = response.headers['Content-Type']
-                element_list.append(
-                    platform_message.Image(url=attachment.url, base64=f'data:{image_format};base64,{image_base64}')
+                media_base64 = (await asyncio.to_thread(base64.b64encode, media_data)).decode('utf-8')
+                content_type = response.headers.get('Content-Type') or getattr(attachment, 'content_type', None) or ''
+                filename = (getattr(attachment, 'filename', '') or '').lower()
+                flags = getattr(attachment, 'flags', None)
+                is_voice_flag = getattr(flags, 'voice', False) if flags else False
+
+                from langbot.pkg.utils import audio as audio_utils
+
+                detected_fmt = audio_utils.detect_audio_format(media_data)
+                is_audio = (
+                    is_voice_flag
+                    or content_type.startswith('audio/')
+                    or any(
+                        filename.endswith(ext)
+                        for ext in ('.mp3', '.ogg', '.oga', '.opus', '.wav', '.m4a', '.aac', '.flac', '.weba')
+                    )
+                    or detected_fmt in ('wav', 'mp3', 'ogg', 'opus', 'flac', 'silk', 'amr')
                 )
+
+                if is_audio:
+                    mime = (
+                        content_type
+                        if content_type.startswith('audio/')
+                        else (
+                            'audio/ogg'
+                            if detected_fmt in ('ogg', 'opus')
+                            else f'audio/{detected_fmt if detected_fmt != "unknown" else "mpeg"}'
+                        )
+                    )
+                    duration = getattr(attachment, 'duration_secs', None)
+                    if duration is not None:
+                        duration = int(round(duration))
+                    elif media_data:
+                        duration = int(round(audio_utils.estimate_audio_duration(media_data, detected_fmt)))
+                    element_list.append(
+                        platform_message.Voice(
+                            url=attachment.url,
+                            base64=f'data:{mime};base64,{media_base64}',
+                            length=duration,
+                        )
+                    )
+                elif content_type.startswith('image/') or any(
+                    filename.endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg')
+                ):
+                    mime = content_type if content_type.startswith('image/') else 'image/png'
+                    element_list.append(
+                        platform_message.Image(url=attachment.url, base64=f'data:{mime};base64,{media_base64}')
+                    )
+                else:
+                    mime = content_type or 'application/octet-stream'
+                    element_list.append(
+                        platform_message.File(
+                            url=attachment.url,
+                            base64=f'data:{mime};base64,{media_base64}',
+                            name=getattr(attachment, 'filename', 'file'),
+                        )
+                    )
 
         return platform_message.MessageChain(element_list)
 
@@ -843,7 +899,7 @@ class DiscordFormView(discord_ui.View):
         # silently — most Dify forms have ≤10 actions in practice.
         for idx, action in enumerate(actions[:25]):
             action_id = str(action.get('id') or '')
-            label = str(action.get('title') or action_id or f'Option {idx + 1}')
+            label = str(action.get('title') or action_id or adapter_t(adapter, 'Option {number}', number=idx + 1))
             style = self._STYLE_MAP.get(
                 str(action.get('button_style') or '').lower(),
                 discord.ButtonStyle.secondary,
@@ -966,6 +1022,7 @@ class DiscordAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             self._pending_forms.pop(next(iter(self._pending_forms)), None)
 
     # Voice functionality methods
+    @localized_adapter
     async def join_voice_channel(self, guild_id: int, channel_id: int, user_id: int = None) -> discord.VoiceClient:
         """
         加入语音频道
@@ -990,7 +1047,7 @@ class DiscordAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             VoiceConnectionError: 其他连接错误
         """
         if not self.voice_manager:
-            raise VoiceConnectionError('语音管理器未初始化', 'MANAGER_NOT_READY')
+            raise VoiceConnectionError(t('Voice service is unavailable'), 'MANAGER_NOT_READY')
 
         return await self.voice_manager.join_voice_channel(guild_id, channel_id, user_id)
 
@@ -1358,7 +1415,7 @@ class DiscordAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
                 )
             return
 
-        node_title = str(form_data.get('node_title') or 'Confirmation needed')
+        node_title = str(form_data.get('node_title') or adapter_t(self, 'Confirmation needed'))
         form_content = str(form_data.get('form_content') or '').strip()
 
         # Two paths:

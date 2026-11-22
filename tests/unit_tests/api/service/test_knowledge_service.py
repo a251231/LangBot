@@ -265,14 +265,14 @@ async def test_file_listing_checks_parent_knowledge_base_first():
 async def test_store_and_delete_file_require_runtime_parent_and_capability():
     app = _app()
     runtime_kb = SimpleNamespace(
-        store_file=AsyncMock(return_value='task-a'),
+        store_file=AsyncMock(return_value=17),
         delete_file=AsyncMock(),
     )
     app.rag_mgr.get_knowledge_base_by_uuid.return_value = runtime_kb
     app.rag_mgr.get_knowledge_base_details.return_value = {'knowledge_engine': {'capabilities': ['doc_ingestion']}}
     service = KnowledgeService(app)
 
-    assert await service.store_file(CONTEXT, 'kb-a', 'upload.pdf', 'author/parser') == 'task-a'
+    assert await service.store_file(CONTEXT, 'kb-a', 'upload.pdf', 'author/parser') == 17
     runtime_kb.store_file.assert_awaited_once_with(CONTEXT, 'upload.pdf', parser_plugin_id='author/parser')
     await service.delete_file(CONTEXT, 'kb-a', 'file-a')
     runtime_kb.delete_file.assert_awaited_once_with(CONTEXT, 'file-a')
@@ -390,6 +390,7 @@ class TestGetKnowledgeBase:
         result = await KnowledgeService(app).get_knowledge_base(CONTEXT, 'kb1')
 
         assert result == {'uuid': 'kb1', 'name': 'KB1'}
+        app.rag_mgr.get_knowledge_base_details.assert_awaited_once_with(CONTEXT, 'kb1')
 
     @pytest.mark.asyncio
     async def test_returns_none_when_not_found(self):
@@ -555,7 +556,11 @@ class TestListParsers:
 
         result = await KnowledgeService(app).list_parsers(CONTEXT)
 
-        assert len(result) == 2
+        assert result == [
+            {'id': 'parser1', 'supported_mime_types': ['text/plain']},
+            {'id': 'parser2', 'supported_mime_types': ['application/pdf']},
+        ]
+        app.plugin_connector.list_parsers.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_filters_by_mime_type(self):
@@ -589,7 +594,8 @@ class TestGetEngineSchemas:
             'author/engine',
         )
 
-        assert 'properties' in result
+        assert result == {'properties': {'name': {'type': 'string'}}}
+        app.plugin_connector.get_rag_creation_schema.assert_awaited_once_with('author/engine')
 
     @pytest.mark.asyncio
     async def test_returns_retrieval_schema(self):
@@ -601,7 +607,8 @@ class TestGetEngineSchemas:
             'author/engine',
         )
 
-        assert 'properties' in result
+        assert result == {'properties': {'top_k': {'type': 'integer'}}}
+        app.plugin_connector.get_rag_retrieval_schema.assert_awaited_once_with('author/engine')
 
     @pytest.mark.asyncio
     async def test_reports_schema_runtime_exception(self):

@@ -1,6 +1,278 @@
+import slackSetup from './slack-setup/ja-JP';
 import pipelineMigration from './pipeline-migration/ja-JP';
+import pluginPermissions from './plugin-permissions/ja-JP';
 const jaJP = {
+  pluginPermissions,
+  planRevision: {
+    subscribedOn: '契約日：{{date}}',
+    latestQuota: 'このプランの最新の利用枠',
+    showLatest: 'このプランの最新クォータを表示',
+    showCurrent: '現在のサブスクリプションを表示',
+    latestTab: '最新',
+    currentTab: '現在',
+    cancelToSubscribe:
+      '現在のサブスクリプションをキャンセルすると、次期から最新のクォータに登録できます',
+
+    current: '現在の契約：{{plan}} · revision {{revision}}',
+    owned: '購入済み revision {{revision}}',
+    latest: '最新 revision {{revision}}',
+    changed:
+      '購入済みの特典と最新バージョンに違いがあります。変更箇所を強調表示しています。',
+    same: '特典は最新 revision {{revision}} と同じです。購入済みバージョンは変更されません。',
+    unavailable:
+      '最新プランは現在利用できません。購入済みの特典は引き続き有効です。',
+    benefit: '特典',
+    change: '変更あり',
+    enabled: '有効',
+    disabled: '無効',
+    monthlyCredits: '毎月のボーナスクレジット',
+    retention: 'チャット履歴の保存日数',
+    unknown:
+      '現在の契約情報を取得できません。再読み込みするか Space で契約を管理してください。最新カタログの特典は購入済み特典ではありません。',
+    handoff:
+      'Space で契約を管理してください。新バージョンの購入前に自動更新を解除してください。前払い契約は期限前に更新しなければ自動終了します。',
+    cancelFirst:
+      'まず契約管理で自動更新を解除してください。支払済みの特典は期間終了まで保持され、返金はありません。解除の確認後、最新バージョンを購入でき、決済成功時に新しい特典が有効になります。',
+    canceled:
+      '更新は解除済みです。支払済みの特典は期間終了まで保持され、返金はありません。新しい購入の特典は決済成功時に有効になります。',
+    prepaid:
+      'この前払い契約は期間終了時に自動終了します。期限前は現在の内容で更新でき、期限後は各プランの最新の利用枠でのみ契約できます。',
+    renew: '現在の契約を更新',
+    buying: 'revision {{revision}} を購入します。',
+    fields: {
+      bots_max: 'ボット',
+      members_max: 'メンバー',
+      pipelines_max: 'プロセッサー',
+      plugins_max: '拡張機能',
+      knowledge_bases_max: 'ナレッジベース',
+      managed_sandbox_sessions_max: 'サンドボックスセッション',
+    },
+  },
+  cloudPlans: {
+    subscriptionUnavailable: '現在お申し込みできません',
+    subscriptionUnavailableHint:
+      'このプランは新規申込を停止しています。他のプランをお選びください。既存の契約と自動更新には影響しません。',
+    platformNames: {
+      qqofficial: 'QQ公式API',
+      dingtalk: 'DingTalk',
+      discord: 'Discord',
+      telegram: 'Telegram',
+      lark: 'Lark',
+      slack: 'Slack',
+      kook: 'KOOK',
+      line: 'LINE',
+      wecom: 'WeCom',
+      wecombot: 'WeComBot',
+      wecomcs: 'WeComカスタマーサービス',
+      officialaccount: 'WeChat公式アカウント',
+      wechatpad: 'WeChatPad',
+      openclaw_weixin: 'OpenClaw WeChat',
+      aiocqhttp: 'OneBot v11',
+      satori: 'Satori',
+    },
+    manageSubscription: 'サブスクリプションを管理',
+    downgradeUnavailable: '無料プランへの変更はできません',
+    features: {
+      multiUserWorkspace: '複数ユーザーのワークスペース',
+      remoteE2BSandbox: 'リモート E2B サンドボックスの設定',
+      communitySupport: 'コミュニティサポート',
+      everythingInFree: '無料プランのすべての機能',
+      alwaysOnSandbox: '常時稼働のグローバルサンドボックス 1 個',
+      higherWorkspaceLimits: 'ワークスペースの上限を拡大',
+    },
+    title: 'プランを比較',
+    description: '{{workspace}} のプランを選択',
+    billing: '請求周期',
+    monthly: '月払い',
+    annual: '年払い',
+    currency: '通貨',
+    loading: 'プランを読み込み中…',
+    error: 'プランを読み込めませんでした',
+    retry: '再試行',
+    empty: '利用可能なプランはありません',
+    current: '現在のプラン',
+    recommended: 'おすすめ',
+    free: '無料',
+    annualNote: '月額 {{price}} 相当',
+    ownerOnly: '所有者または管理者のみ',
+    choose: '支払いに進む',
+    handoff:
+      'LangBot アカウントでログインしてお支払いください。選択内容は保持されます。',
+    quotas: 'ワークスペースの上限',
+    unlimited: '無制限',
+    retention: 'メッセージ履歴 · {{count}} 日間',
+    retentionLabel: 'メッセージ履歴の保存期間',
+    retentionHelp: '保存期間を過ぎた履歴は自動的に削除されます。',
+    credits: '毎月 {{count}} モデルクレジット',
+    creditsLabel: 'モデルクレジット',
+    creditsHelp:
+      '年払いでも、契約の各月にクレジットが付与されます。クレジットが不足しても、独自に設定したモデルプロバイダーを引き続き利用できます。',
+    platforms: '主要プラットフォームに対応',
+    excludedPlatforms: '対象外：{{platforms}}',
+    allPlatforms: '現在利用可能なすべてのプラットフォーム',
+    limits: {
+      bots: 'ボット',
+      pipelines: 'プロセッサー',
+      knowledge_bases: 'ナレッジベース',
+      plugins: '拡張機能',
+      members: 'メンバー',
+      managed_sandbox_sessions: '管理サンドボックスセッション',
+    },
+  },
+  workspaceSandbox: {
+    quotaCheck:
+      'ディスク上限はコマンド実行前後に確認します。継続的なファイルシステム制限ではありません。',
+    testRun: 'テスト実行',
+    testRunCost:
+      '一時サンドボックスを作成し、枠を1つ使用します。料金が発生する場合があります。',
+    checkHint:
+      '確認と保存ではサンドボックスを作成しません。テスト実行は任意です。',
+    queryUnsupported:
+      'テンプレート照会に未対応のため未検証です。保存または任意のテストが可能です。',
+    limitsTitle: 'ワークスペースの上限',
+    limitsHelp:
+      '空欄はデプロイの既定値を継承します。変更は新規タスクに適用されます。',
+    inherit: '既定値を継承',
+    limitMax: '上限: {{value}}',
+    limitUnsupported: 'バックエンドまたは管理ポリシーが未対応です',
+    e2bLimitUnsupported:
+      'E2Bテンプレートまたはサービスで管理されるため設定できません',
+    invalidLimits: '表示された範囲内の値を入力してください',
+
+    confirm: '確認して保存',
+    cancel: 'キャンセル',
+    current: '現在の設定：{{backend}}',
+    unsaved: '未保存',
+    configureE2b: 'E2B を設定',
+    apiUrl: 'API URL',
+    sandboxUrl: 'サンドボックス URL',
+    template: 'テンプレート',
+    keyConfigured: '設定済み。空欄で維持',
+    keyRequired: 'API Key を入力',
+    keyHelp:
+      '保存済みのキーは表示されません。URL を変更する場合は新しいキーを入力してください。',
+    noManagedProcesses: 'この環境は stdio MCP サーバーに対応していません。',
+    label: '実行環境',
+    description:
+      'このワークスペースの新しいタスクに適用されます。実行中のタスクは元の環境を使い続けます。',
+    saved: '保存しました。新しいタスクに適用されます',
+    saveFailed: '実行環境を保存できませんでした',
+    loadFailed: '環境の確認に失敗しました',
+    refresh: '再確認',
+    noEnvironment: '利用可能な環境がありません',
+    unavailable:
+      '選択した環境は利用できません。新しいタスクはサンドボックスで実行できません。',
+    templateVerified:
+      'Template verified: temporary sandbox created, executed and deleted',
+    limitLabels: {
+      timeout_sec: 'コマンド制限時間（秒）',
+      idle_ttl_sec: 'アイドル回収（秒）',
+      max_sessions: '最大サンドボックス数',
+      cpus: 'CPUコア数',
+      memory_mb: 'メモリ（MiB）',
+      pids_limit: 'プロセス数上限',
+      workspace_quota_mb: 'ディスク上限（MiB）',
+    },
+    reasons: {
+      resource_not_found: 'Requested service resource not found',
+      rate_limited: 'Too many requests; retry later',
+      template_not_found: 'Template not found or not visible to this account',
+      template_query_failed: 'Template query failed; check service status',
+      template_not_ready: 'Template build is not ready',
+      network_error: 'Cannot reach service; check URLs and network',
+      capacity_limited:
+        'Service capacity exhausted or rate limited; retry later',
+      permission_denied: 'Permission denied for the supplied credentials',
+      template_creation_failed:
+        'Sandbox creation failed; check template status and service capacity',
+      template_execution_failed: 'Sandbox created but execution check failed',
+      template_cleanup_failed:
+        'Temporary sandbox cleanup failed; check E2B service',
+
+      environment_unavailable: '利用不可',
+      policy_restricted: 'プラットフォームにより制限',
+      probe_failed: '環境確認に失敗',
+      docker_missing: 'Docker CLI が未インストール',
+      docker_unreachable: 'Docker が停止中、またはアクセス権限がありません',
+      nsjail_missing: 'nsjail が未インストール',
+      cgroup_unavailable: 'nsjail cgroup の制限が未準備',
+      isolation_unavailable:
+        'nsjail の名前空間・マウント・ネットワーク隔離に失敗',
+      sdk_missing: 'E2B SDK が未インストール',
+      missing_credentials: 'E2B API キーが未設定',
+      connection_failed:
+        'E2B に接続できません。URL とネットワークを確認してください',
+      authentication_failed: 'E2B 認証に失敗。API キーを確認してください',
+      probe_timeout: '確認がタイムアウトしました',
+      invalid_configuration: 'E2B の URL または認証情報が不完全',
+      not_checked: '設定が変更されました。再確認してください',
+    },
+  },
+  workspaceLanguage: {
+    label: 'ワークスペースの言語',
+    description:
+      'バックエンドの通知とボットの既定の返信に使用します。個人の表示言語には影響しません。',
+    saved: '言語設定を保存しました',
+    saveFailed: '言語設定の保存に失敗しました',
+  },
+  slackSetup,
+  inflight: {
+    autoCollapse: '自動折りたたみ',
+    empty: '処理中のイベントはありません',
+    move: '上下にドラッグ、または矢印キーで移動',
+    botLogs: 'ボットのログ',
+    processorLogs: 'プロセッサーのログ',
+
+    title: '実行中',
+    expand: '展開',
+    collapse: '折りたたむ',
+    reconnecting: '再接続中。最後に受信した状態を表示しています。',
+    details: '詳細を見る',
+    debug: 'デバッグイベント',
+    limited: '一部のみ表示しています。全実行はダッシュボードで確認できます。',
+    queued: '待機中',
+    running: '処理中',
+    waiting: '入力待ち',
+    tool: 'ツール呼び出し中',
+    thinking: '思考中',
+    replying: '返信準備中',
+    generating: '返信生成中',
+    completed: '完了',
+    failed: '失敗',
+    cancelled: 'キャンセル済み',
+    ignored: '無視',
+  },
+  githubStarPrompt: {
+    title: 'LangBot はこれまでに {{total}} 件のイベントを処理しました',
+    description:
+      'LangBot がお役に立っているなら、GitHub で Star を付けていただくと、より多くの人に届きます。',
+    later: '後で',
+    star: 'Star',
+    close: '閉じる',
+  },
   assistant: {
+    movePosition: 'アシスタントを左右に移動',
+    resizeHeight: 'アシスタントの高さを調整',
+    sessions: '会話を切り替え',
+    currentChat: '現在の会話',
+    stop: 'タスクを停止',
+    stopped:
+      '停止しました。実行中のツールが反映済みの場合があります。再試行前にリソースを確認してください。',
+    setupRequired:
+      'LangBot アカウントにログインするか、モデルを設定すると、ワークスペースアシスタントを利用できます。',
+    loginAccount: 'LangBot Account にログイン',
+    configureModels: 'モデルを設定',
+    providerCheckFailed:
+      'モデルプロバイダーを確認できません。再試行してください。',
+    retrySetup: '再試行',
+    preparing: '準備中…',
+    thinking: 'モデル応答中 · {{round}} 回目',
+    executing: 'ツール実行中…',
+    toolRunning: '実行中',
+    recommendationFailed:
+      '推奨モデルを取得できません。モデルを選択してください。',
+    expand: 'ワークスペースアシスタントを展開',
+    collapse: 'ワークスペースアシスタントを折りたたむ',
     modelHint: '次のメッセージからモデルを切り替え',
     details: '元のデータを見る',
     found: '{{count}} 件見つかりました',
@@ -22,6 +294,9 @@ const jaJP = {
       get_pipeline: 'Pipeline 参照',
       get_knowledge_schema: 'エンジン設定の参照',
       list_operation_logs: '操作ログの参照',
+      workspace_search: 'ワークスペース機能を検索',
+      workspace_describe: '操作定義を確認',
+      workspace_call: 'ワークスペース操作を実行',
     },
     resources: {
       models: 'チャットモデル検索',
@@ -35,11 +310,14 @@ const jaJP = {
     newChat: '新しい会話',
     close: '閉じる',
     welcome:
-      '作りたいアプリを教えてください。現在のリソースを確認し、承認後にナレッジベースや Pipeline を設定します。',
+      '作りたいアプリを教えてください。現在のワークスペースを確認し、ボット、Agent、ナレッジベース、Pipeline などの設定を提案し、承認後に適用します。',
     discover: '利用できるモデル、ナレッジベース、Pipeline は？',
     build: 'ナレッジベースを使う質問応答アプリを作りたい。',
     toolResult: '操作結果',
     review: '実行する操作とパラメータを確認してください',
+    dangerousWarning:
+      '注意が必要な操作：この操作はリスクが高く、元に戻せない場合があります。確認する前に引数をよく確認してください。',
+    parameters: 'パラメーター：',
     confirm: '承認して実行',
     decline: '拒否',
     working: '処理中…',
@@ -55,6 +333,14 @@ const jaJP = {
   sidebarGuide: {
     steps: {
       monitoring: {
+        rangeDays: '過去 {{days}} 日間',
+        customRange: '期間を指定',
+        rangeStart: '開始日時',
+        rangeEnd: '終了日時',
+        rangeHint: '開始は終了より前、期間は最大365日です。',
+        autoRefreshLabel: '自動更新',
+        autoRefreshOff: '自動更新：オフ',
+        autoRefreshEvery: '{{seconds}} 秒ごとに更新',
         title: '稼働状況を確認する',
         description:
           'ボットの稼働状況、モデルの使用量、メッセージ数、システムの状態をまとめて確認できます。',
@@ -101,9 +387,14 @@ const jaJP = {
       '対応するイベントを選び、テストデータを入力して出力とツールの結果を確認します。プラットフォーム操作は模擬実行され、モデルや他のツールは設定に従って実行されます。',
     pipeline: {
       trigger: {
-        title: '返信するメッセージを選ぶ',
+        title: 'Choose which messages to answer',
         description:
-          'パイプラインはメッセージイベントを処理し、AI が自動返信します。グループでの起動条件、個別チャットのルール、メッセージフィルターを設定します。',
+          'Pipelines handle message events and reply automatically with AI.',
+      },
+      speech: {
+        title: 'Configure speech capabilities',
+        description:
+          'Configure speech recognition (ASR) and text-to-speech (TTS) models to handle voice messages and synthesized voice replies.',
       },
       ai: {
         title: 'AI 機能を設定する',
@@ -136,6 +427,14 @@ const jaJP = {
           'テストメッセージで起動条件、AI の返信、出力処理を確認します。設定の変更はテスト前に保存されます。',
       },
       monitoring: {
+        rangeDays: '過去 {{days}} 日間',
+        customRange: '期間を指定',
+        rangeStart: '開始日時',
+        rangeEnd: '終了日時',
+        rangeHint: '開始は終了より前、期間は最大365日です。',
+        autoRefreshLabel: '自動更新',
+        autoRefreshOff: '自動更新：オフ',
+        autoRefreshEvery: '{{seconds}} 秒ごとに更新',
         title: '実行履歴を確認する',
         description:
           'タイトル横のタブで過去の会話、処理過程、エラーを確認し、返信がない場合や想定外の回答を調べます。',
@@ -301,6 +600,16 @@ const jaJP = {
     editionCloud: 'Cloud',
   },
   common: {
+    refresh: '更新',
+    clickToCopy: 'クリックしてコピー',
+    finish: '完了',
+    operationFailed: '操作に失敗しました',
+    optional: '任意',
+    failureReasonNotRecorded:
+      'この記録には失敗の理由が保存されていません。ボットのログを確認するか、再送信して詳細を確認してください。',
+    loadFailedTitle: '読み込めませんでした',
+    loadFailedHint:
+      'しばらくしてから再試行してください。解決しない場合は、接続とサービスの状態を確認してください。',
     customValue: 'カスタム',
     loadFailed: '読み込みに失敗しました。再試行してください。',
     search: '検索',
@@ -501,6 +810,9 @@ const jaJP = {
     help: 'ヘルプドキュメントを見る',
   },
   models: {
+    starModel: '新規処理器の既定モデルに設定',
+    unstarModel: 'スターを解除',
+    starModelFailed: 'スター付きモデルを更新できませんでした',
     codex: {
       account: 'ChatGPT サブスクリプション',
       description:
@@ -691,6 +1003,10 @@ const jaJP = {
     chat: 'チャット',
     embedding: '埋め込み',
     rerank: '再順位付け',
+    asr: '音声認識 (ASR)',
+    tts: '音声合成 (TTS)',
+    asrTab: '音声認識',
+    ttsTab: '音声合成',
     rerankUrlTooltip:
       '再順位付けエンドポイントの完全URL（例: https://dashscope.aliyuncs.com/compatible-api/v1/reranks）',
     rerankPathTooltip:
@@ -756,16 +1072,21 @@ const jaJP = {
     saveSuccess: '保存に成功しました',
     saveError: '保存に失敗しました：',
     createSuccess: '作成が完了しました。イベントルーティングを設定してください',
+    autoCreatedPipeline:
+      'パイプラインを自動作成し、メッセージイベントに関連付けました',
     createError: '作成に失敗しました：',
     deleteSuccess: '削除に成功しました',
     deleteError: '削除に失敗しました：',
     deleteConfirmation: '本当にこのボットを削除しますか？',
     platformAdapter: 'プラットフォーム/アダプター選択',
     selectAdapter: 'アダプターを選択',
+    saveAndEnable: '保存して有効化',
+    searchAdapters: 'アダプターを検索',
+    noMatchingAdapters: '一致するアダプターが見つかりません',
     legacyAdapters: '旧式アダプター',
     legacyAdapterBadge: '旧式',
     legacyAdaptersHint:
-      'これらのアダプターには新しいイベント駆動の接続方式があります。\n既存設定との互換性のために残しており、新規ボットには推奨されません。',
+      '旧版は主にメッセージ送受信用で、既存の設定との互換性のために残されています。\n新版は同じプラットフォームにイベント方式で接続し、対応する友達申請やグループの変化も処理器へ振り分けます。\n新規ボットには新版を推奨します。既存ボットは旧版を継続利用できます。切り替え時は接続設定とイベントルートを確認してください。アカウントの更新ではありません。',
     adapterConfig: 'アダプター設定',
     viewAdapterDocs: 'ドキュメントを見る',
     bindPipeline: 'パイプラインを紐付け',
@@ -778,6 +1099,10 @@ const jaJP = {
     earlier: 'それ以前',
     dateFormat: '{{month}}月{{day}}日',
     setBotEnableError: 'ボットの有効状態の設定に失敗しました',
+    enabling: '有効にしています…',
+    disabling: '無効にしています…',
+    enableConfirmed: '有効',
+    disableConfirmed: '無効',
     log: 'ログ',
     configuration: '設定',
     logs: 'ログ',
@@ -786,6 +1111,28 @@ const jaJP = {
     routingConnection: 'ルーティングと接続',
     routingConnectionDescription:
       'このボットのメッセージを処理するパイプラインを紐付け',
+    routingHelp: {
+      title: 'イベントルーティングとは？',
+      intro:
+        'ボットはメッセージのほか、友達リクエストやグループ参加などのイベントも受け取ります。',
+      events: '受信イベント',
+      agents: '各 Agent へ',
+      message: 'メッセージ受信',
+      friend: '友達リクエスト',
+      group: 'グループ参加',
+      messageAction: '応答 Agent → 返信',
+      friendAction: '審査 Agent → 確認',
+      groupAction: '歓迎 Agent → 挨拶',
+      rules: '設定したルールで振り分け · 例',
+      instructions:
+        'Agent は指示に従ってツールを使い、返信や申請の確認を行います。',
+      plugin:
+        '高度な用途にはプラグイン処理器を利用できます。イベントを一括登録してコードで処理し、下の欄で設定を追加します。',
+      docs: '独自のプラグイン処理器を開発',
+      runnerDocs: '独自の Agent ランナーを開発',
+      pause: '一時停止',
+      play: '再生',
+    },
     eventRouting: 'イベントルーティング',
     eventRoutingDescription: 'イベントごとの処理先を設定します。',
     eventBindings: 'イベントルート',
@@ -795,7 +1142,7 @@ const jaJP = {
     dragEventRoute: 'ルート {{index}} をドラッグ',
     behaviorReplyMessages: '受信メッセージに返信',
     behaviorReplyMessagesDescription:
-      '受信メッセージをプロセッサーに渡します。',
+      '個別メッセージと、このボットにメンションしたグループメッセージを処理します。',
     behaviorWelcomeMembers: '新しいメンバーを歓迎',
     behaviorWelcomeMembersDescription:
       'グループへの参加時にプロセッサーを実行します。',
@@ -826,7 +1173,7 @@ const jaJP = {
     eventBindingDescriptionPlaceholder: 'ルール説明',
     noEventBindings: 'イベントルートはありません',
     unsupportedPipelineEvent:
-      'Pipeline は message.* イベントにのみ使用できます',
+      'Pipeline は message.received イベントにのみ使用できます',
     disable: '無効化',
     enable: '有効化',
     disabledBindings: '無効',
@@ -836,6 +1183,7 @@ const jaJP = {
     advancedEventValues: 'すべて表示',
     eventGroup: 'グループ',
     eventGroupNames: {
+      wecomcs: 'WeCom カスタマーサービス',
       bot: 'ボットの状態',
       feedback: 'フィードバック',
       friend: '友だち',
@@ -850,6 +1198,9 @@ const jaJP = {
     routeFallbackCatchAll: '{{route}} はフォールバックルートです。',
     routeFallbackIgnored:
       'どのルートにも一致しないイベントは無視されます。すべてのイベントに明示的な結果が必要な場合のみ、フォールバックを追加してください。',
+    matchRecords: 'マッチ記録',
+    matchRecordsDescription:
+      '各ルールの最新結果と最近の未一致イベントを表示します。ボットのメモリ内ログは再起動時に消去されます。',
     testRoute: 'ルートを確認',
     adapterEventDebugAction: 'イベント監視テスト',
     adapterEventDebugTitle: 'プラットフォームイベントのデバッグ',
@@ -935,6 +1286,15 @@ const jaJP = {
     eventWildcard: 'すべてのイベント',
     eventNamespaceWildcard: '{{namespace}}.*',
     eventNames: {
+      wecombot_enter_chat: 'ボットとのチャットに参加',
+      wecombot_template_card_event: 'テンプレートカード操作',
+      dingtalk_card_action: 'DingTalk カード操作',
+      wecomcs_enter_session: '顧客が会話に参加',
+      wecomcs_msg_send_fail: 'カスタマーサービスの送信失敗',
+      wecomcs_servicer_status_change: '担当者の受付状態変更',
+      wecomcs_session_status_change: 'カスタマーサービスの会話状態変更',
+      wecomcs_reject_customer_msg_switch_change:
+        '顧客メッセージの受信拒否設定変更',
       message_received: 'メッセージ受信',
       message_edited: 'メッセージ編集',
       message_deleted: 'メッセージ削除',
@@ -944,6 +1304,7 @@ const jaJP = {
       friend_added: '友達追加',
       group_member_joined: 'メンバー参加',
       group_member_left: 'メンバー退出',
+      group_info_updated: 'グループ情報更新',
       group_member_banned: 'メンバーBAN',
       bot_invited_to_group: 'ボットがグループに招待された',
       bot_removed_from_group: 'ボットがグループから削除された',
@@ -952,6 +1313,22 @@ const jaJP = {
       platform_specific: 'プラットフォーム固有イベント',
     },
     eventDescriptions: {
+      wecombot_enter_chat:
+        'ユーザーがボットのチャットを開きました。歓迎や案内のフローに使用できます。',
+      wecombot_template_card_event:
+        'ユーザーがカードをクリックまたは送信しました。管理対象フォームの応答は別途処理します。',
+      dingtalk_card_action:
+        'カードのクリックや送信。フィードバックと管理対象フォームは別途処理します。',
+      wecomcs_enter_session:
+        '顧客がリンクから会話を開きました。流入元と歓迎メッセージ用コードを含みます。',
+      wecomcs_msg_send_fail:
+        'WeChat が送信失敗を通知しました。メッセージ ID と失敗種別を含みます。',
+      wecomcs_servicer_status_change:
+        '担当者が受付を開始、停止、または一時停止しました。',
+      wecomcs_session_status_change:
+        '担当者が会話を受付、転送、終了、または再開しました。',
+      wecomcs_reject_customer_msg_switch_change:
+        '担当者が顧客メッセージの受信拒否を有効または無効にしました。',
       all: 'このアダプターが受信するすべてのイベントに一致します。',
       namespace: 'すべての{{group}}イベントに一致します。',
       namespace_bot:
@@ -959,8 +1336,7 @@ const jaJP = {
       namespace_feedback:
         'プラットフォームまたはユーザーからのフィードバックイベントに一致します。',
       namespace_friend: '友達リクエストや友達関係の変更イベントに一致します。',
-      namespace_group:
-        'メンバーの参加、退出、削除などのグループイベントに一致します。',
+      namespace_group: 'メンバーの変更やグループ情報の更新などに一致します。',
       namespace_message:
         'メッセージの受信、編集、削除、リアクションイベントに一致します。',
       namespace_platform:
@@ -980,6 +1356,7 @@ const jaJP = {
       friend_added: '友達関係が作成されました。',
       group_member_joined: 'ボットがいるグループにメンバーが参加しました。',
       group_member_left: 'ボットがいるグループからメンバーが退出しました。',
+      group_info_updated: 'グループ名や所有者などの情報が変更されました。',
       group_member_banned: 'グループメンバーがBANまたは削除されました。',
       bot_invited_to_group: 'ボットがグループに招待されました。',
       bot_removed_from_group: 'ボットがグループから削除されました。',
@@ -992,6 +1369,9 @@ const jaJP = {
       'すべての条件に一致した場合のみこのバインディングが発火します。空の場合は常に発火します。',
     conditionsEmpty: '条件なし。常に発火します。',
     addFilter: '条件を追加',
+    filterIsAtBot: 'このボットへのメンション',
+    mentionYes: 'はい',
+    mentionNo: 'いいえ',
     filterChatType: 'セッションタイプ',
     filterChatId: 'セッション ID',
     filterMessageText: 'メッセージ本文',
@@ -1066,6 +1446,21 @@ const jaJP = {
     imagesAttached: '枚の画像が添付されています',
     noLogs: 'ログはまだありません',
     sessionMonitor: {
+      resetContext: 'コンテキストをリセット',
+      resetDescription:
+        '新しいメッセージは空のコンテキストから開始します。監視履歴、ファイル、長期記憶は保持されます。実行中のタスクが完了してからリセットしてください。',
+      resetSuccess: 'コンテキストをリセットしました。',
+      resetError:
+        'リセットできませんでした。実行中のタスクが完了してから再試行してください。',
+      resetScopeMember:
+        'このチャットはグループメンバーごとに独立したコンテキストを保持するため、このメンバーのコンテキストのみリセットされます。',
+      resetScopeGroup:
+        'このグループは 1 つのコンテキストを共有しているため、このメンバーだけでなくグループ全体の会話がリセットされます。',
+      inGroup: 'グループ {{group}}',
+      filterByGroup: '同じグループ',
+      groupFilterActive: 'グループ {{group}}',
+      clearGroupFilter: 'すべてのセッションを表示',
+
       title: 'セッション監視',
       sessions: 'セッション一覧',
       noSessions: 'セッションが見つかりません',
@@ -1113,7 +1508,27 @@ const jaJP = {
     },
   },
   agents: {
+    apiToolsSelectAll: 'すべて選択',
     monitoring: {
+      rangeDays: '過去 {{days}} 日間',
+      customRange: '期間を指定',
+      rangeStart: '開始日時',
+      rangeEnd: '終了日時',
+      rangeHint: '開始は終了より前、期間は最大365日です。',
+      autoRefreshLabel: '自動更新',
+      autoRefreshOff: '自動更新：オフ',
+      autoRefreshEvery: '{{seconds}} 秒ごとに更新',
+      runStatus: '実行状態',
+      toolCalls: 'ツール呼び出し',
+      delivery: 'メッセージ送信',
+      sendFailed: '送信失敗',
+      sendCount: '送信 API 呼び出し成功：{{count}} 回',
+      noSend: '送信記録なし',
+      noSteps: '実行ステップはまだありません。',
+      recipient: '送信先',
+      actionCompleted: 'ツールの実行が完了しました。',
+      simulatedAction:
+        'シミュレーションです。実際のメッセージは送信されていません。',
       description:
         '各タスクのトリガーイベント、モデル出力、ツール実行を確認します。',
       empty:
@@ -1220,6 +1635,9 @@ const jaJP = {
       'メッセージイベントのみを処理し、AI が直接返信を生成します。ナレッジベースやプラグインなどの便利な機能も利用できます。',
     allEvents: 'すべてのイベントに対応',
     messageEventsOnly: 'メッセージイベントのみ',
+    selectAgentRunner: 'Agent ランナーを選択',
+    selectProcessorPlugin: '処理プラグインを選択',
+    createBasicInfoDescription: '名前・アイコン・プラグインを設定',
     chooseType: '処理方法を選択',
     chooseTypeDescription:
       '最初にプロセッサーの動作方式を選びます。作成後に詳しく設定できます。',
@@ -1278,7 +1696,7 @@ const jaJP = {
     eventToolUnavailable: '利用不可',
     eventApiToolsDescription:
       '操作対象は現在のイベントから決まります。Agent はアクションのパラメーターのみを指定します。',
-    platformApiTools: 'プラットフォームツール',
+    platformApiTools: 'ボットツール',
     platformApiToolsDescription:
       'Agent はユーザー、グループ、メッセージの ID を選べます。必要な権限だけを付与してください。',
     apiToolEvents: 'イベント',
@@ -1333,6 +1751,17 @@ const jaJP = {
     restoringRunnerInstall:
       'Runner プラグインのインストールを復元し、ランナーを待機しています…',
     noInstalledRunners: 'Runner 拡張機能はまだインストールされていません。',
+    runnerDiagnosis: {
+      missing:
+        '選択した Runner またはプラグインが見つかりません。プラグインをインストールまたは復元してください。',
+      disabled:
+        '選択した Runner プラグインは無効です。プラグイン画面で有効にしてください。',
+      runtime:
+        'プラグインランタイムが利用できないか無効です。接続を復旧してから実行してください。',
+      repair: 'プラグインとランタイムを管理',
+      draft:
+        '修復画面は新しいタブで開きます。Runner の選択と未保存の下書きは保持されます。',
+    },
     installingRunner: '{{runner}} をインストールしています...',
     runnerInstallSuccess:
       '{{runner}} をインストールしました。インストール済み一覧から選択できます',
@@ -1520,6 +1949,219 @@ const jaJP = {
     uploadLocal: 'ローカルアップロード',
     debugging: 'デバッグ中',
     uploadLocalPlugin: 'ローカルプラグインのアップロード',
+    spaceUpload: {
+      descriptionInstalled:
+        'ローカルインストールのプラグイン {{author}}/{{name}} をマーケットにアップロードします。',
+      shareInstalledAction: 'Space に共有',
+      installedPackageTitle:
+        'インストール済みのプラグインパッケージをアップロードします',
+      installedPackageHint:
+        'ローカルインストールのプラグインは実行中の .lbpkg をそのままアップロードします。作者・名前・バージョンは manifest に従います。',
+      menuAction: 'プラグインマーケットにアップロード',
+      title: 'プラグインをプラグインマーケットにアップロード',
+      description:
+        'デバッグ中のプラグイン {{author}}/{{name}} をビルドしてプラグインマーケットに公開します。',
+      loadFailed: 'プラグインのアップロード情報の読み込みに失敗しました',
+      spaceNotConnected:
+        'このワークスペースは LangBot アカウントに連携されていません。先に連携してください。',
+      label: '名前',
+      version: 'バージョン',
+      pluginDescription: '説明',
+      repository: 'リポジトリ',
+      repositoryPublicHint:
+        'GitHub へ同期する際、存在しないリポジトリは作成され、既存のプライベートリポジトリは公開に変更されます。',
+      author: '作者',
+      authorHint:
+        '公開時はプラグインマーケット上でこの作者として登録されます。',
+      license: 'ライセンス',
+      licensePlaceholder: 'ライセンスを選択',
+      licenseNone: '未指定',
+      changelog: '変更履歴',
+      syncGithub: 'GitHub に同期',
+      syncGithubHint:
+        'プラグインの作業ディレクトリをコミットしてプッシュします。既定ではローカルの git 設定を再利用し、下記のリポジトリ URL とトークンで上書きできます。トークンを指定していて GitHub リポジトリが存在しない場合は自動作成します。',
+      repoUrl: 'リポジトリ URL（任意）',
+      repoUrlHint: '空欄の場合はローカルの git origin を再利用します。',
+      token: 'アクセストークン（任意）',
+      tokenPlaceholder: 'このプッシュにのみ使用します',
+      branch: 'ブランチ',
+      commitMessage: 'コミットメッセージ',
+      syncOnly: 'GitHub にのみ同期',
+      gitSynced: 'GitHub に同期しました',
+      gitCommittedNoRemote:
+        'ローカルにコミットしましたが、プッシュ先が未設定です',
+      gitNothing: '同期する変更はありません',
+      gitFailed: 'Git 同期に失敗しました：',
+      uploadSuccess: 'プラグインをプラグインマーケットにアップロードしました',
+      reviewOnSpace: 'プラグインマーケットで審査を申請',
+      uploadFailed: 'プラグインのアップロードに失敗しました：',
+      basicInfo: '基本情報',
+      changeIcon: 'アイコンを変更',
+      iconInvalidType: '画像ファイルを選択してください',
+      iconTooLarge: 'アイコンは 10 MB 未満にしてください',
+      labelRequired: '少なくとも 1 つの言語で名前を入力してください',
+      langEn: 'English',
+      langZhHans: '簡体字中国語',
+      langZhHant: '繁体字中国語',
+      langJa: '日本語',
+      langTh: 'タイ語',
+      langVi: 'ベトナム語',
+      langEs: 'スペイン語',
+      uploadButton: 'プラグインマーケットにアップロード',
+      notDebugHint:
+        'アップロードできるのはデバッグ接続中のプラグインのみです。先に `lbp run` を実行してください。',
+      stepInfo: 'プラグイン情報',
+      stepSettings: '更新履歴',
+      stepConfirm: 'アップロード確認',
+      stepResult: 'アップロード結果',
+      startUpload: 'アップロード開始',
+      uploadingTitle: '拡張マーケットにアップロード中...',
+      uploadingDesc:
+        'プラグインファイルをパッケージ化し、マニフェストを検証して LangBot Space と同期しています...',
+      uploadSuccessTitle: 'プラグインのアップロードに成功しました！',
+      uploadSuccessDesc:
+        'プラグイン {{author}}/{{name}} (v{{version}}) を LangBot Space に送信しました。',
+      reviewNoticeTitle: 'レビューのお知らせ',
+      reviewNoticeDesc:
+        'プラグインはレビュー待ちのキューに入りました。承認されると拡張マーケットで公開されます。',
+      viewInSpace: 'Space のマーケットで見る',
+      viewMyPlugins: 'マイプラグインを管理',
+      finishAndClose: '完了',
+      retryUpload: 'アップロードを再試行',
+      backToEdit: '編集に戻る',
+      manifestNotice:
+        '以下の情報はプラグインマニフェスト（manifest.yaml）から読み込まれた確認用です。変更が必要な場合は、マニフェストを直接編集してデバッグを再起動してください。',
+      manifestSource: 'マニフェスト確認済み',
+      nextStep: '次へ',
+      prevStep: '前へ',
+      nextToSettings: '次へ：更新履歴',
+      nextToConfirm: '次へ：アップロード確認',
+      confirmAndUpload: '拡張機能マーケットにアップロード確認',
+      noDescription: '説明はありません',
+      noRepository: 'リポジトリ未指定',
+      noLicense: 'ライセンス未指定',
+      changelogPlaceholder:
+        'このバージョンの変更履歴を入力してください（新機能、バグ修正など）',
+      changelogHint:
+        '更新履歴は拡張機能マーケットのプラグインバージョン履歴に表示されます。',
+      reviewSummaryTitle: 'リリース確認',
+      reviewTargetMarket: '対象マーケット',
+      reviewTargetMarketValue: '拡張機能マーケット (LangBot Space)',
+      reviewAccountStatus: 'アカウント連携',
+      reviewAccountConnected: 'LangBot アカウント連携済み',
+      reviewAccountNotConnected: '未連携（アップロードに失敗します）',
+      spaceNotConnectedTitle: 'マーケットアカウント未連携',
+      bindSpaceButton: 'アカウントを連携',
+      bindRequiredToProceed: '次へ進むにはアカウントを連携してください',
+      prerequisitesTitle: '公開前の準備',
+      prerequisitesDescription:
+        'マーケットプレイスにプラグインを公開する前に、アカウントの連携とクリエイタープロフィールの設定を行ってください。',
+      req1Title: 'LangBot アカウントを連携',
+      req1Desc:
+        'ローカルの LangBot インスタンスが LangBot Space クラウドにログインまたは連携されている必要があります。',
+      reqBound: '連携済み',
+      reqCompleted: '準備完了',
+      req2Title: 'Space クリエイタープロフィールを設定',
+      req2Desc:
+        '連携された LangBot アカウントにクリエイターIDが存在し、プラグインの author と一致している必要があります。',
+      req2WaitSpace: '先に LangBot アカウントの連携が必要です',
+      req2NoCreator:
+        '現在の LangBot アカウントにはクリエイターIDがまだ作成されていません',
+      req2Mismatch: 'クリエイター識別子の不一致',
+      req2MismatchDetail:
+        'Space のクリエイターIDは @{{creator}} ですが、プラグインの author は {{author}} です。manifest.yaml の author を変更するかアカウントを切り替えてください。',
+      createCreatorButton: 'クリエイタープロフィールを設定',
+      manageCreatorButton: 'クリエイター設定を確認',
+      pendingReq: '未完了',
+      autoProceedTip: '',
+      refreshStatus: '状態を更新',
+      reviewGitSync: 'GitHub 同期',
+      reviewGitSyncEnabled: '有効（{{branch}} にプッシュ）',
+      reviewGitSyncDisabled: '無効',
+      reviewChangelog: '更新履歴',
+      reviewChangelogEmpty: '（更新履歴の記入なし）',
+      pluginIdentifier: 'プラグイン識別子',
+      banners: {
+        guideTitle: '操作手順:',
+        disabledTooltip: '上のバナーの手順に従って操作を完了してください',
+        bindButton: 'Spaceアカウントを連携',
+        reauthButton: 'アカウントを再認証',
+        createCreatorButton: 'クリエイタープロフィールを開設',
+        manageCreatorButton: 'クリエイター設定を確認',
+        viewMyPluginsButton: 'Spaceでマイプラグインを確認',
+        refreshButton: '状態を更新',
+        retryButton: '再試行',
+        readyToUpload: {
+          title: '公開準備が整いました',
+          description:
+            'Spaceアカウントとクリエイタープロフィールが確認されました。内容を確認し、下のボタンをクリックして公開してください。',
+        },
+        notConnected: {
+          title: 'LangBot Spaceアカウントが未連携です',
+          description:
+            'このローカルインスタンスはLangBot Spaceに連携されていません。プラグインを公開するにはSpaceアカウントが必要です。',
+          guide:
+            '下の「Spaceアカウントを連携」をクリックして認証を完了してください。連携後に公開が可能になります。',
+        },
+        noCreator: {
+          title: 'Spaceクリエイタープロフィールが未作成です',
+          description:
+            'プラグインをマーケットプレイスに公開するには、作者表示用のクリエイタープロフィールが必要です。',
+          guide:
+            '下のボタンをクリックしてSpaceでクリエイタースラッグ、自己紹介、アイコンを設定し、本画面で「状態を更新」してください。',
+        },
+        authorMismatch: {
+          title: 'プラグイン作者名とSpaceクリエイター識別子が一致しません',
+          description:
+            'マニフェストの作者名は「{{author}}」ですが、現在のSpaceクリエイター識別子は「@{{creator}}」です。マーケットプレイスの規定により完全一致が必要です。',
+          guide:
+            '解決方法:\n1. プラグインの manifest.yaml 内の metadata.author を「{{creator}}」に変更してください。\n2. または「{{author}}」に対応するSpaceアカウントに切り替えてください。',
+        },
+        pendingReview: {
+          title: 'このプラグインには審査待ちのバージョンがあります',
+          description:
+            'すでに審査中の提出が存在します。前回の審査が完了するまで新しいバージョンは提出できません。',
+          guide:
+            '下の「Spaceでマイプラグインを確認」をクリックして、審査状況をご確認ください。',
+        },
+        sessionExpired: {
+          title: 'Spaceログインセッションが期限切れです',
+          description:
+            'Spaceのアクセストークンが無効または期限切れです。再認証が必要です。',
+          guide:
+            '下の「アカウントを再認証」をクリックして再度ログインしてください。',
+        },
+        validationFailed: {
+          title: 'プラグインの仕様検証に失敗しました',
+          description:
+            'パッケージの解析または事前認証チェックに失敗しました: {{detail}}',
+          guide:
+            'manifest.yaml の記述内容、セマンティックバージョン、アイコン、READMEファイルを確認してください。',
+        },
+        genericError: {
+          title: 'プラグインの公開に失敗しました',
+          description: '{{detail}}',
+          guide:
+            'ネットワーク接続を確認して再試行してください。問題が続く場合はコミュニティへお問い合わせください。',
+        },
+      },
+      errors: {
+        noCreatorProfile:
+          'プラグインをアップロードする前に、Spaceでクリエイタープロフィールを設定してください',
+        authorMismatch:
+          'プラグイン作者「{{author}}」はSpaceのクリエイター識別子「@{{slug}}」と一致しません',
+        pendingReview:
+          '現在審査待ちのプラグイン提出があります。審査完了までお待ちください',
+        sessionExpired:
+          'Spaceのログインセッションが期限切れです。再連携してください',
+        notConnected:
+          'プラグインをアップロードする前に、LangBot Spaceアカウントを連携してください',
+        packageFailed:
+          'プラグインパッケージのビルドに失敗しました。コードと構成を確認してください',
+        inspectFailed: 'マニフェスト検査に失敗しました: {{detail}}',
+        certPrecheckFailed: '認証事前チェックに失敗しました: {{detail}}',
+      },
+    },
     localPreview: {
       title: 'ローカルプラグインパッケージをプレビュー',
       unpacking: 'パッケージを展開してプレビュー中...',
@@ -1561,6 +2203,10 @@ const jaJP = {
     updating: '更新中...',
     updateSuccess: 'プラグインの更新に成功しました',
     updateError: '更新に失敗しました：',
+    installedVersion: 'インストール済みバージョン v{{version}}',
+    updateToVersion: 'v{{version}} に更新',
+    confirmUpdatePluginVersion:
+      'プラグイン（{{author}}/{{name}}）を v{{from}} から v{{to}} に更新しますか？',
     saveConfigSuccessNormal: '設定を保存しました',
     saveConfigError: '設定の保存に失敗しました：',
     config: '設定',
@@ -1627,6 +2273,12 @@ const jaJP = {
       depsProgress:
         '{{installed}}/{{total}} インストール済み · 残り {{remaining}} 個',
       installComplete: 'プラグインのインストール完了',
+      followUp: {
+        nextSteps: '次のステップ',
+        agents: 'Agent またはプラグインプロセッサを作成',
+        pipelines: 'パイプラインを作成',
+        knowledge: 'ナレッジベースを作成',
+      },
       updateComplete: 'プラグインの更新が完了しました',
       installCompletePlugin: 'プラグインをインストールしました',
       installCompleteMCP: 'MCP サーバーをインストールしました',
@@ -1639,6 +2291,13 @@ const jaJP = {
     },
   },
   market: {
+    typeTiles: {
+      all: 'すべての拡張',
+      allDesc: 'プラグイン・MCP・スキル',
+      pluginDesc: 'プラットフォーム・ツール・ランナーなど',
+      mcpDesc: '外部サービスのツールを接続',
+      skillDesc: 'Agent に新しい作業手順を教える',
+    },
     certifiedPlugin: '認証済みプラグイン',
     certificationTooltip:
       'このバージョンはデータ分離と共有実行環境との互換性の審査に合格し、パッケージに署名されています。',
@@ -1908,6 +2567,7 @@ const jaJP = {
     triggerConditions: 'トリガー条件',
     safetyControls: '安全制御',
     outputProcessing: '出力処理',
+    speechProcessing: '音声処理',
     nameRequired: '名前は必須です',
     descriptionRequired: '説明は必須です',
     createSuccess:
@@ -1943,6 +2603,10 @@ const jaJP = {
       addPlugin: 'プラグインを追加',
       selectPlugins: 'プラグインを選択',
       pluginsTitle: 'プラグイン',
+      pluginScopeHint:
+        'このパイプラインのイベントリスナー、ツール、コマンドのみを制御します。AI 設定で選択した Runner には影響しません。',
+      runnerScopeHint:
+        'Runner は拡張機能のプラグインスイッチと独立して選択します。対応するプラグインはインストール済みで利用可能である必要があります。',
       mcpServersTitle: 'MCPサーバー',
       mcpResourcesTitle: 'MCPリソース',
       noMCPServersSelected: 'MCPサーバーが選択されていません',
@@ -1957,6 +2621,9 @@ const jaJP = {
       enableAllPlugins: 'すべてのプラグインを有効にする',
       enableAllMCPServers: 'すべてのMCPサーバーを有効にする',
       enableAllSkills: 'すべてのスキルを有効化',
+      toolsDescription:
+        'Agent が呼び出せるイベントツール、ボットツール、ワークスペース操作を選択します。パイプラインはモデルのテキスト出力を自動で返信するため、返信ツールは不要です。',
+      saveTools: 'ツール権限を保存',
       allPluginsEnabled: 'すべてのプラグインが有効になっています',
       allMCPServersEnabled: 'すべてのMCPサーバーが有効になっています',
       allSkillsEnabled: 'すべてのスキルが有効です',
@@ -1987,7 +2654,7 @@ const jaJP = {
       mcpToolsScopeTooltip:
         '拡張機能で現在許可されている MCP サーバーのツールだけが表示されます。',
       skillToolsScopeTooltip:
-        'スキルツールは LangBot のスキルサービスと Box サンドボックスバックエンドが利用可能なときに表示され、Agent がスキルを有効化または登録できるようにします。',
+        'スキルの有効化と読み取り専用リソースには Box は不要です。Agent ワークスペースからの登録には Box サンドボックスが必要です。',
       selectTools: 'ツールを選択',
       resourcesTitle: 'リソース',
       resourcesDescription:
@@ -2041,6 +2708,14 @@ const jaJP = {
       uploading: 'アップロード中...',
     },
     monitoring: {
+      rangeDays: '過去 {{days}} 日間',
+      customRange: '期間を指定',
+      rangeStart: '開始日時',
+      rangeEnd: '終了日時',
+      rangeHint: '開始は終了より前、期間は最大365日です。',
+      autoRefreshLabel: '自動更新',
+      autoRefreshOff: '自動更新：オフ',
+      autoRefreshEvery: '{{seconds}} 秒ごとに更新',
       title: '実行ログ',
       workbench: '設定とデバッグ',
       description: 'このパイプラインの実行ログとエラー情報を表示（過去24時間）',
@@ -2276,6 +2951,21 @@ const jaJP = {
     newVersionAvailable: '新しいバージョンが利用可能',
     viewUpdateGuide: 'アップデート方法を見る',
     noReleaseNotes: 'リリースノートはありません',
+    latestBadge: '最新',
+    currentBadge: '現在のバージョン',
+    viewOnWebsite: '公式サイトで見る',
+    whatsNewInCurrent: 'このバージョンの更新内容',
+    releasesIncluded: '{{count}} 件のリリースを含む',
+    upToDate: '最新バージョンを使用しています',
+    showOlderReleases: '以前の {{count}} 件のリリースを表示',
+    viewFullChangelog: 'すべての更新履歴を見る',
+    changeTypes: {
+      new: '新機能',
+      improved: '改善',
+      changed: '変更',
+      fixed: '修正',
+      security: 'セキュリティ',
+    },
   },
   systemSettings: {
     title: 'システム設定',
@@ -2413,11 +3103,44 @@ const jaJP = {
     space_account_not_registeredTitle: 'アカウントが登録されていません',
     space_account_not_registered:
       'この LangBot アカウントのメールアドレスのローカルアカウントはありません。ワークスペース所有者に招待を依頼してください。',
+    space_dedicated_member_requiredTitle: 'この環境のメンバーではありません',
+    space_dedicated_member_required:
+      'お使いの LangBot アカウントはこの環境に招待されていません。オーナーに LangBot Space の Cloud ページから招待してもらい、招待を承諾してから再度お試しください。',
     space_account_binding_requiredTitle: 'LangBot アカウントの連携が必要です',
     space_account_binding_required:
       'LangBot アカウントログインを使用する前に、アカウント設定でこのローカルアカウントを LangBot アカウントに連携してください。',
   },
+  dailyMessageQuota: {
+    planLimited: '1日 {{count}} 件のメッセージ',
+    planUnlimited: '1日のメッセージ数は無制限',
+    planHelp:
+      'ボットが1日に処理できるメッセージ数です。UTC の日付単位で集計し、00:00 (UTC) にリセットされます。ボットが実際に処理したメッセージのみカウントされます。上限に達すると、その日の新しいメッセージは処理されず、ユーザーに通知されます。',
+    title: '本日のメッセージ',
+    usage: '{{used}} / {{limit}}',
+    remaining: '残り {{count}} 件',
+    resetsAt: '{{time}} にリセット',
+    today: '今日 {{time}}',
+    tomorrow: '明日 {{time}}',
+    exhausted: '本日の上限に達しました',
+    exhaustedHint: '新しいメッセージは {{time}} まで処理されません',
+    nearLimit: '残りわずか',
+    upgrade: 'プランをアップグレード',
+    unlimited: '無制限',
+    settingsTitle: '1日のメッセージ上限',
+    settingsDescription:
+      'ボットが1日に処理できるメッセージ数です（デバッグチャットを含む）。UTC の日付単位で集計し、ボットを起動しないグループメッセージはカウントされません。',
+    unlimitedDescription:
+      '現在のプランでは1日のメッセージ数に上限はありません。',
+    errorTitle: '本日のメッセージ上限に達しました',
+    errorBody:
+      'このワークスペースは本日すでに {{limit}} 件のメッセージを処理したため、このメッセージは処理されませんでした。上限は{{time}}にリセットされます。',
+    errorUpgrade: 'アップグレードして上限を引き上げる',
+    unavailable: '本日の使用量を取得できません',
+  },
   workspace: {
+    dedicatedSpaceMembersHint:
+      'LangBot アカウントでログインするメンバーは LangBot Space の Cloud ページから招待します。下の招待はこのインスタンス専用のパスワードアカウントを作成します。',
+    manageOnSpace: 'Space でメンバーを管理',
     title: 'ワークスペース',
     description: 'メンバー、ロール、招待リンクを管理します',
     selectTitle: 'ワークスペースを選択',
@@ -2432,7 +3155,7 @@ const jaJP = {
     ossSingletonDescription:
       'このセルフホストインスタンスには1つのワークスペースがあり、複数のユーザーを追加できます。',
     cloudManagedDescription:
-      'このワークスペースは LangBot Cloud でホストされています。メンバーはここで管理し、請求は Cloud で開きます。',
+      'このワークスペースは LangBot Cloud でホストされています。',
     loadFailed: 'ワークスペース情報の読み込みに失敗しました',
     members: 'メンバー',
     you: 'あなた',
@@ -2448,6 +3171,10 @@ const jaJP = {
       failed: '招待リンクを作成しましたが、メールを送信できませんでした',
     },
     invitationCreateFailed: '招待の作成に失敗しました',
+    memberLimitReached:
+      'このワークスペースはメンバー上限（{{max}} 人、保留中の招待を含む）に達しています。より多くのメンバーを招待するにはプランをアップグレードしてください。',
+    memberLimitReachedToast:
+      'メンバー上限に達しました。プランをアップグレードしてください。',
     oneTimeLinkWarning:
       'このリンクを今すぐコピーしてください。一度だけ表示されます。',
     copyInvitation: '招待リンクをコピー',
@@ -2501,6 +3228,134 @@ const jaJP = {
     },
   },
   monitoring: {
+    rangeDays: '過去 {{days}} 日間',
+    customRange: '期間を指定',
+    rangeStart: '開始日時',
+    rangeEnd: '終了日時',
+    rangeHint: '開始は終了より前、期間は最大365日です。',
+    autoRefreshLabel: '自動更新',
+    autoRefreshOff: '自動更新：オフ',
+    autoRefreshEvery: '{{seconds}} 秒ごとに更新',
+    unified: {
+      inputs: 'イベントと入力',
+      outputs: '生成結果',
+      deliveries: '送信記録',
+      conversation: '会話の前後関係',
+      related: '関連する実行',
+      events: '実行イベント',
+      llm_calls: 'モデル呼び出し',
+      tool_calls: 'ツール呼び出し',
+      errors: 'エラー',
+      payload: '詳細',
+      metadata: '技術情報',
+      loadMore: 'さらに読み込む',
+      noRecords: '記録なし',
+      contextHint: '会話内の他のメッセージがこの実行に属するとは限りません。',
+      unhandled: '処理なし',
+      roles: {
+        user: 'ユーザー',
+        assistant: 'アシスタント',
+        system: 'システム',
+        tool: 'ツール',
+      },
+    },
+    execution: {
+      title: '実行履歴',
+      subtitle:
+        'エージェントとパイプラインに届いた各イベントと、それによって開始された実行を確認します。',
+      tabs: { executions: '実行履歴' },
+      filters: {
+        source: '種類',
+        sourceAll: 'すべての種類',
+        sourceAgent: 'エージェント',
+        sourcePipeline: 'パイプライン',
+        mode: '実行モード',
+        modeAll: '通常＋デバッグ',
+        modeLive: '通常のみ',
+        modeDebug: 'デバッグのみ',
+        status: '状態',
+        statusAll: 'すべての状態',
+      },
+      status: {
+        completed: '完了',
+        failed: '失敗',
+        running: '実行中',
+        queued: '待機中',
+        cancelled: 'キャンセル済み',
+        ignored: '無視',
+      },
+      // prettier-ignore
+      kind: {
+        agent: 'エージェント',
+        pipeline: 'パイプライン',
+        processor: '処理対象',
+      },
+      columns: {
+        time: '時刻',
+        target: '処理対象',
+        status: '状態',
+        duration: '所要時間',
+        tokens: 'トークン',
+      },
+      debug: 'デバッグ',
+      empty: 'この期間の実行履歴はありません',
+      loading: '実行履歴を読み込み中...',
+      triggeredBy: '{{trigger}} により開始',
+      handledByPlugin: 'プラグインが処理 · {{plugin}}',
+      handledByUnknownPlugin: 'プラグインが処理（特定不可）',
+      filteredByStage: 'パイプラインで停止 · {{stage}}',
+      filteredByUnknownStage: 'パイプラインで停止',
+      filterStages: {
+        BanSessionCheckStage: 'アクセス制御',
+        GroupRespondRuleCheckStage: 'グループ応答ルール',
+        PreContentFilterStage: 'コンテンツフィルター / 無視ルール',
+        PostContentFilterStage: '出力コンテンツフィルター',
+        RequireRateLimitOccupancy: 'レート制限',
+      },
+      cards: {
+        latencyHint:
+          'P50/P95：実行の約 50%/95% がこの時間内に完了します。最近の完了済み Agent 実行が対象で、キュー待ちは除きます。',
+        tokensHint:
+          '記録済みの使用量のみ集計します。モデルが使用量を返さない場合、合計は不完全になります。',
+        totalExecutions: '実行履歴',
+        bySource: 'エージェント {{agent}} 件 · パイプライン {{pipeline}} 件',
+        successRate: '実行成功率',
+        successRateHint:
+          '成功数 ÷（成功数 + 失敗数）。実行中・無視・キャンセルは除きます。',
+        denominator: '終了済み {{denominator}} 件中 {{completed}} 件が完了',
+        running: '実行中',
+        queued: '待機中',
+        waiting: '入力待ち',
+        failed: '失敗',
+        ignored: '無視',
+        latency: '実行時間',
+        p50: 'P50',
+        p95: 'P95',
+        sample: '{{count}} 件の実行を集計',
+        tokens: 'トークン',
+        coverage: '{{calls}} 回中 {{withUsage}} 回で使用量を取得',
+        debugRuns: 'うちデバッグ実行 {{count}} 件',
+      },
+      detail: {
+        title: '実行',
+        timeline: 'タイムライン',
+        executionId: '実行 ID',
+        eventId: 'イベント',
+        queue: 'キュー',
+        runner: 'ランナー',
+        created: '作成日時',
+        duration: '所要時間',
+        usage: '使用量',
+        noEvents: '記録されたトレースイベントはありません',
+        query: '受信メッセージ',
+        modelCalls: 'モデル呼び出し',
+        toolCalls: 'ツール呼び出し',
+        errors: 'エラー',
+        loadError: '実行トレースを読み込めませんでした',
+        openObject: '対象を開く',
+        a11yDescription: 'この実行の完全なトレース',
+      },
+    },
     title: 'ダッシュボード',
     description:
       'ボットアクティビティ、LLM呼び出し、システムパフォーマンスを監視',
@@ -2517,6 +3372,9 @@ const jaJP = {
       pipeline: 'パイプライン',
       allBots: 'すべてのボット',
       selectBot: 'ボットを選択',
+      processor: 'プロセッサー',
+      allProcessors: 'すべてのプロセッサー',
+      selectProcessor: 'プロセッサーを選択',
       allPipelines: 'すべてのパイプライン',
       selectPipeline: 'パイプラインを選択',
       loading: '読み込み中...',
@@ -2541,6 +3399,15 @@ const jaJP = {
       feedback: 'ユーザーフィードバック',
       sessions: 'セッション分析',
       errors: 'エラーログ',
+    },
+    pipelineTrace: {
+      received: '受信メッセージ',
+      processing: '処理の流れ',
+      replies: '返信',
+      noSteps: 'モデル・ツールの呼び出し記録はありません',
+      success: '成功',
+      error: '失敗',
+      pending: '処理待ち',
     },
     messageList: {
       timestamp: 'タイムスタンプ',
@@ -2750,9 +3617,9 @@ const jaJP = {
     statusDetail: 'ステータス',
     pluginDisabled: 'プラグインシステムが無効です',
     boxDisabled:
-      'Box サンドボックスは設定で無効化されています — サンドボックスツール / スキルの追加・編集 / stdio MCP は利用できません',
+      'Box サンドボックスは設定で無効化されています — 実行ツールと stdio MCP は利用できません',
     boxUnavailable:
-      'Box サンドボックスは利用できません — サンドボックスツール / スキルの追加・編集 / stdio MCP は利用できません',
+      'Box サンドボックスは利用できません — 実行ツールと stdio MCP は利用できません',
     boxRequiredHint:
       'この機能には Box ランタイムが必要です。設定で有効化（box.enabled = true）し、ランタイムが正常に接続できることを確認してください。',
     boxBackend: 'バックエンド',
@@ -2766,6 +3633,7 @@ const jaJP = {
     nav: {
       workspace: 'ワークスペース',
       operationTrace: '操作ログ',
+      alerts: 'アラート',
       models: 'モデル',
       api: 'API',
       storage: 'ストレージ',
@@ -2857,6 +3725,7 @@ const jaJP = {
       skill: 'スキル',
       knowledge_base: 'ナレッジベース',
       mcp_server: 'MCP サーバー',
+      content: '共有コンテンツ',
       runtime: 'ランタイム',
       system: 'システム',
       resource: 'リソース',
@@ -2867,6 +3736,8 @@ const jaJP = {
       error: '失敗',
     },
     actions: {
+      content_publish: 'コンテンツを Space に共有',
+      plugin_publish: '拡張を Space に公開',
       audit_log_view: '操作ログを閲覧',
       settings_update: 'トレーサビリティ設定を変更',
       settings_view: 'トレーサビリティ設定を閲覧',
@@ -3228,6 +4099,8 @@ const jaJP = {
         'インストール済みのランナーを使うか、後でもう一度お試しください。',
       browseRunners: 'Runner 拡張機能を見る',
       installAndContinue: 'インストールして続行',
+      autoConfirmPermissions:
+        'プラグインが宣言した権限を自動的に付与します。プラグイン設定で変更できます。',
       installing: 'インストール中...',
       useInstalled: 'この Runner を使用',
       installedUnavailable: 'インストール済み、Runner は利用不可',
@@ -3361,13 +4234,263 @@ const jaJP = {
     selectFromSidebar: 'サイドバーからプラグインページを選択してください',
     invalidPage: '無効なプラグインページ',
   },
-  beta_banner: {
-    message: 'この環境はベータテスト中です。サービスの安定性は保証されません。',
-    cloud_link: 'LangBot Cloud（専用環境）',
+  cloud_banner: {
+    message:
+      '現在は LangBot Cloud のマネージド環境です。専用リソースと高い利用上限が必要な場合は、',
+    dedicated_link: 'LangBot Cloud（専用環境）',
+    cta_dedicated: '専用環境のプランを見る',
     or: 'または',
-    oss_link: 'セルフホスト版',
+    self_hosted_link: 'セルフホスト版',
     period: 'をご検討ください。',
     dismiss: '閉じる',
+  },
+  sensitiveTools: {
+    badge: '注意が必要なツール {{count}} 件',
+    title: '注意が必要な高リスクツールが有効です',
+    description:
+      '紐付けたボットを信頼できないユーザーに公開する場合は、「{{page}}」ページで該当するツールをオフにしてください。',
+    list: '対象：{{items}}',
+    listMore: '対象：{{items}} など計 {{count}} 件',
+    listSeparator: '、',
+  },
+  workspaceOperations: {
+    title: 'ワークスペース操作',
+    description:
+      'このプロセッサーが呼び出せるワークスペース統合 API の操作を設定します。チェックすると許可されます。',
+    scopeHint:
+      'このプロセッサー自身の ID で LangBot ワークスペース統合 API の操作を呼び出すことを許可します。',
+    searchPlaceholder: '操作名、ID、説明で検索...',
+    selectAll: 'すべて選択',
+    deselectAll: 'すべて解除',
+    selectedCount: '{{count}} 件選択',
+    totalCount: '全 {{count}} 件',
+    noOperations: '利用できるワークスペース操作はありません',
+    noSearchResults: '一致する操作はありません',
+    riskRead: '読み取り',
+    riskWrite: '書き込み',
+    riskDangerous: '高リスク',
+    requiresPermission: '必要な権限：{{permission}}',
+    dangerousConfirmTitle: '高リスクのワークスペース操作が含まれています',
+    dangerousConfirmDescription:
+      'このプロセッサーは IM ユーザーに公開されており、ボットと会話できる人なら誰でもこれらの操作を実行させられる可能性があります。保存してもよろしいですか？',
+    dangerousConfirmAction: '保存する',
+    dangerousConfirmCancel: 'キャンセル',
+    saveWorkspaceOperations: 'ワークスペース操作を保存',
+    saveSuccess: 'ワークスペース操作を保存しました',
+    saveFailed: 'ワークスペース操作の保存に失敗しました',
+    configuredCount: '{{count}} 件の操作を設定済み',
+    expandDomain: '展開',
+    collapseDomain: '折りたたむ',
+    ungrantableRemoved:
+      '権限が不足しているため、一部の操作は選択されなかったか削除されました',
+  },
+  alerts: {
+    enableHint: 'アラートを有効化',
+    cta: {
+      title: 'LangBot アカウントでサインインして、アラートメールを無料で送信',
+      pointFree: '公式の無料送信、1 日 20 通まで',
+      pointNoSetup: 'SMTP や Resend の設定は不要',
+      pointPrivate: 'あなたの LangBot アカウントのアドレスにのみ送信',
+      selfHosted: '自前のメールサーバーを使いたい場合',
+      selfHostedLink: 'config.yaml で SMTP または Resend を設定 →',
+    },
+    title: 'アラート',
+    description:
+      'ボット、パイプライン、モデルが失敗し続けたときにメールと Webhook で通知します',
+    enabled: 'アラートを有効化',
+    firingCount: '{{count}} 件発生中',
+    allClear: '問題なし',
+    sendTest: 'テスト送信',
+    saveBeforeTest: 'テスト送信の前に変更を保存してください',
+    saved: 'アラート設定を保存しました',
+    saveFailed: 'アラート設定の保存に失敗しました：{{error}}',
+    loadFailed: 'アラートの読み込みに失敗しました：{{error}}',
+    testSent: 'テストアラートを {{count}} 件の宛先に送信しました',
+    testPartial: '一部の送信に失敗しました。送信履歴を確認してください',
+    testNoChannel:
+      '通知チャネルが未設定です。メールチャネルか Webhook を選択してください',
+    testFailed: 'テストアラートの送信に失敗しました：{{error}}',
+    disabledInstanceWide:
+      'このインスタンスではアラートが無効です（config.yaml の alerts.enabled）。',
+    emailTitle: 'メール',
+    emailDescription: '現在の送信方法：{{channel}}',
+    recipients: '受信者（ワークスペースのオーナーと管理者）',
+    noRecipients: 'メールアドレスを持つオーナーまたは管理者がいません。',
+    extraRecipients: '追加の受信者（自前のメールサービスのみ、最大 10 件）',
+    spaceRecipientsHint:
+      'LangBot Space は LangBot アカウントでサインインした管理者本人のアドレスにのみ送信します。無料枠：アカウントごとに 1 日 20 通、月 200 通。',
+    channel: {
+      auto: '自動',
+      autoDescription:
+        'メールサービスが設定されていればそれを、なければ LangBot Space を使用',
+      instance: '自前のメールサービス',
+      instanceConfigured: 'config.yaml で {{provider}} を設定済み',
+      instanceMissing:
+        '未設定です。config.yaml の email セクションで SMTP または Resend を設定してください',
+      space: 'LangBot Space（公式）',
+      spaceAvailable: '{{accounts}} へ無料で公式送信',
+      spaceMissing: 'LangBot アカウントでサインインすると利用できます',
+      off: 'オフ',
+      offDescription: 'ここに表示し Webhook のみ送信',
+      none: '送信しない（利用可能なチャネルなし）',
+      ready: '利用可能',
+      unavailable: '利用不可',
+    },
+    rulesTitle: 'ルール',
+    rulesDescription:
+      '時間枠内の失敗回数がしきい値に達するとアラートが発生します。',
+    minutesWithin: '分以内に',
+    failuresOrMore: '回以上の失敗',
+    notifyResolved: 'アラートの復旧時に通知',
+    throttleHint:
+      '各アラートは発生時に 1 回送信され、失敗が続く場合は 6 時間後、12 時間後、その後 24 時間ごとにリマインドされます。',
+    rule: {
+      pipeline_failures: 'パイプラインの失敗',
+      pipeline_failuresDescription: '同じパイプラインでの処理エラー',
+      model_failures: 'モデル呼び出しの失敗',
+      model_failuresDescription: '同じモデルへのリクエスト失敗',
+      bot_offline: 'ボットがエラーで停止',
+      bot_offlineDescription: '即時に通知し、ボットが再起動すると復旧',
+    },
+    webhooksTitle: 'Webhook',
+    webhooksDescription:
+      '選択した Webhook は alert.fired、alert.reminder、alert.resolved イベントを受信します。',
+    noWebhooks: 'Webhook がありません。設定 → API で追加してください。',
+    webhookDisabled: '無効',
+    incidentsTitle: '最近のアラート',
+    noIncidents: 'アラートはまだありません。',
+    incidentMeta: '{{count}} 回の失敗 · 開始 {{time}}',
+    state: {
+      firing: '発生中',
+      resolved: '復旧済み',
+    },
+    deliveriesTitle: '送信履歴',
+    noDeliveries: 'まだ何も送信されていません。',
+    kind: {
+      fired: 'アラート',
+      reminder: 'リマインド',
+      resolved: '復旧',
+      test: 'テスト',
+    },
+    via: {
+      email: 'メール',
+      space: 'LangBot Space',
+      webhook: 'Webhook',
+    },
+    status: {
+      sent: '送信済み',
+      failed: '失敗',
+      rate_limited: '上限到達',
+      skipped: 'スキップ',
+    },
+  },
+  promptLibrary: {
+    emptyTitle: 'テンプレートを準備中です ✨',
+    emptyBody: 'プロンプト横の「共有」から、最初の投稿者になりましょう！',
+    bindToFavorite: 'アカウント連携でお気に入り',
+    originalLanguage: '原文',
+    open: 'プロンプトライブラリ',
+    title: 'プロンプトライブラリ',
+    description:
+      'LangBot Space で共有・審査済みのプロンプトを検索します。適用後は設定を保存してください。',
+    kindMessaging: '会話プロンプト',
+    kindAgent: 'Agent プロンプト',
+    searchPlaceholder: '名前・説明・タグ・本文で検索',
+    tabAll: 'すべて',
+    tabFavorites: 'お気に入り',
+    favoritesNeedAccount: 'LangBot アカウントを連携するとお気に入りを使えます',
+    otherKindHint:
+      '{{kind}}を表示中です。別の用途向けに書かれているため、適用前に確認してください。',
+    noFavorites: 'お気に入りはまだありません',
+    empty: '該当するプロンプトはありません',
+    loadFailed: 'プロンプトライブラリの読み込みに失敗しました',
+    favoriteFailed: 'お気に入りの更新に失敗しました',
+    applied: '適用しました。保存すると反映されます。',
+    uses: '{{count}} 回使用',
+    favorite: 'お気に入り',
+    variablesHint: '変数：',
+    append: '現在のプロンプトに追加',
+    replace: '現在のプロンプトを置き換え',
+    replaceTitle: '現在のプロンプトを置き換えますか？',
+    replaceDescription:
+      '現在の内容は上書きされます（保存前なら破棄できます）。',
+    selectHint: '左側からプロンプトを選んでプレビュー',
+  },
+  spaceShare: {
+    modeNew: '新規として公開',
+    modeUpdate: '既存を更新（{{count}}）',
+    pickExisting: '更新する投稿を選択',
+    unlisted: '非公開',
+    identifierHint: '小文字・数字・- または _。公開後は変更できません',
+    bindAccount: 'LangBot アカウントを連携',
+    autoTranslateNotice:
+      '1 つの言語で書くだけで大丈夫です。アップロード後に他の言語へ自動翻訳します。',
+    shareShort: '共有',
+    shareToSpace: 'Space に共有',
+    findingsBlockTitle:
+      '認証情報らしき値があります。削除してから共有してください',
+    findingsWarnTitle: '個人情報や内部情報が含まれています',
+    submitFailed: '送信に失敗しました',
+    submittedTitle: '審査に送信しました',
+    submittedAgentReview:
+      '{{id}} を自動審査中です。承認後 LangBot Space に掲載されます。',
+    submittedManualReview: '{{id}} は手動審査待ちです。',
+    viewProgress: 'LangBot Space で審査状況を見る',
+    needAccountTitle: 'LangBot アカウントが必要です',
+    needAccount:
+      'LangBot アカウントを連携すると投稿できます。投稿はそのアカウントの LangBot Space クリエイタープロフィールで公開されます。',
+    needCreatorTitle: 'クリエイタープロフィールがありません',
+    needCreator:
+      'LangBot Space でクリエイタープロフィールを設定すると投稿できます。設定は一度だけです。',
+    openCreator: 'クリエイタープロフィールを設定',
+    acknowledgeWarnings: 'この情報を公開して問題ないことを確認しました',
+    displayName: '表示名',
+    identifier: '識別子',
+    descriptionLabel: '説明',
+    changelog: '変更内容',
+    reviewNotice:
+      '投稿は審査後に LangBot Space で公開されます。同じ名前で再共有すると新しいバージョンになります。',
+    submit: '審査に送信',
+    promptTitle: 'プロンプトを LangBot Space に共有',
+    promptDescriptionMessaging:
+      '「会話プロンプト」として公開され、他のユーザーがパイプライン設定で検索できます。',
+    promptDescriptionAgent:
+      '「Agent プロンプト」として公開され、他のユーザーが Agent 設定で検索できます。',
+    detectedVariables: '検出した変数：',
+    skillTitle: 'Skill を LangBot Space に共有',
+    skillDescription:
+      '現在の Skill パッケージをアップロードします。審査ではスクリプトと外部通信を確認します。',
+    packageFiles: '送信するファイル',
+    mcpTitle: 'MCP サーバーを LangBot Space に共有',
+    mcpDescription:
+      'リモート MCP のみ対応。認証情報はアップロードされず、プレースホルダーに置き換えられます。',
+    mcpPublishedConfig: '公開される設定',
+    mcpToolsCount: '{{count}} 個のツールのスナップショットを含みます',
+    mcpRedactedTitle: '{{count}} 件の認証情報を除去しました',
+    mcpRedactedHint:
+      'インストール時にこれらの値の入力を求められます。わかりやすい名前を付けられます：',
+    mcpInputLabelPlaceholder: '表示名（既定：{{label}}）',
+    mcpNoCredentials:
+      '認証情報は見つかりませんでした。設定はそのまま公開されます。',
+    mcpNeedsConnection:
+      '先に接続テストを成功させてください。ツール一覧も公開されます',
+    mcpFillInputsTitle: '認証情報を入力してから有効化してください',
+    mcpFillInputs:
+      'このコミュニティ MCP では {{names}} を自分の値に置き換え、保存してから有効化してください。',
+    finding: {
+      openai_key: 'OpenAI キー',
+      anthropic_key: 'Anthropic キー',
+      github_token: 'GitHub トークン',
+      slack_token: 'Slack トークン',
+      aws_access_key: 'AWS アクセスキー',
+      google_api_key: 'Google API キー',
+      private_key: '秘密鍵',
+      jwt: 'JWT トークン',
+      langbot_key: 'LangBot キー',
+      email: 'メールアドレス',
+      phone: '電話番号',
+      private_url: '内部 URL',
+    },
   },
 };
 export default jaJP;

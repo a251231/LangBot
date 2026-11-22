@@ -22,13 +22,15 @@ from langbot_plugin.runtime.plugin.mgr import PluginInstallSource
 import httpx
 import sqlalchemy as sa
 
-from ..authz import Permission, permissions_for_role, require_permission
+from ..authz import Permission, PermissionDeniedError, permissions_for_role, require_permission
+from ...application.contracts import ApplicationAPIException
+from ...application.plugin_permissions import auto_confirm_declared, load_installation, permission_status
 from ..context import ExecutionContext, PrincipalType, RequestContext
 from ....agent.runner.config_resolver import RunnerConfigResolver
 from ....agent.runner import config_schema
 from ....agent.runner.resource_builder import AgentResourceBuilder
 from ....agent.runner.resource_policy import ResourcePolicyProjector
-from ....entity.persistence.model import LLMModel, RerankModel, EmbeddingModel
+from ....entity.persistence.model import LLMModel, RerankModel, EmbeddingModel, ASRModel, TTSModel
 from ....entity.persistence.rag import KnowledgeBase
 from ....entity.persistence.mcp import MCPServer
 from ....core.taskmgr import TaskContext
@@ -98,6 +100,21 @@ class MigrationInstallContext(TaskContext):
                 self.progress[key] = min(value, 100) if key == 'progress_percent' else value
         self.progress['updated_at'] = time.time()
 
+    def record_network_failure(self, exc: httpx.HTTPError):
+        kinds = (
+            (httpx.ConnectTimeout, 'connect_timeout'),
+            (httpx.ReadTimeout, 'read_timeout'),
+            (httpx.WriteTimeout, 'write_timeout'),
+            (httpx.PoolTimeout, 'pool_timeout'),
+            (httpx.ConnectError, 'connect_error'),
+            (httpx.RemoteProtocolError, 'incomplete_response'),
+            (httpx.HTTPStatusError, 'http_status'),
+        )
+        diagnostic = {'kind': next((name for cls, name in kinds if isinstance(exc, cls)), 'network_error')}
+        if isinstance(exc, httpx.HTTPStatusError):
+            diagnostic['http_status'] = exc.response.status_code
+        self.progress['diagnostic'] = diagnostic
+
     def finish(self, code=None):
         self.publish()
         self.progress.update(status='failed' if code else 'completed', code=code, finished_at=time.time())
@@ -150,6 +167,31 @@ def validate_execute_request(body) -> list[dict]:
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str)
+
+
+# Same window the WebUI Runner installer waits for a new Runner to register.
+RUNNER_REGISTRATION_TIMEOUT = 60.0
+RUNNER_REGISTRATION_POLL = 1.0
+_SKIPPED_STATES = ('already_current', 'not_legacy', 'unsupported_runner')
+
+
+def _version_at_least(installed, minimum):
+    # Pins are reviewed minimums; never downgrade an installed newer plugin.
+    from packaging.version import InvalidVersion, Version
+
+    if installed == minimum:
+        return True
+    try:
+        return Version(str(installed)) >= Version(str(minimum))
+    except (InvalidVersion, TypeError):
+        return False
+
+
+def _candidate(row, plan):
+    candidate = {**row, 'config': plan.get('config')}
+    if plan.get('extensions_preferences') is not None:
+        candidate['extensions_preferences'] = plan['extensions_preferences']
+    return candidate
 
 
 def _fingerprint(row):
@@ -227,6 +269,17 @@ class PipelineMigrationService:
             )
         ).first()
         return dict(row._mapping) if row else None
+
+    async def _confirm_plugin(self, ctx, facts):
+        if facts is None:
+            raise MigrationError('plugin_permission_confirmation_required')
+        try:
+            setting = await load_installation(self.ap, ctx.workspace_uuid, facts['installation_uuid'])
+            if not permission_status(self.ap, setting)['pending_confirmation']:
+                return
+            await auto_confirm_declared(self.ap, ctx, setting)
+        except (ApplicationAPIException, PermissionDeniedError) as exc:
+            raise MigrationError('plugin_permission_confirmation_required') from exc
 
     def _native_interactions(self, ctx, pipeline_uuid):
         """Inspect the old in-process cache without importing/pruning it.
@@ -315,7 +368,7 @@ class PipelineMigrationService:
                 pending = dict(snapshots[0]._mapping)
                 source = pending['source_snapshot']
                 plan = plan_legacy_pipeline(source['config'], source['extensions_preferences'], **planner_options)
-                candidate = {**row, 'config': plan.get('config')}
+                candidate = _candidate(row, plan)
                 if plan['state'] != 'ready' or _fingerprint(candidate) != _fingerprint(row):
                     raise MigrationError('planner_changed')
         facts = await self._plugin(ctx, plan)
@@ -442,7 +495,7 @@ class PipelineMigrationService:
                 sources = []
                 for row in await self._rows(ctx):
                     _, _, _, state, _ = await self._plan(ctx, row)
-                    if state not in ('already_current', 'not_legacy'):
+                    if state not in _SKIPPED_STATES:
                         sources.append(row)
             if not sources:
                 raise MigrationError('nothing_to_migrate')
@@ -485,8 +538,11 @@ class PipelineMigrationService:
                         hard_blockers = [b for b in blockers if b['code'] not in ('plugin_missing', 'plugin_disabled')]
                         if hard_blockers:
                             raise MigrationError(hard_blockers[0]['code'])
-                        if state in ('already_current', 'not_legacy'):
-                            result.update(state='already_current', code=None)
+                        if state in _SKIPPED_STATES:
+                            result.update(
+                                state='unsupported_runner' if state == 'unsupported_runner' else 'already_current',
+                                code=None,
+                            )
                             continue
                         target = plan.get('target_plugin')
                         if not target:
@@ -505,16 +561,18 @@ class PipelineMigrationService:
                             continue
                         key = (target['author'], target['name'], target['version'])
                         if key not in installed:
-                            runners = await self.ap.runner_registry.list_runners(
-                                execution, use_cache=False, usage='agent'
-                            )
-                            descriptor = next((r for r in runners if r.id == plan['target_runner_id']), None)
-                            ready = (
-                                facts
-                                and facts['enabled']
-                                and descriptor
-                                and descriptor.plugin_version == target['version']
-                            )
+                            if facts:
+                                was_enabled = facts['enabled']
+                                await self._confirm_plugin(ctx, facts)
+                                facts = await self._plugin(ctx, plan)
+                                # Confirming activates a disabled installation; its
+                                # Runner registers only once the worker is up.
+                                descriptor = await self._wait_for_runner(
+                                    execution, plan, timeout=0 if was_enabled else RUNNER_REGISTRATION_TIMEOUT
+                                )
+                            else:
+                                descriptor = await self._wait_for_runner(execution, plan, timeout=0)
+                            ready = facts and facts['enabled'] and descriptor is not None
                             if not ready:
                                 task_context.metadata['phase'] = 'installing'
                                 install_context = MigrationInstallContext(target)
@@ -524,29 +582,46 @@ class PipelineMigrationService:
                                 try:
                                     await self._authorize(ctx)
                                     await self.ap.plugin_connector.require_workspace_context(execution)
-                                    await self.ap.plugin_connector.install_plugin(
-                                        PluginInstallSource.MARKETPLACE,
-                                        {
-                                            'plugin_author': target['author'],
-                                            'plugin_name': target['name'],
-                                            'plugin_version': target['version'],
-                                        },
-                                        task_context=install_context,
-                                    )
+                                    spec = {'plugin_author': target['author'], 'plugin_name': target['name']}
+                                    try:
+                                        await self.ap.plugin_connector.install_plugin(
+                                            PluginInstallSource.MARKETPLACE,
+                                            {**spec, 'plugin_version': target['version']},
+                                            task_context=install_context,
+                                        )
+                                    except (MarketplacePluginVersionNotFoundError, httpx.HTTPStatusError) as exc:
+                                        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 404:
+                                            raise
+                                        # The reviewed pin was withdrawn: fall back to the
+                                        # marketplace latest; _verify_runtime still checks
+                                        # the schema against the planned config.
+                                        await self.ap.plugin_connector.install_plugin(
+                                            PluginInstallSource.MARKETPLACE, spec, task_context=install_context
+                                        )
+                                    await self._confirm_plugin(ctx, await self._plugin(ctx, plan))
+                                    # install_plugin returns once the package is installed;
+                                    # the worker registers its Runner a moment later.
+                                    if await self._wait_for_runner(execution, plan) is None:
+                                        raise MigrationError('runner_unavailable')
                                     install_code = None
+                                except MigrationError as exc:
+                                    install_code = exc.code
                                 except PluginRuntimeNotConnectedError:
                                     install_code = 'plugin_runtime_unavailable'
                                 except MarketplacePluginVersionNotFoundError:
                                     install_code = 'plugin_version_unavailable'
-                                except httpx.TimeoutException:
+                                except httpx.TimeoutException as exc:
+                                    install_context.record_network_failure(exc)
                                     install_code = 'plugin_download_timeout'
                                 except httpx.HTTPStatusError as exc:
+                                    install_context.record_network_failure(exc)
                                     install_code = (
                                         'plugin_version_unavailable'
                                         if exc.response.status_code == 404
                                         else 'plugin_marketplace_unavailable'
                                     )
-                                except httpx.RequestError:
+                                except httpx.RequestError as exc:
+                                    install_context.record_network_failure(exc)
                                     install_code = 'plugin_download_failed'
                                 except PluginInstallationFailedError as exc:
                                     install_code = {
@@ -598,12 +673,28 @@ class PipelineMigrationService:
             self._all_tasks.discard(ctx.workspace_uuid)
         return task_context.metadata
 
+    async def _wait_for_runner(self, execution, plan, *, timeout: float | None = None):
+        """Return the target Runner once it is registered at the planned version, else None."""
+        timeout = RUNNER_REGISTRATION_TIMEOUT if timeout is None else timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            runners = await self.ap.runner_registry.list_runners(execution, use_cache=False, usage='agent')
+            descriptor = next((r for r in runners if r.id == plan['target_runner_id']), None)
+            if descriptor is not None and _version_at_least(
+                descriptor.plugin_version, plan['target_plugin']['version']
+            ):
+                return descriptor
+            if loop.time() >= deadline:
+                return None
+            await asyncio.sleep(min(RUNNER_REGISTRATION_POLL, max(deadline - loop.time(), 0)))
+
     async def _verify_runtime(self, execution, plan):
         runners = await self.ap.runner_registry.list_runners(execution, use_cache=False, usage='agent')
         descriptor = next((r for r in runners if r.id == plan['target_runner_id']), None)
         if descriptor is None or 'agent' not in descriptor.usages:
             raise MigrationError('runner_unavailable')
-        if descriptor.plugin_version != plan['target_plugin']['version']:
+        if not _version_at_least(descriptor.plugin_version, plan['target_plugin']['version']):
             raise MigrationError('plugin_version_incompatible')
         config = plan['config']
         RunnerConfigResolver.validate_pipeline_config(config)
@@ -639,6 +730,8 @@ class PipelineMigrationService:
                         'llm-model-selector',
                         'embedding-model-selector',
                         'rerank-model-selector',
+                        'asr-model-selector',
+                        'tts-model-selector',
                     )
                     and isinstance(value, str)
                 )
@@ -693,11 +786,22 @@ class PipelineMigrationService:
         )
 
     async def _verify_resources(self, execution, descriptor, runner_config):
-        """Fail closed on references the scoped Host cannot authorize.
+        """Fail closed on unauthorized grants; prune dangling references.
 
         This runs only on explicit execution, outside the mutation transaction.
         Resource use is still reauthorized by the Host on every eventual run.
         """
+
+        async def has_row(model, identifier, *, column=None):
+            column = model.uuid if column is None else column
+            return (
+                await self.pm.execute_async(
+                    sa.select(model.uuid).where(
+                        model.workspace_uuid == execution.workspace_uuid,
+                        column == identifier,
+                    )
+                )
+            ).first() is not None
 
         async def require_row(model, identifier, *, column=None):
             column = model.uuid if column is None else column
@@ -715,28 +819,44 @@ class PipelineMigrationService:
         permissions = getattr(descriptor, 'permissions', None)
         for model_type, model_uuid in config_schema.iter_config_model_refs(descriptor, runner_config):
             allowed = set(getattr(permissions, 'models', []))
-            if not (allowed & ({'rerank'} if model_type == 'rerank' else {'invoke', 'stream'})):
+            needed = (
+                {'rerank'}
+                if model_type == 'rerank'
+                else ({'asr'} if model_type == 'asr' else ({'tts'} if model_type == 'tts' else {'invoke', 'stream'}))
+            )
+            if not (allowed & needed):
                 raise MigrationError('runner_resource_unavailable')
-            await require_row(RerankModel if model_type == 'rerank' else LLMModel, model_uuid)
+            target_cls = (
+                RerankModel
+                if model_type == 'rerank'
+                else (ASRModel if model_type == 'asr' else (TTSModel if model_type == 'tts' else LLMModel))
+            )
+            await require_row(target_cls, model_uuid)
         for field in config_schema.iter_schema_items(descriptor, {'embedding-model-selector'}):
             value = runner_config.get(field['name'])
             if value and value not in config_schema.NONE_SENTINELS:
                 await require_row(EmbeddingModel, value)
 
+        # Dangling knowledge base / tool / MCP references (deleted in 4.10)
+        # are pruned rather than blocking the migration.
         kb_ids = runner_config.get('knowledge-bases', [])
-        if not isinstance(kb_ids, list) or any(not isinstance(v, str) or not v for v in kb_ids):
-            raise MigrationError('runner_resource_unavailable')
+        if not isinstance(kb_ids, list):
+            kb_ids = []
+        kb_ids = [v for v in kb_ids if isinstance(v, str) and v and await has_row(KnowledgeBase, v)]
+        if 'knowledge-bases' in runner_config:
+            runner_config['knowledge-bases'] = kb_ids
         if kb_ids:
             if not config_schema.uses_host_knowledge_bases(descriptor) or 'retrieve' not in getattr(
                 permissions, 'knowledge_bases', []
             ):
                 raise MigrationError('runner_resource_unavailable')
-            for kb_id in kb_ids:
-                await require_row(KnowledgeBase, kb_id)
 
         tool_names = runner_config.get('tools', [])
-        if not isinstance(tool_names, list) or any(not isinstance(v, str) or not v for v in tool_names):
-            raise MigrationError('runner_resource_unavailable')
+        if not isinstance(tool_names, list):
+            tool_names = []
+        tool_names = [v for v in tool_names if isinstance(v, str) and v]
+        if 'tools' in runner_config:
+            runner_config['tools'] = tool_names
         tool_grant = (
             runner_config.get('enable-all-tools', False)
             or tool_names
@@ -745,7 +865,10 @@ class PipelineMigrationService:
         if tool_grant:
             if not config_schema.uses_host_tools(descriptor) or 'call' not in getattr(permissions, 'tools', []):
                 raise MigrationError('runner_resource_unavailable')
-            policy = ResourcePolicyProjector.from_runner_config(runner_config)
+            policy = ResourcePolicyProjector.from_runner_config(
+                runner_config,
+                allowed_workspace_operations=[],
+            )
             tools = await AgentResourceBuilder(self.ap)._build_tools_from_binding(
                 execution,
                 permissions,
@@ -753,20 +876,22 @@ class PipelineMigrationService:
                 descriptor,
                 runner_config,
             )
-            if not set(tool_names) <= {tool['tool_name'] for tool in tools}:
-                raise MigrationError('runner_resource_unavailable')
+            available = {tool['tool_name'] for tool in tools}
+            if 'tools' in runner_config:
+                runner_config['tools'] = [v for v in tool_names if v in available]
 
-        for attachment in runner_config.get('mcp-resources', []):
-            if not isinstance(attachment, dict):
-                raise MigrationError('runner_resource_unavailable')
-            identifier = attachment.get('server_uuid') or attachment.get('server_id')
-            name = attachment.get('server_name')
-            if identifier:
-                await require_row(MCPServer, identifier)
-            elif name:
-                await require_row(MCPServer, name, column=MCPServer.name)
-            else:
-                raise MigrationError('runner_resource_unavailable')
+        if 'mcp-resources' in runner_config:
+            kept = []
+            for attachment in runner_config.get('mcp-resources') or []:
+                if not isinstance(attachment, dict):
+                    continue
+                identifier = attachment.get('server_uuid') or attachment.get('server_id')
+                name = attachment.get('server_name')
+                if (identifier and await has_row(MCPServer, identifier)) or (
+                    not identifier and name and await has_row(MCPServer, name, column=MCPServer.name)
+                ):
+                    kept.append(attachment)
+            runner_config['mcp-resources'] = kept
 
     async def _lock(self, ctx, pipeline_uuid, session):
         # Every pending producer shares this row and revalidates its captured
@@ -800,11 +925,15 @@ class PipelineMigrationService:
             if pending:
                 return pending['uuid'], pending['target_fingerprint']
             target = {**row, 'config': candidate['config']}
+            values = {'config': candidate['config']}
+            if plan.get('extensions_preferences') is not None:
+                target['extensions_preferences'] = plan['extensions_preferences']
+                values['extensions_preferences'] = plan['extensions_preferences']
             t = LegacyPipeline.__table__
             cas = [t.c.workspace_uuid == ctx.workspace_uuid, t.c.uuid == row['uuid']]
             for key in ('config', 'stages', 'extensions_preferences'):
                 cas.append(sa.cast(t.c[key], sa.Text) == row['_raw_' + key])
-            result = await self.pm.execute_async(sa.update(t).where(*cas).values(config=candidate['config']))
+            result = await self.pm.execute_async(sa.update(t).where(*cas).values(**values))
             if result.rowcount != 1:
                 raise MigrationError('preview_stale')
             snapshot_uuid = str(uuid.uuid4())
@@ -870,6 +999,8 @@ class PipelineMigrationService:
                     RunnerConfigResolver.validate_pipeline_config(plan['config'])
                     candidate_entity = {k: copy.deepcopy(v) for k, v in row.items() if not k.startswith('_')}
                     candidate_entity['config'] = copy.deepcopy(plan['config'])
+                    if plan.get('extensions_preferences') is not None:
+                        candidate_entity['extensions_preferences'] = copy.deepcopy(plan['extensions_preferences'])
                     runtime = await self.ap.pipeline_mgr.prepare_pipeline(execution, copy.deepcopy(candidate_entity))
                     if not item_data_only and await self._verify_runtime(execution, plan) != runtime_schema:
                         raise MigrationError('runner_schema_changed')

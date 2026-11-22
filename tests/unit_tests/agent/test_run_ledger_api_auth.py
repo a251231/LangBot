@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import sqlalchemy
@@ -17,6 +18,7 @@ from langbot.pkg.agent.runner.session_registry import AgentRunSessionRegistry
 from langbot.pkg.entity.persistence import agent_run as agent_run_model
 from langbot.pkg.entity.persistence.base import Base
 from langbot.pkg.plugin.handler import RuntimeConnectionHandler
+from langbot.pkg.storage.media import MediaCache
 from langbot_plugin.api.entities.builtin.runner.run_ledger import (
     AgentRun,
     AgentRunEvent,
@@ -26,6 +28,8 @@ from langbot_plugin.api.entities.builtin.runner.run_ledger import (
 from langbot_plugin.entities.io.actions.enums import PluginToRuntimeAction
 
 from .conftest import bind_runtime_action_context, make_resources
+
+pytestmark = pytest.mark.usefixtures('installed_legacy_plugin')
 
 
 class FakeConnection:
@@ -115,7 +119,7 @@ async def _register_session(
         resources=make_resources(),
         conversation_id=conversation_id,
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         thread_id=None,
         available_apis=available_apis or {},
     )
@@ -127,7 +131,7 @@ async def _create_run(
     run_id='run_1',
     conversation_id='conv_1',
     bot_id='bot_1',
-    workspace_id='workspace_1',
+    workspace_id='workspace-test',
     thread_id=None,
     plugin_identity='test/runner',
     runner_id='plugin:test/runner/default',
@@ -171,6 +175,22 @@ async def _create_run(
         event_type='message.completed',
         data={'message': {'role': 'assistant', 'content': 'ok'}},
     )
+
+
+@pytest.fixture
+async def ledger_snapshot(db_engine):
+    await _create_run(
+        db_engine, run_id='workspace_guard', workspace_id='workspace_guard', plugin_identity='guard/runner'
+    )
+
+    async def snapshot():
+        async with AsyncSession(db_engine) as session:
+            return [
+                (await session.execute(sqlalchemy.select(*model.__table__.c).order_by(model.id))).mappings().all()
+                for model in (agent_run_model.AgentRun, agent_run_model.AgentRunEvent)
+            ]
+
+    return snapshot
 
 
 @pytest.mark.asyncio
@@ -262,6 +282,7 @@ async def test_run_list_filters_same_scope_different_runner_owner(session_regist
 async def test_non_admin_target_run_actions_reject_same_scope_different_runner_owner(
     session_registry,
     db_engine,
+    ledger_snapshot,
 ):
     await _register_session(
         session_registry,
@@ -349,10 +370,12 @@ async def test_non_admin_target_run_actions_reject_same_scope_different_runner_o
         ),
     ]
 
+    before = await ledger_snapshot()
     for action, payload in calls:
         result = await handler.actions[action](payload)
         assert result.code != 0, action
         assert 'not accessible' in result.message.lower()
+        assert await ledger_snapshot() == before
 
 
 @pytest.mark.asyncio
@@ -776,7 +799,7 @@ async def test_runtime_admin_can_register_list_and_claim_with_own_run_session(se
         runner_id='plugin:other/runner/default',
         conversation_id='conv_1',
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         status='queued',
         queue_name='default',
         priority=5,
@@ -839,7 +862,7 @@ async def test_runtime_admin_can_register_list_and_claim_without_run_id(db_engin
         runner_id='plugin:other/runner/default',
         conversation_id='conv_1',
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         status='queued',
         queue_name='default',
         priority=5,
@@ -1046,11 +1069,56 @@ async def test_run_append_result_basic_path(session_registry, db_engine):
 
 
 @pytest.mark.asyncio
-async def test_run_append_result_rejects_side_effecting_result_type(session_registry, db_engine):
+async def test_run_append_result_uses_cas_and_redacts_metadata(session_registry, db_engine):
+    await _register_session(session_registry, available_apis={'run_append_result': True})
+    await _create_run(db_engine)
+    handler = _handler(db_engine)
+    objects = {}
+
+    async def save(key, data):
+        objects[key] = data
+
+    storage = SimpleNamespace(
+        storage_provider=SimpleNamespace(exists=AsyncMock(return_value=False), save=AsyncMock(side_effect=save))
+    )
+    storage.media_cache = MediaCache(handler.ap, storage)
+    handler.ap.storage_mgr = storage
+    image = {'type': 'Image', 'base64': 'eA=='}
+    result = await handler.actions[PluginToRuntimeAction.RUN_APPEND_RESULT.value](
+        {
+            'run_id': 'run_1',
+            'caller_plugin_identity': 'test/runner',
+            'sequence': 2,
+            'event_type': 'tool.call.completed',
+            'data': {'tool_call_id': 'call_1', 'tool_name': 'image', 'result': {'images': [image]}},
+            'metadata': {'preview': image},
+        }
+    )
+    assert result.code == 0
+    event = AgentRunEvent.model_validate(result.data)
+    saved = event.data['result']['images'][0]
+    assert saved['base64'] is None
+    assert saved['url'].startswith('/api/v1/files/media/')
+    assert objects == {saved['storage_key']: b'x'}
+    async with db_engine.connect() as conn:
+        metadata = (
+            await conn.execute(
+                sqlalchemy.select(agent_run_model.AgentRunEvent.metadata_json).where(
+                    agent_run_model.AgentRunEvent.sequence == 2
+                )
+            )
+        ).scalar_one()
+    assert json.loads(metadata)['preview']['base64'] is None
+    assert image['base64'] == 'eA=='
+
+
+@pytest.mark.asyncio
+async def test_run_append_result_rejects_side_effecting_result_type(session_registry, db_engine, ledger_snapshot):
     await _register_session(session_registry, available_apis={'run_append_result': True})
     await _create_run(db_engine)
     handler = _handler(db_engine)
     run_append_result = handler.actions[PluginToRuntimeAction.RUN_APPEND_RESULT.value]
+    before = await ledger_snapshot()
 
     result = await run_append_result(
         {
@@ -1066,14 +1134,16 @@ async def test_run_append_result_rejects_side_effecting_result_type(session_regi
 
     assert result.code != 0
     assert 'canonical runner result path' in result.message
+    assert await ledger_snapshot() == before
 
 
 @pytest.mark.asyncio
-async def test_run_append_result_rejects_unknown_result_type(session_registry, db_engine):
+async def test_run_append_result_rejects_unknown_result_type(session_registry, db_engine, ledger_snapshot):
     await _register_session(session_registry, available_apis={'run_append_result': True})
     await _create_run(db_engine)
     handler = _handler(db_engine)
     run_append_result = handler.actions[PluginToRuntimeAction.RUN_APPEND_RESULT.value]
+    before = await ledger_snapshot()
 
     result = await run_append_result(
         {
@@ -1089,14 +1159,16 @@ async def test_run_append_result_rejects_unknown_result_type(session_registry, d
 
     assert result.code != 0
     assert 'unknown result type' in result.message
+    assert await ledger_snapshot() == before
 
 
 @pytest.mark.asyncio
-async def test_run_append_result_validates_known_payloads(session_registry, db_engine):
+async def test_run_append_result_validates_known_payloads(session_registry, db_engine, ledger_snapshot):
     await _register_session(session_registry, available_apis={'run_append_result': True})
     await _create_run(db_engine)
     handler = _handler(db_engine)
     run_append_result = handler.actions[PluginToRuntimeAction.RUN_APPEND_RESULT.value]
+    before = await ledger_snapshot()
 
     result = await run_append_result(
         {
@@ -1112,10 +1184,13 @@ async def test_run_append_result_validates_known_payloads(session_registry, db_e
 
     assert result.code != 0
     assert 'invalid action.requested payload' in result.message
+    assert await ledger_snapshot() == before
 
 
 @pytest.mark.asyncio
-async def test_run_append_and_finalize_claimed_target_require_active_claim(session_registry, db_engine):
+async def test_run_append_and_finalize_claimed_target_require_active_claim(
+    session_registry, db_engine, ledger_snapshot
+):
     await _register_session(
         session_registry,
         available_apis={'run_append_result': True, 'run_finalize': True},
@@ -1139,6 +1214,7 @@ async def test_run_append_and_finalize_claimed_target_require_active_claim(sessi
     handler = _handler(db_engine)
     run_append_result = handler.actions[PluginToRuntimeAction.RUN_APPEND_RESULT.value]
     run_finalize = handler.actions[PluginToRuntimeAction.RUN_FINALIZE.value]
+    before = await ledger_snapshot()
 
     missing_claim = await run_append_result(
         {
@@ -1152,6 +1228,9 @@ async def test_run_append_and_finalize_claimed_target_require_active_claim(sessi
             },
         }
     )
+    assert missing_claim.code != 0
+    assert 'active claim ownership' in missing_claim.message
+    assert await ledger_snapshot() == before
     wrong_claim = await run_finalize(
         {
             'run_id': 'run_1',
@@ -1162,6 +1241,9 @@ async def test_run_append_and_finalize_claimed_target_require_active_claim(sessi
             'status': 'completed',
         }
     )
+    assert wrong_claim.code != 0
+    assert 'claim ownership is not active' in wrong_claim.message
+    assert await ledger_snapshot() == before
     appended = await run_append_result(
         {
             'run_id': 'run_1',
@@ -1187,10 +1269,6 @@ async def test_run_append_and_finalize_claimed_target_require_active_claim(sessi
         }
     )
 
-    assert missing_claim.code != 0
-    assert 'active claim ownership' in missing_claim.message
-    assert wrong_claim.code != 0
-    assert 'claim ownership is not active' in wrong_claim.message
     assert appended.code == 0
     assert finalized.code == 0
     assert finalized.data['status'] == 'completed'
@@ -1297,7 +1375,7 @@ async def test_run_claim_renew_and_release_actions(session_registry, db_engine):
         runner_id='plugin:test/runner/default',
         conversation_id='conv_1',
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         status='queued',
         queue_name='default',
         priority=5,
@@ -1368,7 +1446,7 @@ async def test_non_admin_run_claim_is_scoped_to_session_runner_and_conversation(
         runner_id='plugin:other/runner/default',
         conversation_id='conv_1',
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         status='queued',
         queue_name='default',
         priority=30,
@@ -1380,7 +1458,7 @@ async def test_non_admin_run_claim_is_scoped_to_session_runner_and_conversation(
         runner_id='plugin:test/runner/default',
         conversation_id='conv_other',
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         status='queued',
         queue_name='default',
         priority=20,
@@ -1392,7 +1470,7 @@ async def test_non_admin_run_claim_is_scoped_to_session_runner_and_conversation(
         runner_id='plugin:test/runner/default',
         conversation_id='conv_1',
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         status='queued',
         queue_name='default',
         priority=10,
@@ -1425,7 +1503,7 @@ async def test_non_admin_run_claim_is_scoped_to_session_runner_and_conversation(
 
 
 @pytest.mark.asyncio
-async def test_non_admin_renew_and_release_reject_cross_runner_claim(session_registry, db_engine):
+async def test_non_admin_renew_and_release_reject_cross_runner_claim(session_registry, db_engine, ledger_snapshot):
     await _register_session(
         session_registry,
         available_apis={'run_renew_claim': True, 'run_release_claim': True},
@@ -1447,6 +1525,7 @@ async def test_non_admin_renew_and_release_reject_cross_runner_claim(session_reg
     handler = _handler(db_engine)
     run_renew_claim = handler.actions[PluginToRuntimeAction.RUN_RENEW_CLAIM.value]
     run_release_claim = handler.actions[PluginToRuntimeAction.RUN_RELEASE_CLAIM.value]
+    before = await ledger_snapshot()
 
     renewed = await run_renew_claim(
         {
@@ -1457,6 +1536,9 @@ async def test_non_admin_renew_and_release_reject_cross_runner_claim(session_reg
             'claim_token': claim['claim_token'],
         }
     )
+    assert renewed.code != 0
+    assert 'not accessible' in renewed.message.lower()
+    assert await ledger_snapshot() == before
     released = await run_release_claim(
         {
             'run_id': 'run_1',
@@ -1467,14 +1549,13 @@ async def test_non_admin_renew_and_release_reject_cross_runner_claim(session_reg
         }
     )
 
-    assert renewed.code != 0
-    assert 'not accessible' in renewed.message.lower()
     assert released.code != 0
     assert 'not accessible' in released.message.lower()
+    assert await ledger_snapshot() == before
 
 
 @pytest.mark.asyncio
-async def test_non_admin_release_claim_cannot_finalize_run(session_registry, db_engine):
+async def test_non_admin_release_claim_cannot_finalize_run(session_registry, db_engine, ledger_snapshot):
     await _register_session(
         session_registry,
         available_apis={'run_claim': True, 'run_release_claim': True},
@@ -1486,7 +1567,7 @@ async def test_non_admin_release_claim_cannot_finalize_run(session_registry, db_
         runner_id='plugin:test/runner/default',
         conversation_id='conv_1',
         bot_id='bot_1',
-        workspace_id='workspace_1',
+        workspace_id='workspace-test',
         status='queued',
         queue_name='default',
     )
@@ -1503,6 +1584,7 @@ async def test_non_admin_release_claim_cannot_finalize_run(session_registry, db_
         }
     )
     assert claimed.code == 0
+    before = await ledger_snapshot()
 
     released = await run_release_claim(
         {
@@ -1517,3 +1599,4 @@ async def test_non_admin_release_claim_cannot_finalize_run(session_registry, db_
 
     assert released.code != 0
     assert 'use run_finalize' in released.message
+    assert await ledger_snapshot() == before

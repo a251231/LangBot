@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  lazy,
+  Suspense,
+} from 'react';
 import { SidebarChildVO } from '@/app/home/components/home-sidebar/HomeSidebarChild';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { sidebarConfigList } from '@/app/home/components/home-sidebar/sidbarConfigList';
@@ -70,6 +77,9 @@ import { Button } from '@/components/ui/button';
 import WorkspaceSwitcher, {
   OPEN_WORKSPACE_SETTINGS_EVENT,
 } from '@/app/home/components/workspace-settings/WorkspaceSwitcher';
+const CloudPlansDialog = lazy(
+  () => import('@/app/home/components/workspace-settings/CloudPlansDialog'),
+);
 import NewVersionDialog from '@/app/home/components/new-version-dialog/NewVersionDialog';
 import SettingsDialog, {
   SettingsSection,
@@ -77,6 +87,10 @@ import SettingsDialog, {
   SETTINGS_SECTION_BY_ACTION,
 } from '@/app/home/components/settings-dialog/SettingsDialog';
 import { GitHubRelease } from '@/app/infra/http/CloudServiceClient';
+import {
+  type ChangelogRelease,
+  fetchLangBotChangelog,
+} from '@/app/infra/http/LangBotChangelog';
 import { useAsyncTask, AsyncTaskStatus } from '@/hooks/useAsyncTask';
 import { toast } from 'sonner';
 import {
@@ -124,26 +138,10 @@ import {
   useWorkspaceQuotaStatus,
 } from '@/app/home/components/workspace-quota/useWorkspaceQuotaStatus';
 import { WorkspaceQuotaTooltip } from '@/app/home/components/workspace-quota/WorkspaceQuotaTooltip';
+import { SidebarDailyMessageQuota } from '@/app/home/components/workspace-quota/DailyMessageQuotaMeter';
+import { useOpenCloudPlansListener } from '@/app/home/components/workspace-quota/useDailyMessageQuota';
 import { SidebarGuide } from './SidebarGuide';
-
-// Compare two version strings, returns true if v1 > v2
-function compareVersions(v1: string, v2: string): boolean {
-  const clean1 = v1.replace(/^v/, '');
-  const clean2 = v2.replace(/^v/, '');
-
-  const parts1 = clean1.split('.').map((p) => parseInt(p, 10) || 0);
-  const parts2 = clean2.split('.').map((p) => parseInt(p, 10) || 0);
-
-  const maxLen = Math.max(parts1.length, parts2.length);
-
-  for (let i = 0; i < maxLen; i++) {
-    const p1 = parts1[i] || 0;
-    const p2 = parts2[i] || 0;
-    if (p1 > p2) return true;
-    if (p1 < p2) return false;
-  }
-  return false;
-}
+import { isCoreUpdate } from '@/app/utils/coreVersion';
 
 // Discord brand glyph (lucide-react has no Discord icon).
 function DiscordIcon({ className }: { className?: string }) {
@@ -655,6 +653,16 @@ function NavItems({
           if (item.extensionType === 'skill') {
             return `/home/skills?id=${encodeURIComponent(item.id)}`;
           }
+          const processorTab = searchParams.get('tab');
+          if (
+            hasDetailPages &&
+            (routePrefix === '/home/agents' ||
+              routePrefix === '/home/pipelines') &&
+            (pathname === '/home/agents' || pathname === '/home/pipelines') &&
+            (processorTab === 'logs' || processorTab === 'config')
+          ) {
+            return `${routePrefix}?id=${encodeURIComponent(item.id)}&tab=${processorTab}`;
+          }
           return hasDetailPages
             ? `${routePrefix}?id=${encodeURIComponent(item.id)}`
             : routePrefix;
@@ -675,11 +683,14 @@ function NavItems({
         // Shared entity list renderer used by both popover and collapsible
         const renderEntityList = (inPopover: boolean) => {
           const sortedItems = isExtensionsCategory
-            ? [...items].sort((a, b) =>
-                a.name.localeCompare(b.name, undefined, {
+            ? [...items].sort((a, b) => {
+                const aDebug = Boolean(a.debug);
+                const bDebug = Boolean(b.debug);
+                if (aDebug !== bDebug) return aDebug ? -1 : 1;
+                return a.name.localeCompare(b.name, undefined, {
                   sensitivity: 'base',
-                }),
-              )
+                });
+              })
             : sortByRecent(items);
           const isExpanded = expandedLists[section]?.[categoryId] ?? false;
           const maxItems = inPopover ? 10 : MAX_VISIBLE_ITEMS;
@@ -794,7 +805,7 @@ function NavItems({
                       {(isBot || isMCP) && (
                         <span
                           className={cn(
-                            'absolute -bottom-0.5 -right-0.5 size-2 rounded-full border-2 border-popover',
+                            'absolute -bottom-1 -right-1 size-3 rounded-full border-2 border-popover',
                             isMCP
                               ? mcpStatusColor(item)
                               : item.enabled === false
@@ -819,6 +830,9 @@ function NavItems({
                     <span className="ml-auto shrink-0 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
                       {t('bots.legacyAdapterBadge')}
                     </span>
+                  )}
+                  {item.debug && (
+                    <Bug className="size-3.5 shrink-0 !text-orange-500 dark:!text-orange-400 ml-auto" />
                   )}
                 </button>
               );
@@ -862,7 +876,7 @@ function NavItems({
                             {(isBot || isMCP) && (
                               <span
                                 className={cn(
-                                  'absolute -bottom-0.5 -right-0.5 size-2 rounded-full border-2 border-sidebar',
+                                  'absolute -bottom-1 -right-1 size-3 rounded-full border-2 border-sidebar',
                                   isMCP
                                     ? mcpStatusColor(item)
                                     : item.enabled === false
@@ -911,7 +925,7 @@ function NavItems({
                           </span>
                         )}
                         {item.debug && (
-                          <Bug className="size-3.5 shrink-0 text-orange-400" />
+                          <Bug className="size-3.5 shrink-0 !text-orange-500 dark:!text-orange-400" />
                         )}
                       </a>
                     </SidebarMenuSubButton>
@@ -1880,9 +1894,29 @@ export default function HomeSidebar({
   const [latestRelease, setLatestRelease] = useState<GitHubRelease | null>(
     null,
   );
+  const [changelogReleases, setChangelogReleases] = useState<
+    ChangelogRelease[]
+  >([]);
   const [hasNewVersion, setHasNewVersion] = useState(false);
   const [versionDialogOpen, setVersionDialogOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [cloudPlansOpen, setCloudPlansOpen] = useState(false);
+  const openCloudPlansDialog = useCallback(() => setCloudPlansOpen(true), []);
+  // Quota views elsewhere (Debug Chat, settings) open the plans dialog here.
+  useOpenCloudPlansListener(openCloudPlansDialog);
+  // Quota emails link to /home/monitoring?open=plans.
+  useEffect(() => {
+    if (searchParams.get('open') !== 'plans' || !currentWorkspace) return;
+    if (currentWorkspace.workspace.source === 'cloud_projection') {
+      setCloudPlansOpen(true);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('open');
+    const query = next.toString();
+    navigate(`${location.pathname}${query ? `?${query}` : ''}`, {
+      replace: true,
+    });
+  }, [searchParams, currentWorkspace, location.pathname, navigate]);
   const [userEmail, setUserEmail] = useState<string>('');
   const [starCount, setStarCount] = useState<number | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -1971,22 +2005,39 @@ export default function HomeSidebar({
     // not see a "new version available" prompt in the sidebar. Skip the GitHub
     // release check entirely for edition=cloud.
     if (systemInfo?.edition !== 'cloud') {
-      getCloudServiceClientSync()
-        .getLangBotReleases()
+      const currentVersion = systemInfo?.version;
+      // Release notes come from the curated changelog on langbot.app. The
+      // Space-cached GitHub releases are only a fallback when that feed is
+      // unreachable, so the update prompt keeps working.
+      fetchLangBotChangelog()
         .then((releases) => {
-          if (releases && releases.length > 0) {
-            const latestStable = releases.find(
-              (r) => !r.prerelease && !r.draft,
-            );
-            const latest = latestStable || releases[0];
-            setLatestRelease(latest);
-
-            const currentVersion = systemInfo?.version;
-            if (currentVersion && latest.tag_name) {
-              const isNewer = compareVersions(latest.tag_name, currentVersion);
-              setHasNewVersion(isNewer);
-            }
+          if (releases.length === 0) throw new Error('empty changelog feed');
+          setChangelogReleases(releases);
+          if (currentVersion) {
+            setHasNewVersion(isCoreUpdate(releases[0].version, currentVersion));
           }
+        })
+        .catch((changelogError) => {
+          console.warn(
+            'Failed to fetch langbot.app changelog, falling back to GitHub releases:',
+            changelogError,
+          );
+          return getCloudServiceClientSync()
+            .getLangBotReleases()
+            .then((releases) => {
+              if (releases && releases.length > 0) {
+                const latestStable = releases.find(
+                  (r) => !r.prerelease && !r.draft,
+                );
+                const latest = latestStable || releases[0];
+                setLatestRelease(latest);
+                if (currentVersion && latest.tag_name) {
+                  setHasNewVersion(
+                    isCoreUpdate(latest.tag_name, currentVersion),
+                  );
+                }
+              }
+            });
         })
         .catch((error) => {
           console.error('Failed to fetch releases:', error);
@@ -2134,9 +2185,32 @@ export default function HomeSidebar({
                     </Badge>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <span className="truncate text-xs text-muted-foreground">
-                      {systemInfo?.version}
-                    </span>
+                    {systemInfo?.edition !== 'cloud' &&
+                    changelogReleases.length > 0 ? (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        title={t('version.whatsNewInCurrent')}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setVersionDialogOpen(true);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setVersionDialogOpen(true);
+                          }
+                        }}
+                        className="truncate text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline cursor-pointer"
+                      >
+                        {systemInfo?.version}
+                      </span>
+                    ) : (
+                      <span className="truncate text-xs text-muted-foreground">
+                        {systemInfo?.version}
+                      </span>
+                    )}
                     {hasNewVersion && (
                       <Badge
                         onClick={() => setVersionDialogOpen(true)}
@@ -2153,8 +2227,26 @@ export default function HomeSidebar({
         </SidebarHeader>
 
         {showWorkspaceSwitcher && (
-          <div className="px-2 group-data-[collapsible=icon]:px-0">
-            <WorkspaceSwitcher className="w-full group-data-[collapsible=icon]:min-w-0 group-data-[collapsible=icon]:px-2" />
+          <div className="flex items-center gap-1 px-2 group-data-[collapsible=icon]:px-0">
+            <WorkspaceSwitcher className="min-w-0 flex-1 group-data-[collapsible=icon]:min-w-0 group-data-[collapsible=icon]:px-2" />
+            {currentWorkspace?.workspace.source === 'cloud_projection' && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-9 shrink-0 group-data-[collapsible=icon]:hidden"
+                    aria-label={t('workspace.upgradePlan')}
+                    onClick={() => setCloudPlansOpen(true)}
+                  >
+                    <ArrowUp className="size-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  {t('workspace.upgradePlan')}
+                </TooltipContent>
+              </Tooltip>
+            )}
           </div>
         )}
 
@@ -2213,6 +2305,7 @@ export default function HomeSidebar({
 
         {/* Footer */}
         <SidebarFooter>
+          <SidebarDailyMessageQuota />
           {/* Models entry */}
           <SidebarMenu>
             <SidebarMenuItem data-sidebar-guide="models">
@@ -2463,6 +2556,16 @@ export default function HomeSidebar({
         </DialogContent>
       </Dialog>
 
+      {currentWorkspace && (
+        <Suspense fallback={null}>
+          <CloudPlansDialog
+            open={cloudPlansOpen}
+            onOpenChange={setCloudPlansOpen}
+            workspace={currentWorkspace}
+            spaceURL={systemInfo.cloud_service_url}
+          />
+        </Suspense>
+      )}
       <SettingsDialog
         open={settingsOpen}
         onOpenChange={handleSettingsOpenChange}
@@ -2472,7 +2575,9 @@ export default function HomeSidebar({
       <NewVersionDialog
         open={versionDialogOpen}
         onOpenChange={setVersionDialogOpen}
-        release={latestRelease}
+        currentVersion={systemInfo?.version}
+        releases={changelogReleases}
+        fallbackRelease={latestRelease}
       />
       <SidebarGuide />
     </>

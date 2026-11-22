@@ -4,6 +4,7 @@ __pycache__/
 database.db
 langbot.log
 /banlist.py
+*.lbpkg
 /revcfg.py
 prompts/
 logs/
@@ -30,6 +31,7 @@ bard.json
 !.pre-commit-config.yaml
 !components.yaml
 !/docker-compose.yaml
+docker/data
 data/labels/instance_id.json
 .DS_Store
 /data
@@ -53,18 +55,6 @@ testsdk/
 /build
 *.egg-info
 
-# Plugin build artifacts and unused local plugins
-plugins/*/dist/
-*.lbpkg
-/plugins/wendao_signin_plugin/
-/plugins/feishu_ocr_plugin/
-!plugins/feishu_keyword_report_plugin/dist/
-!plugins/feishu_keyword_report_plugin/dist/*.lbpkg
-!plugins/feishu_ai_analysis_plugin/dist/
-!plugins/feishu_ai_analysis_plugin/dist/*.lbpkg
-!plugins/feishu_process_bitable_plugin/dist/
-!plugins/feishu_process_bitable_plugin/dist/*.lbpkg
-
 # Next.js build cache (legacy)
 web/.next/
 web/.pnpm-home
@@ -81,3 +71,9 @@ packaging/fnos/app/desktop/images/
 packaging/fnos/*.fpk
 
 r.ps1
+
+*.log
+*.pid
+
+# SDK project template (sdk/) ships an editor config example
+!sdk/src/langbot_plugin/assets/templates/.vscode

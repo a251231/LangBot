@@ -980,6 +980,48 @@ async def test_scoped_sql_structure_allows_only_the_production_vocabulary(statem
     _validate_scoped_statement_call((statement,), {})
 
 
+async def test_resource_expansion_allows_only_the_fixed_function_and_media_column() -> None:
+    from langbot.pkg.entity.persistence.event_log import EventLog
+    from langbot.pkg.persistence.resource_urls import ExpandedResourceURLs
+
+    statement = sa.update(EventLog).where(EventLog.input_json == '{}').values(input_json='[]')
+    _validate_scoped_statement_call((statement,), {})
+
+    class SpoofedExpansion(ExpandedResourceURLs):
+        inherit_cache = True
+
+    for expression in (
+        ExpandedResourceURLs(),
+        ExpandedResourceURLs(sa.literal('{}')),
+        ExpandedResourceURLs(User.uuid),
+        ExpandedResourceURLs(EventLog.input_json, sa.literal('{}')),
+        SpoofedExpansion(EventLog.input_json),
+    ):
+        with pytest.raises(ScopedSessionTransactionError, match='custom SQL AST'):
+            _validate_scoped_statement_call((sa.select(expression),), {})
+
+
+async def test_bot_route_cas_cast_is_limited_to_event_bindings() -> None:
+    from langbot.pkg.entity.persistence.bot import Bot
+
+    _validate_scoped_statement_call((sa.select(sa.cast(Bot.event_bindings, sa.Text)),), {})
+    for column in (Bot.adapter_config, Bot.plugin_processors):
+        with pytest.raises(ScopedSessionTransactionError):
+            _validate_scoped_statement_call((sa.select(sa.cast(column, sa.Text)),), {})
+
+
+async def test_monitoring_json_casts_are_limited_to_journal_metadata() -> None:
+    from langbot.pkg.entity.persistence.agent_run import AgentRun
+    from langbot.pkg.entity.persistence.event_log import EventLog
+
+    for column in (AgentRun.metadata_json, EventLog.metadata_json, EventLog.input_json):
+        statement = sa.select(sa.cast(column, sa.JSON)['status'].as_string())
+        _validate_scoped_statement_call((statement,), {})
+    for column in (AgentRun.authorization_json, sa.literal('{}')):
+        with pytest.raises(ScopedSessionTransactionError, match='casts'):
+            _validate_scoped_statement_call((sa.select(sa.cast(column, sa.JSON)),), {})
+
+
 async def test_scoped_session_executes_sqlite_strftime() -> None:
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     try:
@@ -1186,3 +1228,64 @@ async def test_after_commit_task_is_cancelled_and_coroutine_closed_on_rollback(t
         assert coro.cr_frame is None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize('source', ['instance', 'comparator'])
+async def test_scoped_statement_revalidates_mutated_optional_attributes(source) -> None:
+    expression = sa.literal(1)
+    statement = sa.select(expression)
+    _validate_scoped_statement_call((statement,), {})
+    if source == 'instance':
+        expression._suffixes = ('unsafe SQL',)
+    else:
+        expression.comparator = SimpleNamespace(_suffixes=('unsafe SQL',))
+    with pytest.raises(ScopedSessionTransactionError, match='textual statement modifiers'):
+        _validate_scoped_statement_call((statement,), {})
+
+
+async def test_scoped_statement_retains_custom_attribute_fallback(monkeypatch) -> None:
+    expression = sa.literal(1)
+    statement = sa.select(expression)
+    _validate_scoped_statement_call((statement,), {})
+    original = sa.sql.elements.ColumnElement.__getattr__
+
+    def changed_attribute(self, name):
+        if name == '_suffixes':
+            return ('unsafe SQL',)
+        return original(self, name)
+
+    monkeypatch.setattr(sa.sql.elements.ColumnElement, '__getattr__', changed_attribute)
+    with pytest.raises(ScopedSessionTransactionError, match='textual statement modifiers'):
+        _validate_scoped_statement_call((statement,), {})
+
+
+@pytest.mark.parametrize('nested', [False, True])
+async def test_scoped_statement_revalidates_shared_type_after_mutation(nested) -> None:
+    shared_type = sa.String()
+    column_type = sa.ARRAY(shared_type) if nested else shared_type
+    statement = sa.select(sa.column('a', column_type), sa.column('b', column_type))
+    _validate_scoped_statement_call((statement,), {})
+
+    shared_type.collation = quoted_name('unsafe collation', quote=False)
+    with pytest.raises(ScopedSessionTransactionError, match='forced-unquoted SQL type identifiers'):
+        _validate_scoped_statement_call((statement,), {})
+
+
+@pytest.mark.parametrize('unsafe_first', [False, True])
+async def test_scoped_statement_checks_distinct_instances_of_same_sql_type(unsafe_first) -> None:
+    safe = sa.String()
+    unsafe = sa.String(collation=quoted_name('unsafe collation', quote=False))
+    types = (unsafe, safe) if unsafe_first else (safe, unsafe)
+    statement = sa.select(sa.column('a', types[0]), sa.column('b', types[1]))
+    with pytest.raises(ScopedSessionTransactionError, match='forced-unquoted SQL type identifiers'):
+        _validate_scoped_statement_call((statement,), {})
+
+
+async def test_scoped_statement_revalidates_replaced_nested_type() -> None:
+    shared_type = sa.ARRAY(sa.String())
+    statement = sa.select(sa.column('a', shared_type), sa.column('b', shared_type))
+    _validate_scoped_statement_call((statement,), {})
+
+    shared_type.item_type = _UntrustedCastType()
+    with pytest.raises(ScopedSessionTransactionError, match='custom SQL types'):
+        _validate_scoped_statement_call((statement,), {})

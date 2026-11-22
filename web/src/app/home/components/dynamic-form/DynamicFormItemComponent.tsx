@@ -1,4 +1,5 @@
 import { hasModelReasoningAbility } from '@/app/home/components/reasoning/model-reasoning';
+import PromptLibraryToolbar from '@/app/home/components/space-share/PromptLibraryToolbar';
 import {
   DynamicFormItemType,
   IDynamicFormItemSchema,
@@ -22,12 +23,16 @@ import { ControllerRenderProps } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
 import { useEffect, useState } from 'react';
 import { httpClient, systemInfo, userInfo } from '@/app/infra/http';
+import { MODEL_CONFIGURATION_CHANGED } from '@/app/infra/http/modelConfigEvents';
+import { useInstalledPluginIcon } from '@/app/infra/hooks/useInstalledPluginIcon';
 import {
   LLMModel,
   Bot,
   KnowledgeBase,
   EmbeddingModel,
   RerankModel,
+  ASRModel,
+  TTSModel,
   PluginTool,
   ReasoningLevel,
 } from '@/app/infra/entities/api';
@@ -72,6 +77,7 @@ import SettingsDialog, {
   SettingsSection,
 } from '@/app/home/components/settings-dialog/SettingsDialog';
 import ToolResourceSelectors from '@/app/home/components/dynamic-form/ToolResourceSelectors';
+import ToolGroupChecklist from '@/app/home/components/tool-groups/ToolGroupChecklist';
 import { LANGBOT_MODELS_PROVIDER_REQUESTER } from '@/app/home/components/models-dialog/types';
 import ReasoningLevelPicker, {
   REASONING_LEVELS,
@@ -94,19 +100,6 @@ function hasUsableOptionName(option: { name?: string | null }): boolean {
   return typeof option.name === 'string' && option.name.trim().length > 0;
 }
 
-function getPluginComponentIconURL(value?: string): string | null {
-  if (!value?.startsWith('plugin:')) {
-    return null;
-  }
-
-  const match = value.match(/^plugin:([^/]+)\/([^/]+)(?:\/|$)/);
-  if (!match) {
-    return null;
-  }
-
-  return httpClient.getPluginIconURL(match[1], match[2]);
-}
-
 function SelectOptionContent({
   label,
   value,
@@ -114,7 +107,10 @@ function SelectOptionContent({
   label: string;
   value: string;
 }) {
-  const iconURL = getPluginComponentIconURL(value);
+  const match = value?.startsWith('plugin:')
+    ? value.match(/^plugin:([^/]+)\/([^/]+)(?:\/|$)/)
+    : null;
+  const iconURL = useInstalledPluginIcon(match?.[1], match?.[2]);
 
   return (
     <div className="flex min-w-0 items-center gap-2">
@@ -141,6 +137,7 @@ export default function DynamicFormItemComponent({
   systemContext,
   requiredModelAbility,
   compactModelSelector = false,
+  selectedModelLabel,
 }: {
   config: IDynamicFormItemSchema;
   field: ControllerRenderProps<any, any>;
@@ -150,10 +147,13 @@ export default function DynamicFormItemComponent({
   systemContext?: Record<string, unknown>;
   requiredModelAbility?: string;
   compactModelSelector?: boolean;
+  selectedModelLabel?: string;
 }) {
   const [llmModels, setLlmModels] = useState<LLMModel[]>([]);
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);
   const [rerankModels, setRerankModels] = useState<RerankModel[]>([]);
+  const [asrModels, setAsrModels] = useState<ASRModel[]>([]);
+  const [ttsModels, setTtsModels] = useState<TTSModel[]>([]);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [bots, setBots] = useState<Bot[]>([]);
   const [tools, setTools] = useState<PluginTool[]>([]);
@@ -173,6 +173,8 @@ export default function DynamicFormItemComponent({
     DynamicFormItemType.LLM_MODEL_SELECTOR,
     DynamicFormItemType.EMBEDDING_MODEL_SELECTOR,
     DynamicFormItemType.RERANK_MODEL_SELECTOR,
+    DynamicFormItemType.ASR_MODEL_SELECTOR,
+    DynamicFormItemType.TTS_MODEL_SELECTOR,
     DynamicFormItemType.MODEL_FALLBACK_SELECTOR,
   ].includes(config.type);
   const {
@@ -250,12 +252,36 @@ export default function DynamicFormItemComponent({
       });
   };
 
+  const fetchAsrModels = () => {
+    httpClient
+      .getProviderASRModels()
+      .then((resp) => {
+        setAsrModels(resp.models.filter(hasUsableUuid));
+      })
+      .catch((err) => {
+        toast.error('Failed to load ASR models: ' + err.msg);
+      });
+  };
+
+  const fetchTtsModels = () => {
+    httpClient
+      .getProviderTTSModels()
+      .then((resp) => {
+        setTtsModels(resp.models.filter(hasUsableUuid));
+      })
+      .catch((err) => {
+        toast.error('Failed to load TTS models: ' + err.msg);
+      });
+  };
+
   const handleModelsDialogChange = (open: boolean) => {
     setModelsDialogOpen(open);
     if (!open) {
       fetchLlmModels();
       fetchEmbeddingModels();
       fetchRerankModels();
+      fetchAsrModels();
+      fetchTtsModels();
     }
   };
 
@@ -313,6 +339,10 @@ export default function DynamicFormItemComponent({
   useEffect(() => {
     if (config.type === DynamicFormItemType.LLM_MODEL_SELECTOR) {
       fetchLlmModels();
+      window.addEventListener(MODEL_CONFIGURATION_CHANGED, fetchLlmModels);
+      return () => {
+        window.removeEventListener(MODEL_CONFIGURATION_CHANGED, fetchLlmModels);
+      };
     }
   }, [config.type]);
 
@@ -325,6 +355,18 @@ export default function DynamicFormItemComponent({
   useEffect(() => {
     if (config.type === DynamicFormItemType.RERANK_MODEL_SELECTOR) {
       fetchRerankModels();
+    }
+  }, [config.type]);
+
+  useEffect(() => {
+    if (config.type === DynamicFormItemType.ASR_MODEL_SELECTOR) {
+      fetchAsrModels();
+    }
+  }, [config.type]);
+
+  useEffect(() => {
+    if (config.type === DynamicFormItemType.TTS_MODEL_SELECTOR) {
+      fetchTtsModels();
     }
   }, [config.type]);
 
@@ -648,11 +690,25 @@ export default function DynamicFormItemComponent({
                 aria-label={t('models.selectModel')}
                 className={
                   compactModelSelector
-                    ? 'w-full min-w-0 gap-1 border-0 bg-transparent px-1 text-xs text-muted-foreground shadow-none hover:bg-muted data-[size=default]:h-7 [&_[data-slot=select-value]_svg]:hidden'
+                    ? 'w-full min-w-0 gap-1 rounded-lg border border-border bg-background px-2 text-xs text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.04)] hover:border-muted-foreground/40 hover:bg-background dark:bg-background dark:hover:bg-background data-[state=open]:border-muted-foreground/50 focus-visible:border-muted-foreground/50 focus-visible:ring-1 focus-visible:ring-muted-foreground/20 data-[size=default]:h-7 [&_[data-slot=select-value]_svg]:hidden'
                     : MODEL_SELECT_TRIGGER_CLASS
                 }
               >
-                <SelectValue placeholder={t('models.selectModel')} />
+                <SelectValue placeholder={t('models.selectModel')}>
+                  {/* Keep compact labels explicitly rendered even when a stream
+                      omits the model name. Switching to Radix's ItemText portal
+                      would give two renderers ownership of the same DOM node. */}
+                  {compactModelSelector ? (
+                    <span className="truncate">
+                      {selectedModelLabel ||
+                        selectableModels.find(
+                          (model) => model.uuid === field.value,
+                        )?.name ||
+                        field.value ||
+                        t('models.selectModel')}
+                    </span>
+                  ) : undefined}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {Object.entries(groupedModels).map(([providerName, models]) => (
@@ -1028,6 +1084,112 @@ export default function DynamicFormItemComponent({
             <SelectContent>
               <SelectItem value="__none__">{t('common.none')}</SelectItem>
               {Object.entries(groupedRerankModels).map(
+                ([providerName, models]) => (
+                  <SelectGroup key={providerName}>
+                    <SelectLabel>{providerName}</SelectLabel>
+                    {models.map((model) => (
+                      <SelectItem
+                        key={model.uuid}
+                        value={model.uuid}
+                        className={MODEL_SELECT_ITEM_CLASS}
+                      >
+                        {renderModelOption(model)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+        </div>
+      );
+
+    case DynamicFormItemType.ASR_MODEL_SELECTOR:
+      const groupedAsrModels = asrModels.reduce(
+        (acc, model) => {
+          const providerName = model.provider?.name || 'Unknown';
+          if (!acc[providerName]) acc[providerName] = [];
+          acc[providerName].push(model);
+          return acc;
+        },
+        {} as Record<string, ASRModel[]>,
+      );
+      for (const [providerName, models] of Object.entries(groupedAsrModels)) {
+        if (
+          models[0]?.provider?.requester === LANGBOT_MODELS_PROVIDER_REQUESTER
+        ) {
+          groupedAsrModels[providerName] = sortModelsByCatalog(
+            models,
+            langbotModelMetadata,
+          );
+        }
+      }
+
+      return (
+        <div className="w-full max-w-md min-w-0">
+          <Select
+            value={field.value || '__none__'}
+            onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)}
+          >
+            <SelectTrigger className={MODEL_SELECT_TRIGGER_CLASS}>
+              <SelectValue placeholder={t('models.asr')} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">{t('common.none')}</SelectItem>
+              {Object.entries(groupedAsrModels).map(
+                ([providerName, models]) => (
+                  <SelectGroup key={providerName}>
+                    <SelectLabel>{providerName}</SelectLabel>
+                    {models.map((model) => (
+                      <SelectItem
+                        key={model.uuid}
+                        value={model.uuid}
+                        className={MODEL_SELECT_ITEM_CLASS}
+                      >
+                        {renderModelOption(model)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+        </div>
+      );
+
+    case DynamicFormItemType.TTS_MODEL_SELECTOR:
+      const groupedTtsModels = ttsModels.reduce(
+        (acc, model) => {
+          const providerName = model.provider?.name || 'Unknown';
+          if (!acc[providerName]) acc[providerName] = [];
+          acc[providerName].push(model);
+          return acc;
+        },
+        {} as Record<string, TTSModel[]>,
+      );
+      for (const [providerName, models] of Object.entries(groupedTtsModels)) {
+        if (
+          models[0]?.provider?.requester === LANGBOT_MODELS_PROVIDER_REQUESTER
+        ) {
+          groupedTtsModels[providerName] = sortModelsByCatalog(
+            models,
+            langbotModelMetadata,
+          );
+        }
+      }
+
+      return (
+        <div className="w-full max-w-md min-w-0">
+          <Select
+            value={field.value || '__none__'}
+            onValueChange={(v) => field.onChange(v === '__none__' ? '' : v)}
+          >
+            <SelectTrigger className={MODEL_SELECT_TRIGGER_CLASS}>
+              <SelectValue placeholder={t('models.tts')} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">{t('common.none')}</SelectItem>
+              {Object.entries(groupedTtsModels).map(
                 ([providerName, models]) => (
                   <SelectGroup key={providerName}>
                     <SelectLabel>{providerName}</SelectLabel>
@@ -1720,7 +1882,16 @@ export default function DynamicFormItemComponent({
             <SelectGroup>
               {bots.filter(hasUsableUuid).map((bot) => (
                 <SelectItem key={bot.uuid} value={bot.uuid}>
-                  {bot.name}
+                  <span className="flex min-w-0 items-center gap-2">
+                    {bot.adapter && (
+                      <img
+                        src={httpClient.getAdapterIconURL(bot.adapter)}
+                        alt=""
+                        className="size-4 shrink-0 rounded-sm object-contain"
+                      />
+                    )}
+                    <span className="truncate">{bot.name}</span>
+                  </span>
                 </SelectItem>
               ))}
             </SelectGroup>
@@ -1801,44 +1972,13 @@ export default function DynamicFormItemComponent({
                   {t('tools.selectTools', 'Select Tools')}
                 </DialogTitle>
               </DialogHeader>
-              <div className="flex-1 overflow-y-auto space-y-2 pr-2">
-                {tools.map((tool) => {
-                  const isSelected = tempSelectedToolNames.includes(tool.name);
-                  return (
-                    <div
-                      key={tool.name}
-                      className="flex items-center gap-3 rounded-lg border p-3 hover:bg-accent cursor-pointer"
-                      onClick={() => {
-                        setTempSelectedToolNames((prev) =>
-                          prev.includes(tool.name)
-                            ? prev.filter((name) => name !== tool.name)
-                            : [...prev, tool.name],
-                        );
-                      }}
-                    >
-                      <Checkbox
-                        checked={isSelected}
-                        aria-label={`Select ${tool.name}`}
-                      />
-                      <Wrench className="h-4 w-4 shrink-0 text-muted-foreground" />
-                      <div className="flex-1">
-                        <div className="font-medium">{tool.name}</div>
-                        {tool.human_desc && (
-                          <div className="text-sm text-muted-foreground">
-                            {tool.human_desc}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-                {tools.length === 0 && (
-                  <div className="flex h-32 items-center justify-center">
-                    <p className="text-sm text-muted-foreground">
-                      {t('tools.noToolsAvailable', 'No tools available')}
-                    </p>
-                  </div>
-                )}
+              <div className="flex-1 overflow-y-auto pr-2">
+                <ToolGroupChecklist
+                  tools={tools}
+                  value={tempSelectedToolNames}
+                  onChange={setTempSelectedToolNames}
+                  emptyText={t('tools.noToolsAvailable', 'No tools available')}
+                />
               </div>
               <DialogFooter>
                 <Button
@@ -1899,8 +2039,17 @@ export default function DynamicFormItemComponent({
       )
         ? field.value
         : [{ role: 'system', content: '' }];
+      const promptLibraryKind = systemContext?.prompt_library_kind;
       return (
         <div className="min-w-0 space-y-2">
+          {(promptLibraryKind === 'messaging' ||
+            promptLibraryKind === 'agent') && (
+            <PromptLibraryToolbar
+              kind={promptLibraryKind}
+              value={promptItems}
+              onChange={(messages) => field.onChange(messages)}
+            />
+          )}
           {promptItems.map(
             (item: { role: string; content: string }, index: number) => (
               <div

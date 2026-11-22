@@ -16,7 +16,7 @@ from langbot.pkg.platform.adapters.wecomcs.api_impl import WecomCSAPIMixin
 from langbot.pkg.platform.adapters.wecomcs.event_converter import WecomCSEventConverter
 from langbot.pkg.platform.adapters.wecomcs.message_converter import WecomCSMessageConverter
 from langbot.pkg.platform.adapters.wecomcs.platform_api import PLATFORM_API_MAP
-from langbot.pkg.platform.adapters.wecomcs.types import parse_private_chat_id
+from langbot.pkg.platform.adapters.wecomcs.types import split_private_chat_id
 from langbot_plugin.api.entities.builtin.platform import events as platform_events
 from langbot_plugin.api.entities.builtin.platform import message as platform_message
 from langbot_plugin.api.entities.builtin.platform.errors import NotSupportedError
@@ -36,6 +36,7 @@ class WecomCSAdapter(WecomCSAPIMixin, abstract_platform_adapter.AbstractPlatform
     ] = {}
     _message_cache: dict[str, platform_events.MessageReceivedEvent] = {}
     _user_cache: dict[str, typing.Any] = {}
+    _kfid_by_user: dict[str, str] = {}
 
     class Config:
         arbitrary_types_allowed = True
@@ -70,6 +71,7 @@ class WecomCSAdapter(WecomCSAPIMixin, abstract_platform_adapter.AbstractPlatform
             listeners={},
             _message_cache={},
             _user_cache={},
+            _kfid_by_user={},
         )
         self._register_native_handlers()
 
@@ -79,6 +81,12 @@ class WecomCSAdapter(WecomCSAPIMixin, abstract_platform_adapter.AbstractPlatform
     def get_supported_events(self) -> list[str]:
         return [
             'message.received',
+            'message.deleted',
+            'wecomcs.enter_session',
+            'wecomcs.msg_send_fail',
+            'wecomcs.servicer_status_change',
+            'wecomcs.session_status_change',
+            'wecomcs.reject_customer_msg_switch_change',
             'platform.specific',
         ]
 
@@ -101,7 +109,9 @@ class WecomCSAdapter(WecomCSAPIMixin, abstract_platform_adapter.AbstractPlatform
         if target_type not in ('person', 'private'):
             raise NotSupportedError(f'send_message:{target_type}')
 
-        external_userid, open_kfid = parse_private_chat_id(target_id)
+        external_userid, open_kfid = split_private_chat_id(target_id)
+        if not open_kfid:
+            open_kfid = await self._resolve_open_kfid(external_userid)
         content_list = await WecomCSMessageConverter.yiri2target(message, self.bot)
         raw_results = []
         for content in content_list:
@@ -109,6 +119,36 @@ class WecomCSAdapter(WecomCSAPIMixin, abstract_platform_adapter.AbstractPlatform
                 await self._send_content(open_kfid, external_userid, self._make_outbound_msgid(), content)
             )
         return platform_events.MessageResult(raw={'results': raw_results})
+
+    async def reply_to_event(
+        self, *, context: dict, target_type: str, target_id: str, message: platform_message.MessageChain
+    ) -> platform_events.MessageResult:
+        """Use event credentials for welcome and session-status replies."""
+        event_type = context.get('event_type')
+        if event_type not in ('wecomcs.enter_session', 'wecomcs.session_status_change'):
+            return await self.send_message(target_type, target_id, message)
+        data = context.get('data') or {}
+        code_key = 'welcome_code' if event_type == 'wecomcs.enter_session' else 'msg_code'
+        code = data.get(code_key) or (data.get('data') or {}).get(code_key)
+        if not code:
+            raise ValueError(
+                f'WeCom CS did not provide {code_key} for this event; an event response is not available. '
+                'Entering a session does not open the ordinary messaging window. '
+                'Ask the customer to send a message before sending an ordinary reply.'
+            )
+        timestamp = data.get('timestamp')
+        if event_type == 'wecomcs.enter_session' and timestamp and time.time() - float(timestamp) >= 20:
+            raise ValueError(
+                'WeCom CS welcome reply expired: welcome_code is valid for only 20 seconds after entry. '
+                'Use a fast, fixed welcome response; do not wait for a long AI run or retry this event.'
+            )
+        if not message.root or any(not isinstance(item, platform_message.Plain) for item in message.root):
+            raise ValueError('WeCom CS event replies currently support a single text message only')
+        text = ''.join(item.text for item in message.root)
+        if not text.strip():
+            raise ValueError('WeCom CS event reply text must not be empty')
+        result = await self.bot.send_event_text(str(code), self._make_outbound_msgid(), text)
+        return platform_events.MessageResult(message_id=result.get('msgid'), raw=result)
 
     async def reply_message(
         self,
@@ -183,11 +223,12 @@ class WecomCSAdapter(WecomCSAPIMixin, abstract_platform_adapter.AbstractPlatform
         async def on_message(event: WecomCSEvent):
             await self._handle_native_event(event)
 
-        for msg_type in ('text', 'image', 'file', 'voice'):
+        for msg_type in ('text', 'image', 'file', 'voice', 'event'):
             self.bot.on_message(msg_type)(on_message)
 
     async def _handle_native_event(self, event: WecomCSEvent):
         self.bot_account_id = event.receiver_id or self.bot_account_id
+        self._remember_open_kfid(event.user_id, event.receiver_id)
         try:
             if event.message_id and str(event.message_id) in self._message_cache:
                 await self.logger.debug(f'Skip duplicated WeComCS message: {event.message_id}')
@@ -225,6 +266,44 @@ class WecomCSAdapter(WecomCSAPIMixin, abstract_platform_adapter.AbstractPlatform
         ):
             while len(cache) > 4096:
                 cache.pop(next(iter(cache)), None)
+
+    def _remember_open_kfid(self, external_userid: typing.Any, open_kfid: typing.Any) -> None:
+        user = str(external_userid or '')
+        kfid = str(open_kfid or '')
+        if not user or not kfid:
+            return
+        self._kfid_by_user.pop(user, None)
+        self._kfid_by_user[user] = kfid
+        while len(self._kfid_by_user) > 4096:
+            self._kfid_by_user.pop(next(iter(self._kfid_by_user)), None)
+
+    async def _resolve_open_kfid(self, external_userid: str) -> str:
+        """Find the open_kfid for a bare external_userid target.
+
+        Pipeline launcher ids (and anything persisted from them, e.g. the
+        HumanTakeover plugin's session target) carry only the customer's
+        external_userid. Prefer the account the customer last wrote to; when
+        that is unknown (e.g. after a restart) fall back to the only customer
+        service account of this app.
+        """
+        cached = self._kfid_by_user.get(external_userid)
+        if cached:
+            return cached
+        try:
+            accounts = await self.bot.list_kf_accounts()
+        except Exception as exc:
+            raise ValueError(
+                'WeComCS target_id must be formatted as "external_userid|open_kfid"; '
+                f'could not look up customer service accounts to resolve open_kfid: {exc}'
+            ) from exc
+        kfids = [str(a.get('open_kfid')) for a in accounts if a.get('open_kfid')]
+        if len(kfids) == 1:
+            return kfids[0]
+        raise ValueError(
+            'WeComCS target_id must be formatted as "external_userid|open_kfid": '
+            f'cannot infer open_kfid for this customer ({len(kfids)} customer service accounts found). '
+            'Wait for the customer to send a new message, or pass the full target id.'
+        )
 
     async def _send_content(self, open_kfid: str, external_userid: str, msgid: str, content: dict):
         content_type = content.get('type')

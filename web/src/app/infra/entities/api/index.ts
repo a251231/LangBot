@@ -52,6 +52,8 @@ export interface ModelProvider {
   llm_count?: number;
   embedding_count?: number;
   rerank_count?: number;
+  asr_count?: number;
+  tts_count?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -158,6 +160,38 @@ export interface RerankModel {
   extra_args?: object;
 }
 
+export interface ApiRespProviderASRModels {
+  models: ASRModel[];
+}
+
+export interface ApiRespProviderASRModel {
+  model: ASRModel;
+}
+
+export interface ASRModel {
+  uuid: string;
+  name: string;
+  provider_uuid: string;
+  provider?: ModelProvider;
+  extra_args?: object;
+}
+
+export interface ApiRespProviderTTSModels {
+  models: TTSModel[];
+}
+
+export interface ApiRespProviderTTSModel {
+  model: TTSModel;
+}
+
+export interface TTSModel {
+  uuid: string;
+  name: string;
+  provider_uuid: string;
+  provider?: ModelProvider;
+  extra_args?: object;
+}
+
 export interface LangBotModelAvailability {
   up: boolean | null;
   last_probed_at: string | null;
@@ -192,6 +226,10 @@ export interface RunnerDescriptor {
   plugin_name: string;
   config_schema: import('../form/dynamic').IDynamicFormItemSchema[];
   supported_event_patterns: string[];
+  permissions?: {
+    workspace_operations?: string[];
+    [key: string]: unknown;
+  };
 }
 
 export interface ProcessorRun {
@@ -259,6 +297,13 @@ export interface Agent {
   updated_at?: string;
 }
 
+export type CreateAgentRequest = Pick<
+  Agent,
+  'name' | 'description' | 'emoji' | 'kind' | 'component_ref' | 'config'
+> & {
+  runner_id?: string;
+};
+
 export interface ApiRespAgents {
   agents: Agent[];
 }
@@ -267,11 +312,31 @@ export interface ApiRespAgent {
   agent: Agent;
 }
 
+export interface WorkspaceOperationItem {
+  id: string;
+  domain: string;
+  label: Record<string, string>;
+  summary: string;
+  risk: 'read' | 'write' | 'dangerous';
+  permission: string;
+  grantable: boolean;
+}
+
+export interface DomainMeta {
+  domain: string;
+  label: Record<string, string>;
+  summary?: string;
+  count?: number;
+}
+
 export interface GetAgentMetadataResponseData {
+  workspace_operation_grants?: Record<string, string[]>;
   event_processors?: RunnerDescriptor[];
   runner_config?: PipelineConfigTab;
   platform_tools: AgentPlatformTool[];
   host_tools?: PluginTool[] | null;
+  workspace_operations?: WorkspaceOperationItem[];
+  domains?: DomainMeta[];
   kinds: Array<{
     name: AgentKind;
     supported_event_patterns: string[];
@@ -562,12 +627,28 @@ export interface WizardProgress {
   selected_runner: string | null;
 }
 
+export interface ApiRespCloudBanner {
+  enabled: boolean;
+  /** Visual tone requested by the deployment: info, warning, maintenance. */
+  level: 'info' | 'warning' | 'maintenance';
+  dismissible: boolean;
+  /** Append the dedicated-environment / self-hosting links after the copy. */
+  show_links: boolean;
+  dedicated_url: string;
+  repository_url: string;
+  /** Language key (`zh_hans`, `en_us`, ...) -> operator-authored copy. */
+  content: Record<string, string>;
+}
+
 export interface ApiRespSystemInfo {
   debug: boolean;
   version: string;
   edition: string;
   beta: boolean;
   deployment_mode: 'cloud' | 'oss';
+  /** Cloud-only instance notice from `cloud.banner` in config.yaml. Null for
+   *  OSS deployments or when the banner is disabled. */
+  cloud_banner?: ApiRespCloudBanner | null;
   /** Independent instance-level gate for local stdio MCP transports. */
   mcp_stdio_enabled: boolean;
   cloud_service_url: string;
@@ -678,6 +759,7 @@ interface GetPipelineConfig {
   ai: object;
   output: object;
   safety: object;
+  speech?: object;
   trigger: object;
 }
 
@@ -813,6 +895,8 @@ export type MCPServer =
       enable: boolean;
       extra_args: MCPServerExtraArgsSSE;
       runtime_info?: MCPServerRuntimeInfo;
+      /** ${VAR} placeholder names still to fill (community installs). */
+      unfilled_inputs?: string[];
       readme?: string;
       created_at?: string;
       updated_at?: string;
@@ -824,6 +908,8 @@ export type MCPServer =
       enable: boolean;
       extra_args: MCPServerExtraArgsHttp;
       runtime_info?: MCPServerRuntimeInfo;
+      /** ${VAR} placeholder names still to fill (community installs). */
+      unfilled_inputs?: string[];
       readme?: string;
       created_at?: string;
       updated_at?: string;
@@ -835,6 +921,8 @@ export type MCPServer =
       enable: boolean;
       extra_args: MCPServerExtraArgsRemote;
       runtime_info?: MCPServerRuntimeInfo;
+      /** ${VAR} placeholder names still to fill (community installs). */
+      unfilled_inputs?: string[];
       readme?: string;
       created_at?: string;
       updated_at?: string;
@@ -846,6 +934,8 @@ export type MCPServer =
       enable: boolean;
       extra_args: MCPServerExtraArgsStdio;
       runtime_info?: MCPServerRuntimeInfo;
+      /** ${VAR} placeholder names still to fill (community installs). */
+      unfilled_inputs?: string[];
       readme?: string;
       created_at?: string;
       updated_at?: string;
@@ -938,6 +1028,7 @@ export interface Skill {
   description: string;
   instructions?: string;
   package_root?: string;
+  revision?: string;
   is_builtin?: boolean;
   created_at?: string;
   updated_at?: string;
@@ -950,3 +1041,20 @@ export interface ApiRespSkills {
 export interface ApiRespSkill {
   skill: Skill;
 }
+
+export type {
+  ExecutionSource,
+  ExecutionSourceFilter,
+  ExecutionModeFilter,
+  ExecutionUsage,
+  ExecutionRow,
+  ExecutionOverview,
+  TokenCoverage,
+  ExecutionSummary,
+  ExecutionListResult,
+  PipelineMessageRow,
+  ExecutionCallRow,
+  AgentExecutionDetail,
+  PipelineExecutionDetail,
+  ExecutionDetail,
+} from './monitoring-executions';

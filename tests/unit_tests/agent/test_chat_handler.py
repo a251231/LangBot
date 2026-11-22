@@ -11,8 +11,8 @@ Avoids circular imports by using proper import structure.
 
 from __future__ import annotations
 
-import uuid
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langbot.pkg.agent.runner.errors import (
@@ -20,7 +20,6 @@ from langbot.pkg.agent.runner.errors import (
     RunnerExecutionError,
     RunnerNotAuthorizedError,
 )
-from langbot.pkg.agent.runner.config_resolver import RunnerConfigResolver
 
 
 # Define mock classes in dependency order (no forward references needed)
@@ -142,6 +141,39 @@ class MockAgentRunOrchestrator:
         return 'plugin:langbot-team/LocalAgent/default'
 
 
+class SteeringRunnerNotFoundOrchestrator(MockAgentRunOrchestrator):
+    async def try_claim_steering_from_query(self, query):
+        raise RunnerNotFoundError('plugin:langbot-team/LocalAgent/default')
+
+
+class SteeringClaimedOrchestrator(MockAgentRunOrchestrator):
+    def __init__(self):
+        super().__init__()
+        self.run_called = False
+
+    async def try_claim_steering_from_query(self, query):
+        return True
+
+    async def run_from_query(self, query):
+        self.run_called = True
+        if False:
+            yield None
+
+
+class SteeringUnexpectedErrorOrchestrator(MockAgentRunOrchestrator):
+    async def try_claim_steering_from_query(self, query):
+        raise RuntimeError('steering lookup failed')
+
+
+class PersistentRunnerGapOrchestrator(SteeringRunnerNotFoundOrchestrator):
+    """Steering and the normal run both miss the Runner (a lasting gap)."""
+
+    async def run_from_query(self, query):
+        raise RunnerNotFoundError('plugin:langbot-team/LocalAgent/default')
+        if False:
+            yield None
+
+
 class MockApplication:
     """Mock Application for testing."""
 
@@ -174,93 +206,28 @@ class MockApplication:
         self.sess_mgr.get_conversation = AsyncMock()
 
 
-class TestStreamingBehavior:
-    """Tests for streaming mode behavior."""
+def make_handler_query(text):
+    """Build SDK input entities; only the adapter and orchestration are fakes."""
+    from tests.factories import text_query
+    from langbot_plugin.api.entities.builtin.provider.message import Message
+    from langbot_plugin.api.entities.builtin.provider.prompt import Prompt
+    from langbot_plugin.api.entities.builtin.provider.session import Conversation, Session
 
-    def test_single_resp_message_id_for_streaming(self):
-        """Streaming mode should use single resp_message_id for entire response."""
-        # Simulate the streaming logic: resp_message_id created outside loop
-        resp_message_id = uuid.uuid4()
-
-        chunks = ['Hello', ' World', '!']
-        resp_messages = []
-
-        for chunk in chunks:
-            result = MockMessageChunk(chunk)
-            result.resp_message_id = str(resp_message_id)
-
-            # Pop old chunk (streaming behavior)
-            if resp_messages:
-                resp_messages.pop()
-            resp_messages.append(result)
-
-        # All chunks should have same resp_message_id
-        assert len(resp_messages) == 1  # Only last chunk remains after pop/append
-        assert resp_messages[0].resp_message_id == str(resp_message_id)
-
-    def test_pop_before_append_in_streaming(self):
-        """Streaming mode should pop old chunk before appending new."""
-        resp_message_id = uuid.uuid4()
-        resp_messages = []
-
-        # First chunk - no pop
-        chunk1 = MockMessageChunk('Hello')
-        chunk1.resp_message_id = str(resp_message_id)
-        resp_messages.append(chunk1)
-        assert len(resp_messages) == 1
-
-        # Second chunk - pop first, then append
-        if resp_messages:
-            resp_messages.pop()
-        chunk2 = MockMessageChunk('Hello World')
-        chunk2.resp_message_id = str(resp_message_id)
-        resp_messages.append(chunk2)
-        assert len(resp_messages) == 1
-        assert resp_messages[0].content == 'Hello World'
-
-    def test_non_streaming_no_pop(self):
-        """Non-streaming mode should NOT pop previous responses."""
-        resp_messages = []
-
-        # First message
-        msg1 = MockMessageChunk('Response 1')
-        resp_messages.append(msg1)
-        assert len(resp_messages) == 1
-
-        # Second message - should NOT pop in non-streaming
-        msg2 = MockMessageChunk('Response 2')
-        resp_messages.append(msg2)
-        assert len(resp_messages) == 2
-
-
-class TestRunnerConfigResolverInChatHandler:
-    """Tests for RunnerConfigResolver usage in chat handler context."""
-
-    def test_resolve_runner_id_from_pipeline_config(self):
-        """Chat handler should use RunnerConfigResolver to resolve runner ID."""
-        pipeline_config = {
-            'ai': {
-                'runner': {
-                    'id': 'plugin:langbot-team/LocalAgent/default',
-                },
-            },
-        }
-
-        runner_id = RunnerConfigResolver.resolve_runner_id(pipeline_config)
-        assert runner_id == 'plugin:langbot-team/LocalAgent/default'
-
-    def test_old_runner_field_is_not_resolved(self):
-        """The 4.x path requires ai.runner.id."""
-        pipeline_config = {
-            'ai': {
-                'runner': {
-                    'runner': 'local-agent',
-                },
-            },
-        }
-
-        runner_id = RunnerConfigResolver.resolve_runner_id(pipeline_config)
-        assert runner_id is None
+    query = text_query(text)
+    query.user_message = Message(role='user', content=text)
+    query.adapter.is_stream_output_supported = AsyncMock(return_value=True)
+    query.adapter.create_message_card = AsyncMock()
+    query.session = Session(
+        launcher_type=query.launcher_type,
+        launcher_id=query.launcher_id,
+        using_conversation=Conversation(
+            prompt=Prompt(name='test', messages=[]),
+            messages=[],
+            pipeline_uuid=query.pipeline_uuid,
+            bot_uuid=query.bot_uuid,
+        ),
+    )
+    return query
 
 
 class TestErrorHandling:
@@ -333,139 +300,150 @@ class TestChatHandlerAsyncBehavior:
     """Real async tests for ChatMessageHandler.handle() with mocked orchestrator."""
 
     @pytest.mark.asyncio
-    async def test_streaming_single_resp_message_id(self):
-        """Streaming mode: all chunks should have same resp_message_id."""
+    async def test_interleaved_streams_keep_response_ids_and_messages_isolated(self):
+        """Two turns on one handler must never update each other's response card."""
         from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
         from langbot.pkg.pipeline import entities
+        from langbot_plugin.api.entities.builtin.provider.message import Message, MessageChunk
 
-        # Create chunks for streaming
-        chunks = [
-            MockMessageChunk('Hello'),
-            MockMessageChunk('Hello World'),
-            MockMessageChunk('Hello World!'),
+        class InterleavedOrchestrator(MockAgentRunOrchestrator):
+            async def run_from_query(self, query):
+                text = query.user_message.content
+                yield MessageChunk(role='assistant', content=f'{text}: par', all_content=f'{text}: par')
+                yield MessageChunk(role='assistant', content='tial', all_content=f'{text}: partial')
+                yield Message(role='assistant', content=f'{text}: completed')
+
+        handler = ChatMessageHandler(MockApplication(orchestrator=InterleavedOrchestrator()))
+        queries = [make_handler_query('first'), make_handler_query('second')]
+        streams = [handler.handle(query) for query in queries]
+        observed = [[], []]
+        saved_messages = [None, None]
+
+        try:
+            for index in [0, 1, 0, 1, 0, 1]:
+                result = await anext(streams[index])
+                assert result.result_type == entities.ResultType.CONTINUE
+                assert result.new_query is queries[index]
+                assert len(queries[index].resp_messages) == 1
+                current = queries[index].resp_messages[0]
+                assert isinstance(current, MessageChunk)
+                observed[index].append((current.content, current.is_final, current.resp_message_id))
+                saved_messages[index] = current.model_dump()
+
+                other = 1 - index
+                if saved_messages[other] is not None:
+                    assert [message.model_dump() for message in queries[other].resp_messages] == [saved_messages[other]]
+
+            for stream in streams:
+                with pytest.raises(StopAsyncIteration):
+                    await anext(stream)
+        finally:
+            for stream in streams:
+                await stream.aclose()
+
+        first_id, second_id = (messages[0][2] for messages in observed)
+        assert first_id and second_id and first_id != second_id
+        assert observed == [
+            [
+                ('first: par', False, first_id),
+                ('first: partial', False, first_id),
+                ('first: completed', True, first_id),
+            ],
+            [
+                ('second: par', False, second_id),
+                ('second: partial', False, second_id),
+                ('second: completed', True, second_id),
+            ],
         ]
-
-        orchestrator = MockAgentRunOrchestrator(chunks=chunks)
-        mock_ap = MockApplication(orchestrator=orchestrator)
-
-        # Mock event context to not prevent default
-        event_ctx = MockEventContext(prevented=False)
-        mock_ap.plugin_connector.emit_event = AsyncMock(return_value=event_ctx)
-
-        query = MockQuery()
-        query.adapter.is_stream = True  # Enable streaming mode
-
-        handler = ChatMessageHandler(mock_ap)
-
-        # Mock event creation and StageProcessResult to bypass pydantic validation
-        mock_event = MagicMock()
-        mock_event.return_value = MagicMock()
-
-        def make_result(*args, **kwargs):
-            return MagicMock(result_type=kwargs.get('result_type', entities.ResultType.CONTINUE))
-
-        with (
-            patch('langbot.pkg.pipeline.process.handlers.chat.events') as mock_events_module,
-            patch('langbot.pkg.pipeline.entities.StageProcessResult', side_effect=make_result),
-        ):
-            mock_events_module.PersonNormalMessageReceived = mock_event
-            mock_events_module.GroupNormalMessageReceived = mock_event
-
-            results = []
-            async for result in handler.handle(query):
-                results.append(result)
-
-        # Verify single resp_message_id
-        resp_ids = [msg.resp_message_id for msg in query.resp_messages if hasattr(msg, 'resp_message_id')]
-        assert len(set(resp_ids)) == 1  # All same ID
-
-        # Verify pop/append pattern: only last chunk remains
-        assert len(query.resp_messages) == 1
-        assert query.resp_messages[0].content == 'Hello World!'
+        for query, response_id in zip(queries, [first_id, second_id]):
+            query.adapter.create_message_card.assert_awaited_once_with(response_id, query.message_event)
 
     @pytest.mark.asyncio
-    async def test_streaming_renders_accumulated_deltas_and_completes_same_message(self):
-        """Incremental runner deltas and message.completed update one response stream."""
+    async def test_non_streaming_keeps_prior_and_runner_messages_and_yields_once(self):
+        """Non-streaming delivery preserves earlier messages and exposes only the completed turn."""
         from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
         from langbot.pkg.pipeline import entities
-        from langbot_plugin.api.entities.builtin.provider import message as provider_message
+        from langbot_plugin.api.entities.builtin.provider.message import Message, MessageChunk
 
+        prior = Message(role='assistant', content='earlier reply', resp_message_id='earlier-id')
+        prior_snapshot = prior.model_dump()
         chunks = [
-            provider_message.MessageChunk(role='assistant', content='Hel', all_content='Hel'),
-            provider_message.MessageChunk(role='assistant', content='lo', all_content='Hello'),
-            provider_message.Message(role='assistant', content='Hello'),
+            MessageChunk(role='assistant', content='working'),
+            Message(role='assistant', content='completed'),
         ]
-        orchestrator = MockAgentRunOrchestrator(chunks=chunks)
-        mock_ap = MockApplication(orchestrator=orchestrator)
-        mock_ap.plugin_connector.emit_event = AsyncMock(return_value=MockEventContext(prevented=False))
-        query = MockQuery()
-        query.adapter.is_stream = True
-        handler = ChatMessageHandler(mock_ap)
-        mock_event = MagicMock()
-        mock_event.return_value = MagicMock()
-
-        def make_result(*args, **kwargs):
-            return MagicMock(result_type=kwargs.get('result_type', entities.ResultType.CONTINUE))
-
+        handler = ChatMessageHandler(MockApplication(orchestrator=MockAgentRunOrchestrator(chunks=chunks)))
+        query = make_handler_query('question')
+        query.adapter.is_stream_output_supported.return_value = False
+        query.resp_messages = [prior]
         observed = []
-        with (
-            patch('langbot.pkg.pipeline.process.handlers.chat.events') as mock_events_module,
-            patch('langbot.pkg.pipeline.entities.StageProcessResult', side_effect=make_result),
-        ):
-            mock_events_module.PersonNormalMessageReceived = mock_event
-            mock_events_module.GroupNormalMessageReceived = mock_event
 
-            async for _ in handler.handle(query):
-                current = query.resp_messages[-1]
-                observed.append((current.content, current.is_final, current.resp_message_id))
+        async for result in handler.handle(query):
+            assert result.result_type == entities.ResultType.CONTINUE
+            assert result.new_query is query
+            observed.append([message.content for message in result.new_query.resp_messages])
 
-        assert [content for content, _, _ in observed] == ['Hel', 'Hello', 'Hello']
-        assert [is_final for _, is_final, _ in observed] == [False, False, True]
-        assert len({response_id for _, _, response_id in observed}) == 1
-        assert all(isinstance(message, provider_message.MessageChunk) for message in query.resp_messages)
+        assert observed == [['earlier reply', 'working', 'completed']]
+        assert query.resp_messages == [prior, *chunks]
+        assert prior.model_dump() == prior_snapshot
+        assert chunks[0].resp_message_id
+        assert chunks[0].resp_message_id == chunks[1].resp_message_id
+        assert chunks[0].resp_message_id != prior.resp_message_id
+        query.adapter.create_message_card.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_non_streaming_keeps_results_and_yields_once(self):
-        """Non-streaming mode keeps runner results but runs downstream stages once."""
+    async def test_non_streaming_sends_each_completed_message(self):
+        """Progress messages a runner completes before its answer each reach the platform."""
         from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
         from langbot.pkg.pipeline import entities
+        from langbot_plugin.api.entities.builtin.provider.message import Message, MessageChunk
 
-        chunks = [
-            MockMessageChunk('Response 1'),
-            MockMessageChunk('Response 2'),
+        results = [
+            Message(role='assistant', content='submitted'),
+            Message(role='assistant', content='started'),
+            MessageChunk(role='assistant', content='ans'),
+            Message(role='assistant', content='answer'),
         ]
+        handler = ChatMessageHandler(MockApplication(orchestrator=MockAgentRunOrchestrator(chunks=results)))
+        query = make_handler_query('question')
+        query.adapter.is_stream_output_supported.return_value = False
+        sent = []
 
-        orchestrator = MockAgentRunOrchestrator(chunks=chunks)
-        mock_ap = MockApplication(orchestrator=orchestrator)
-        mock_ap.plugin_connector.emit_event = AsyncMock(return_value=MockEventContext(prevented=False))
+        async for result in handler.handle(query):
+            assert result.result_type == entities.ResultType.CONTINUE
+            sent.append(result.new_query.resp_messages[-1].content)
 
-        query = MockQuery()
-        query.adapter.is_stream = False  # Disable streaming mode
+        assert sent == ['submitted', 'started', 'answer']
+        assert query.resp_messages == results
+        ids = [message.resp_message_id for message in results]
+        assert len({ids[0], ids[1], ids[3]}) == 3
+        assert ids[2] == ids[3]
+        query.adapter.create_message_card.assert_not_awaited()
 
-        handler = ChatMessageHandler(mock_ap)
+    @pytest.mark.asyncio
+    async def test_non_streaming_keeps_tool_rounds_and_deltas_aggregated(self):
+        """Tool-call rounds and trailing deltas never become extra bot messages."""
+        from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
+        from langbot_plugin.api.entities.builtin.provider.message import Message, MessageChunk
+        from langbot_plugin.api.entities.builtin.provider.message import FunctionCall, ToolCall
 
-        mock_event = MagicMock()
-        mock_event.return_value = MagicMock()
+        tool_round = Message(
+            role='assistant',
+            content='',
+            tool_calls=[ToolCall(id='c1', type='function', function=FunctionCall(name='search', arguments='{}'))],
+        )
+        results = [
+            tool_round,
+            MessageChunk(role='assistant', content='par'),
+            MessageChunk(role='assistant', content='tial'),
+        ]
+        handler = ChatMessageHandler(MockApplication(orchestrator=MockAgentRunOrchestrator(chunks=results)))
+        query = make_handler_query('question')
+        query.adapter.is_stream_output_supported.return_value = False
 
-        def make_result(*args, **kwargs):
-            return MagicMock(result_type=kwargs.get('result_type', entities.ResultType.CONTINUE))
+        sent = [result.new_query.resp_messages[-1].content async for result in handler.handle(query)]
 
-        with (
-            patch('langbot.pkg.pipeline.process.handlers.chat.events') as mock_events_module,
-            patch('langbot.pkg.pipeline.entities.StageProcessResult', side_effect=make_result),
-        ):
-            mock_events_module.PersonNormalMessageReceived = mock_event
-            mock_events_module.GroupNormalMessageReceived = mock_event
-
-            results = []
-            async for result in handler.handle(query):
-                results.append(result)
-
-        # No pop: all chunks should remain
-        assert len(query.resp_messages) == 2
-        assert query.resp_messages[0].content == 'Response 1'
-        assert query.resp_messages[1].content == 'Response 2'
-        assert len(results) == 1
+        assert sent == ['tial']
+        assert query.resp_messages == results
 
     @pytest.mark.asyncio
     async def test_agent_turn_recreates_conversation_if_tool_resets_it(self):
@@ -519,7 +497,8 @@ class TestChatHandlerAsyncBehavior:
         from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
         from langbot.pkg.pipeline import entities
 
-        orchestrator = MockAgentRunOrchestrator(error=RunnerNotFoundError('plugin:notexist/unknown/default'))
+        failure = RunnerNotFoundError('plugin:notexist/unknown/default', 'Plugin dependency installation failed')
+        orchestrator = MockAgentRunOrchestrator(error=failure)
         mock_ap = MockApplication(orchestrator=orchestrator)
         mock_ap.plugin_connector.emit_event = AsyncMock(return_value=MockEventContext(prevented=False))
 
@@ -534,6 +513,7 @@ class TestChatHandlerAsyncBehavior:
             return MagicMock(
                 result_type=kwargs.get('result_type'),
                 user_notice=kwargs.get('user_notice'),
+                error_notice=kwargs.get('error_notice'),
             )
 
         with (
@@ -551,6 +531,154 @@ class TestChatHandlerAsyncBehavior:
         assert len(results) == 1
         assert results[0].result_type == entities.ResultType.INTERRUPT
         assert 'not found' in results[0].user_notice
+        assert results[0].error_notice == str(failure)
+
+        from tests.unit_tests.telemetry.test_pipeline_lane import CONTEXT, FakeManager, build_pipeline, get_modules
+
+        pipelinemgr, execution = get_modules()
+        counters = execution.ExecutionCounters(FakeManager())
+        mock_ap.telemetry = SimpleNamespace(execution=counters)
+        pipeline = build_pipeline(pipelinemgr, mock_ap)
+        with execution.ingress(mock_ap, 'completed', CONTEXT, execution_id='missing-runner'):
+            pipeline._record_lane_failure(query, results[0].error_notice)
+        chain = next(row for row in counters.records if row['event_type'] == 'execution_chain')
+        assert chain['outcome'] == 'failed'
+        assert chain['error'] == str(failure)
+
+    @pytest.mark.asyncio
+    async def test_runner_not_found_during_steering_falls_back_to_normal_run(self):
+        """A transient registry miss during steering must not drop the message."""
+        from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
+        from langbot.pkg.pipeline import entities
+
+        orchestrator = SteeringRunnerNotFoundOrchestrator(
+            chunks=[MagicMock(content='ok', tool_calls=[], is_final=True)]
+        )
+        mock_ap = MockApplication(orchestrator=orchestrator)
+        mock_ap.plugin_connector.emit_event = AsyncMock(return_value=MockEventContext(prevented=False))
+        handler = ChatMessageHandler(mock_ap)
+        query = MockQuery()
+
+        mock_event = MagicMock()
+        mock_event.return_value = MagicMock()
+
+        def make_result(*args, **kwargs):
+            return MagicMock(
+                result_type=kwargs.get('result_type'),
+                user_notice=kwargs.get('user_notice'),
+            )
+
+        with (
+            patch('langbot.pkg.pipeline.process.handlers.chat.events') as mock_events_module,
+            patch('langbot.pkg.pipeline.entities.StageProcessResult', side_effect=make_result),
+        ):
+            mock_events_module.PersonNormalMessageReceived = mock_event
+            mock_events_module.GroupNormalMessageReceived = mock_event
+            results = [result async for result in handler.handle(query)]
+
+        assert results
+        assert all(result.result_type != entities.ResultType.INTERRUPT for result in results)
+        mock_ap.logger.warning.assert_any_call(
+            'Skipping steering for query %s because Runner %s is not registered',
+            query.query_id,
+            'plugin:langbot-team/LocalAgent/default',
+        )
+
+    @pytest.mark.asyncio
+    async def test_runner_missing_for_steering_and_run_reports_runner_not_found(self):
+        """A lasting gap still fails: the fallback buys one retry, not recovery."""
+        from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
+        from langbot.pkg.pipeline import entities
+
+        orchestrator = PersistentRunnerGapOrchestrator()
+        mock_ap = MockApplication(orchestrator=orchestrator)
+        mock_ap.plugin_connector.emit_event = AsyncMock(return_value=MockEventContext(prevented=False))
+        handler = ChatMessageHandler(mock_ap)
+        query = MockQuery()
+
+        mock_event = MagicMock()
+        mock_event.return_value = MagicMock()
+
+        def make_result(*args, **kwargs):
+            return MagicMock(
+                result_type=kwargs.get('result_type'),
+                user_notice=kwargs.get('user_notice'),
+            )
+
+        with (
+            patch('langbot.pkg.pipeline.process.handlers.chat.events') as mock_events_module,
+            patch('langbot.pkg.pipeline.entities.StageProcessResult', side_effect=make_result),
+        ):
+            mock_events_module.PersonNormalMessageReceived = mock_event
+            mock_events_module.GroupNormalMessageReceived = mock_event
+            results = [result async for result in handler.handle(query)]
+
+        assert len(results) == 1
+        assert results[0].result_type == entities.ResultType.INTERRUPT
+        assert 'not found' in results[0].user_notice
+
+    @pytest.mark.asyncio
+    async def test_successful_steering_interrupts_normal_run(self):
+        """A claimed steering message must not start a duplicate runner turn."""
+        from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
+        from langbot.pkg.pipeline import entities
+
+        orchestrator = SteeringClaimedOrchestrator()
+        mock_ap = MockApplication(orchestrator=orchestrator)
+        mock_ap.plugin_connector.emit_event = AsyncMock(return_value=MockEventContext(prevented=False))
+        handler = ChatMessageHandler(mock_ap)
+        query = MockQuery()
+
+        mock_event = MagicMock()
+        mock_event.return_value = MagicMock()
+
+        def make_result(*args, **kwargs):
+            return MagicMock(result_type=kwargs.get('result_type'))
+
+        with (
+            patch('langbot.pkg.pipeline.process.handlers.chat.events') as mock_events_module,
+            patch('langbot.pkg.pipeline.entities.StageProcessResult', side_effect=make_result),
+        ):
+            mock_events_module.PersonNormalMessageReceived = mock_event
+            mock_events_module.GroupNormalMessageReceived = mock_event
+            results = [result async for result in handler.handle(query)]
+
+        assert len(results) == 1
+        assert results[0].result_type == entities.ResultType.INTERRUPT
+        assert orchestrator.run_called is False
+
+    @pytest.mark.asyncio
+    async def test_unexpected_steering_error_uses_normal_error_handling(self):
+        """Unexpected steering failures must not be silently swallowed."""
+        from langbot.pkg.pipeline.process.handlers.chat import ChatMessageHandler
+        from langbot.pkg.pipeline import entities
+
+        orchestrator = SteeringUnexpectedErrorOrchestrator()
+        mock_ap = MockApplication(orchestrator=orchestrator)
+        mock_ap.plugin_connector.emit_event = AsyncMock(return_value=MockEventContext(prevented=False))
+        handler = ChatMessageHandler(mock_ap)
+        query = MockQuery()
+
+        mock_event = MagicMock()
+        mock_event.return_value = MagicMock()
+
+        def make_result(*args, **kwargs):
+            return MagicMock(
+                result_type=kwargs.get('result_type'),
+                user_notice=kwargs.get('user_notice'),
+            )
+
+        with (
+            patch('langbot.pkg.pipeline.process.handlers.chat.events') as mock_events_module,
+            patch('langbot.pkg.pipeline.entities.StageProcessResult', side_effect=make_result),
+        ):
+            mock_events_module.PersonNormalMessageReceived = mock_event
+            mock_events_module.GroupNormalMessageReceived = mock_event
+            results = [result async for result in handler.handle(query)]
+
+        assert len(results) == 1
+        assert results[0].result_type == entities.ResultType.INTERRUPT
+        assert 'Request failed' in results[0].user_notice
 
     @pytest.mark.asyncio
     async def test_runner_not_authorized_error(self):
@@ -671,3 +799,4 @@ class TestChatHandlerAsyncBehavior:
         assert len(results) == 1
         assert results[0].result_type == entities.ResultType.CONTINUE
         assert len(query.resp_messages) == 1
+        assert query.resp_messages[0].content == 'Reply from plugin'

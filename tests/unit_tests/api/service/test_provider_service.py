@@ -14,12 +14,21 @@ Source: src/langbot/pkg/api/http/service/provider.py
 from __future__ import annotations
 
 import pytest
+import sqlalchemy
+from uuid import UUID
 from contextlib import nullcontext
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 
 from langbot.pkg.api.http.service.provider import ModelProviderService
-from langbot.pkg.entity.persistence.model import ModelProvider, LLMModel
+from langbot.pkg.entity.persistence.model import (
+    ModelProvider,
+    LLMModel,
+    EmbeddingModel,
+    RerankModel,
+    ASRModel,
+    TTSModel,
+)
 from langbot.pkg.workspace.errors import WorkspaceNotFoundError
 
 
@@ -300,7 +309,23 @@ class TestModelProviderServiceCreateProvider:
 
         # Verify - UUID is generated
         assert provider_uuid is not None
-        assert len(provider_uuid) == 36  # UUID format
+        assert UUID(provider_uuid).version == 4
+        expected = {
+            'uuid': provider_uuid,
+            'workspace_uuid': WORKSPACE_UUID,
+            'name': 'New Provider',
+            'requester': 'openai',
+            'base_url': 'https://api.openai.com',
+            'api_keys': ['key'],
+        }
+        ap.persistence_mgr.execute_async.assert_awaited_once()
+        statement = ap.persistence_mgr.execute_async.await_args.args[0]
+        assert statement.is_insert
+        assert statement.table.name == ModelProvider.__tablename__
+        values = statement.compile().params
+        assert {key: values.get(key) for key in expected} == expected
+        ap.model_mgr.load_provider.assert_awaited_once_with(WORKSPACE_UUID, expected)
+        ap.model_mgr.cache_provider.assert_awaited_once_with(WORKSPACE_UUID, runtime_provider)
 
     async def test_create_provider_loads_to_runtime(self):
         """Loads provider to runtime model_mgr."""
@@ -362,7 +387,15 @@ class TestModelProviderServiceUpdateProvider:
         )
 
         # Verify - reload called
-        ap.model_mgr.reload_provider.assert_called_once_with(WORKSPACE_UUID, 'existing-uuid')
+        ap.model_mgr.reload_provider.assert_awaited_once_with(WORKSPACE_UUID, 'existing-uuid')
+        ap.persistence_mgr.execute_async.assert_awaited_once()
+        statement = ap.persistence_mgr.execute_async.await_args.args[0]
+        assert statement.is_update
+        assert 'uuid' not in statement.compile().params
+        assert statement.compile().params.get('name') == 'Updated Name'
+        assert statement.whereclause.compare(
+            sqlalchemy.and_(ModelProvider.uuid == 'existing-uuid', ModelProvider.workspace_uuid == WORKSPACE_UUID)
+        )
 
     async def test_update_provider_reloads_runtime(self):
         """Reloads provider in runtime after update."""
@@ -386,12 +419,12 @@ class TestModelProviderServiceUpdateProvider:
 class TestModelProviderServiceDeleteProvider:
     """Fast guard coverage; real transaction/cache behavior is in test_provider_cascade."""
 
-    @pytest.mark.parametrize('label', ['LLM', 'Embedding', 'Rerank', None])
+    @pytest.mark.parametrize('label', ['LLM', 'Embedding', 'Rerank', 'ASR', 'TTS', None])
     async def test_delete_provider_requires_no_references(self, label):
         provider_result = Mock()
         provider_result.first.return_value = SimpleNamespace(requester='openai')
         results = [provider_result]
-        for model_label in ('LLM', 'Embedding', 'Rerank'):
+        for model_label in ('LLM', 'Embedding', 'Rerank', 'ASR', 'TTS'):
             result = Mock()
             result.scalars.return_value = ['model'] if label == model_label else []
             results.append(result)
@@ -432,16 +465,22 @@ class TestModelProviderServiceGetProviderModelCounts:
         rerank_result = Mock()
         rerank_result.scalar = Mock(return_value=1)
 
-        call_count = 0
+        results_by_table = {
+            LLMModel.__tablename__: (LLMModel, llm_result),
+            EmbeddingModel.__tablename__: (EmbeddingModel, embedding_result),
+            RerankModel.__tablename__: (RerankModel, rerank_result),
+            ASRModel.__tablename__: (ASRModel, Mock(scalar=Mock(return_value=4))),
+            TTSModel.__tablename__: (TTSModel, Mock(scalar=Mock(return_value=5))),
+        }
 
         async def mock_execute(query):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return llm_result
-            elif call_count == 2:
-                return embedding_result
-            return rerank_result
+            model_type, result = results_by_table[query.get_final_froms()[0].name]
+            assert query.whereclause.compare(
+                sqlalchemy.and_(
+                    model_type.provider_uuid == 'provider-uuid', model_type.workspace_uuid == WORKSPACE_UUID
+                )
+            )
+            return result
 
         ap.persistence_mgr.execute_async = AsyncMock(side_effect=mock_execute)
 
@@ -455,6 +494,8 @@ class TestModelProviderServiceGetProviderModelCounts:
         assert result['llm_count'] == 3
         assert result['embedding_count'] == 2
         assert result['rerank_count'] == 1
+        assert result['asr_count'] == 4
+        assert result['tts_count'] == 5
 
     async def test_get_model_counts_zero_counts(self):
         """Returns zero counts when no models."""
@@ -477,6 +518,8 @@ class TestModelProviderServiceGetProviderModelCounts:
         assert result['llm_count'] == 0
         assert result['embedding_count'] == 0
         assert result['rerank_count'] == 0
+        assert result['asr_count'] == 0
+        assert result['tts_count'] == 0
 
 
 class TestModelProviderServiceFindOrCreateProvider:
@@ -602,7 +645,12 @@ class TestModelProviderServiceFindOrCreateProvider:
         )
 
         # Verify - name should be parsed from URL (api.example.com)
-        ap.model_mgr.load_provider.assert_called_once()
+        ap.model_mgr.load_provider.assert_awaited_once()
+        assert ap.model_mgr.load_provider.await_args.args[0] == WORKSPACE_UUID
+        assert ap.model_mgr.load_provider.await_args.args[1]['name'] == 'api.example.com'
+        statement = ap.persistence_mgr.execute_async.await_args.args[0]
+        assert statement.is_insert
+        assert statement.compile().params.get('name') == 'api.example.com'
         assert result_uuid is not None
 
 
@@ -624,6 +672,16 @@ class TestModelProviderServiceUpdateSpaceModelProviderApiKeys:
         # Execute
         await service.update_space_model_provider_api_keys(WORKSPACE_UUID, 'space-api-key')
 
+        ap.persistence_mgr.execute_async.assert_awaited_once()
+        statement = ap.persistence_mgr.execute_async.await_args.args[0]
+        assert statement.is_update
+        assert statement.compile().params.get('api_keys') == ['space-api-key']
+        assert statement.whereclause.compare(
+            sqlalchemy.and_(
+                ModelProvider.uuid == '00000000-0000-0000-0000-000000000000',
+                ModelProvider.workspace_uuid == WORKSPACE_UUID,
+            )
+        )
         # Verify - update and reload called for Space provider UUID
         ap.model_mgr.reload_provider.assert_called_once_with(
             WORKSPACE_UUID,

@@ -1,11 +1,12 @@
-"""Tests for Telegram Dify form callback helpers."""
+"""Tests for Telegram message conversion and Dify form callback helpers."""
 
 import json
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram import ForceReply
+from telegram import ForceReply, Message
 
 import langbot_plugin.api.entities.builtin.platform.entities as platform_entities
 import langbot_plugin.api.entities.builtin.platform.events as platform_events
@@ -31,6 +32,127 @@ def test_telegram_base64_decode_is_bounded(monkeypatch):
 
 TELEGRAM_BOT_TOKEN = '123456789:AAExampleBotTokenThatMustNotLeak'
 TELEGRAM_FILE_URL = f'https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/photos/file_0.jpg'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('text', 'entities', 'expected_text', 'mentioned'),
+    [
+        ('hello', [], 'hello', False),
+        ('hello @test_bot', [('mention', 6, 9)], 'hello ', True),
+        ('😀 @TEST_BOT!', [('mention', 3, 9)], '😀 !', True),
+        ('/help@TeSt_BoT', [('bot_command', 0, 14)], '/help', True),
+        ('@test_bot_extra hello', [('mention', 0, 15)], '@test_bot_extra hello', False),
+        ('@test_bot', [('code', 0, 9)], '@test_bot', False),
+        ('@test_bot', [('pre', 0, 9)], '@test_bot', False),
+        ('https://example.com/@test_bot', [('url', 0, 29)], 'https://example.com/@test_bot', False),
+        ('/help@test_bot', [('bot_command', 0, 14)], '/help', True),
+        ('/help@test_bot_extra', [('bot_command', 0, 20)], '/help@test_bot_extra', False),
+        ('😀 @test_bot!', [('mention', 3, 9)], '😀 !', True),
+        (
+            '@test_bot @test_bot',
+            [('mention', 0, 9), ('code', 10, 9)],
+            ' @test_bot',
+            True,
+        ),
+        (
+            '@test_bot 😀 @test_bot',
+            [('mention', 0, 9), ('mention', 13, 9)],
+            ' 😀 ',
+            True,
+        ),
+    ],
+)
+async def test_telegram_mentions_use_entity_boundaries(text, entities, expected_text, mentioned):
+    message = Message.de_json(
+        {
+            'message_id': 10,
+            'date': 1700000000,
+            'chat': {'id': 123, 'type': 'private'},
+            'text': text,
+            'entities': [{'type': kind, 'offset': offset, 'length': length} for kind, offset, length in entities],
+        },
+        None,
+    )
+
+    chain = await TelegramMessageConverter.target2yiri(message, None, 'test_bot')
+
+    expected = [platform_message.Plain(text=expected_text)]
+    if mentioned:
+        expected.insert(0, platform_message.At(target='test_bot'))
+    assert list(chain) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('media_type', ['photo', 'voice', 'document'])
+@pytest.mark.parametrize(
+    ('caption', 'caption_entities', 'expected_text', 'mentioned'),
+    [
+        ('😀 @test_bot', [('mention', 3, 9)], '😀 ', True),
+        ('😀 @TEST_BOT', [('mention', 3, 9)], '😀 ', True),
+        ('😀 @test_bot', [('code', 3, 9)], '😀 @test_bot', False),
+        ('😀 @test_bot', [('pre', 3, 9)], '😀 @test_bot', False),
+        ('https://example.com/@test_bot', [('url', 0, 29)], 'https://example.com/@test_bot', False),
+        ('@test_bot_extra', [('mention', 0, 15)], '@test_bot_extra', False),
+        ('ordinary caption', [], 'ordinary caption', False),
+        ('😀 @TEST_BOT @test_bot', [('mention', 3, 9), ('mention', 13, 9)], '😀  ', True),
+        ('😀 @TEST_BOT @test_bot', [('mention', 3, 9), ('code', 13, 9)], '😀  @test_bot', True),
+    ],
+)
+async def test_telegram_caption_mentions_preserve_media(
+    monkeypatch, media_type, caption, caption_entities, expected_text, mentioned
+):
+    media = {'file_id': 'file-1', 'file_unique_id': 'unique-1'}
+    if media_type == 'photo':
+        media = [{**media, 'width': 1, 'height': 1}]
+    elif media_type == 'voice':
+        media = {**media, 'duration': 1}
+    else:
+        media = {**media, 'file_name': 'report.txt', 'file_size': 5}
+    message = Message.de_json(
+        {
+            'message_id': 10,
+            'date': 1700000000,
+            'chat': {'id': 123, 'type': 'private'},
+            'caption': caption,
+            'caption_entities': [
+                {'type': kind, 'offset': offset, 'length': length} for kind, offset, length in caption_entities
+            ],
+            media_type: media,
+        },
+        SimpleNamespace(get_file=AsyncMock(return_value=SimpleNamespace(file_path=TELEGRAM_FILE_URL))),
+    )
+
+    response = MagicMock(headers={})
+
+    async def iter_chunked(_chunk_size):
+        yield b'media'
+
+    response.content.iter_chunked = iter_chunked
+
+    @asynccontextmanager
+    async def fake_get(url):
+        assert url == TELEGRAM_FILE_URL
+        yield response
+
+    monkeypatch.setattr(
+        'langbot.pkg.platform.sources.telegram.httpclient.get_session',
+        lambda **kwargs: MagicMock(get=fake_get),
+    )
+
+    chain = list(await TelegramMessageConverter.target2yiri(message, None, 'test_bot'))
+
+    if mentioned:
+        assert chain.pop(0) == platform_message.At(target='test_bot')
+    assert chain.pop(0) == platform_message.Plain(text=expected_text)
+    assert len(chain) == 1
+    expected_type = {
+        'photo': platform_message.Image,
+        'voice': platform_message.Voice,
+        'document': platform_message.File,
+    }
+    assert isinstance(chain[0], expected_type[media_type])
+    assert chain[0].base64.endswith('bWVkaWE=')
 
 
 @pytest.mark.asyncio
@@ -245,3 +367,123 @@ async def test_telegram_text_field_does_not_show_action_buttons():
     assert args['text'].startswith('[人工介入]')
     assert 'us_input (paragraph)' in args['text']
     assert adapter._form_action_titles == {}
+
+
+@pytest.mark.asyncio
+async def test_telegram_source_reply_message_sends_text_and_voice():
+    import base64 as _b64
+    import telegram as _tg
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.send_voice = AsyncMock()
+    adapter = TelegramAdapter.model_construct(bot=bot, config={}, msg_stream_id={}, seq=1, listeners={})
+
+    update = _tg.Update.de_json(
+        {
+            'update_id': 1000,
+            'message': {
+                'message_id': 99,
+                'date': 1700000000,
+                'chat': {'id': 123, 'type': 'private'},
+                'from': {'id': 1, 'is_bot': False, 'first_name': 'User'},
+                'text': 'hi',
+            },
+        },
+        None,
+    )
+    event = platform_events.FriendMessage(
+        sender=platform_entities.Friend(id='user-1', nickname='', remark=''),
+        message_chain=platform_message.MessageChain([]),
+        source_platform_object=update,
+    )
+
+    # Coexist mode: text and voice
+    chain = platform_message.MessageChain(
+        [
+            platform_message.Plain(text='Hello'),
+            platform_message.Voice(
+                base64='data:audio/ogg;base64,' + _b64.b64encode(b'OggS-voice').decode('utf-8'),
+                length=6,
+            ),
+        ]
+    )
+    await adapter.reply_message(event, chain, quote_origin=True)
+    bot.send_message.assert_awaited_once()
+    bot.send_voice.assert_awaited_once()
+    assert bot.send_message.await_args.kwargs['reply_to_message_id'] == 99
+    assert bot.send_voice.await_args.kwargs['reply_to_message_id'] == 99
+    assert bot.send_voice.await_args.kwargs['duration'] == 6
+    assert bot.send_voice.await_args.kwargs['voice'].filename == 'voice.ogg'
+
+    # Voice only mode
+    bot.send_message.reset_mock()
+    bot.send_voice.reset_mock()
+    voice_only_chain = platform_message.MessageChain(
+        [
+            platform_message.Voice(
+                base64='data:audio/ogg;base64,' + _b64.b64encode(b'OggS-voice-only').decode('utf-8'),
+                length=4,
+            ),
+        ]
+    )
+    await adapter.reply_message(event, voice_only_chain, quote_origin=True)
+    bot.send_message.assert_not_awaited()
+    bot.send_voice.assert_awaited_once()
+    assert bot.send_voice.await_args.kwargs['reply_to_message_id'] == 99
+    assert bot.send_voice.await_args.kwargs['duration'] == 4
+
+
+@pytest.mark.asyncio
+async def test_telegram_source_reply_message_chunk_delivers_voice():
+    import base64 as _b64
+    import telegram as _tg
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.send_voice = AsyncMock()
+    bot.send_message_draft = AsyncMock()
+    adapter = TelegramAdapter.model_construct(bot=bot, config={}, msg_stream_id={}, seq=1, listeners={})
+    adapter.msg_stream_id['stream_1'] = ('private', 101, True)
+
+    update = _tg.Update.de_json(
+        {
+            'update_id': 1000,
+            'message': {
+                'message_id': 99,
+                'date': 1700000000,
+                'chat': {'id': 123, 'type': 'private'},
+                'from': {'id': 1, 'is_bot': False, 'first_name': 'User'},
+                'text': 'hi',
+            },
+        },
+        None,
+    )
+    event = platform_events.FriendMessage(
+        sender=platform_entities.Friend(id='user-1', nickname='', remark=''),
+        message_chain=platform_message.MessageChain([]),
+        source_platform_object=update,
+    )
+
+    chunk = SimpleNamespace(resp_message_id='stream_1', msg_sequence=1, tool_calls=None)
+    chain = platform_message.MessageChain(
+        [
+            platform_message.Plain(text='Streaming text'),
+            platform_message.Voice(
+                base64='data:audio/ogg;base64,' + _b64.b64encode(b'OggS-voice').decode('utf-8'),
+                length=5,
+            ),
+        ]
+    )
+
+    # Not final chunk: no voice sent yet
+    await adapter.reply_message_chunk(event, chunk, chain, is_final=False)
+    bot.send_voice.assert_not_awaited()
+
+    # Final chunk: voice sent and message finalized
+    await adapter.reply_message_chunk(event, chunk, chain, quote_origin=True, is_final=True)
+    bot.send_voice.assert_awaited_once()
+    assert bot.send_voice.await_args.kwargs['reply_to_message_id'] == 99
+    assert bot.send_voice.await_args.kwargs['duration'] == 5
+    bot.send_message.assert_awaited_once()
+    assert 'stream_1' not in adapter.msg_stream_id

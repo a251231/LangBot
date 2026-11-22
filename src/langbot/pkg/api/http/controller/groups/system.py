@@ -5,6 +5,7 @@ import sqlalchemy
 
 from .. import group
 from .....utils import constants
+from .....cloud.banner import resolve_cloud_banner
 from .....entity.persistence.metadata import WorkspaceMetadata
 from ...authz import Permission
 from ...context import PrincipalType, RequestContext
@@ -13,6 +14,10 @@ from .....workspace.invitation_delivery import InvitationDeliveryService
 
 
 SYSTEM_CAPABILITY_OPERATIONS = (
+    'operation.invoke',
+    'operation.stream',
+    'operation.binary_base64',
+    'plugin.permissions.confirm_api_key',
     'knowledge_engine.list',
     'knowledge_engine.creation_schema',
     'knowledge_engine.retrieval_schema',
@@ -31,10 +36,16 @@ SYSTEM_CAPABILITY_OPERATIONS = (
     'sandbox.status',
     'sandbox.sessions',
     'sandbox.errors',
+    'workspace.sandbox.get',
+    'workspace.sandbox.update',
+    'workspace.sandbox.reset',
+    'workspace.sandbox.check',
+    'workspace.sandbox.test',
     'bot.list',
     'bot.get',
     'bot.create',
     'bot.update',
+    'bot.routes.bind',
     'bot.delete',
     'pipeline.list',
     'pipeline.get',
@@ -58,7 +69,9 @@ SYSTEM_CAPABILITY_OPERATIONS = (
     'plugin.install.marketplace',
     'plugin.install.local',
     'plugin.upgrade',
+    'plugin.space_upload',
     'plugin.get',
+    'plugin.permissions.get',
     'plugin.list',
     'plugin.config.get',
     'plugin.config.update',
@@ -97,6 +110,8 @@ SYSTEM_CAPABILITY_OPERATIONS = (
     'skill.files.read',
     'skill.files.write',
     'skill.preview',
+    'skill.package.preview',
+    'skill.package.publish',
     'skill.install.github',
     'skill.install.upload',
     'mcp_server.list',
@@ -219,11 +234,17 @@ class SystemRouterGroup(group.RouterGroup):
                     'edition': constants.edition,
                     'beta': is_beta,
                     'deployment_mode': 'cloud' if is_cloud else 'oss',
+                    # Cloud-only instance notice. None on OSS deployments so a
+                    # self-hosted copy of config.yaml can never surface it.
+                    'cloud_banner': resolve_cloud_banner(self.ap),
                     'enable_marketplace': self.ap.instance_config.data.get('plugin', {}).get(
                         'enable_marketplace', True
                     ),
                     'cloud_service_url': (
-                        self.ap.instance_config.data.get('space', {}).get('url', 'https://space.langbot.app')
+                        self.ap.instance_config.data.get('space', {}).get(
+                            'web_url',
+                            self.ap.instance_config.data.get('space', {}).get('url', 'https://space.langbot.app'),
+                        )
                     ),
                     'allow_modify_login_info': self.ap.instance_config.data.get('system', {}).get(
                         'allow_modify_login_info', True

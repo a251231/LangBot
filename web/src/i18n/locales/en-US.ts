@@ -1,6 +1,277 @@
+import slackSetup from './slack-setup/en-US';
 import pipelineMigration from './pipeline-migration/en-US';
+import pluginPermissions from './plugin-permissions/en-US';
 const enUS = {
+  pluginPermissions,
+  planRevision: {
+    subscribedOn: 'Subscribed on {{date}}',
+    latestQuota: 'Latest quotas for this plan',
+    showLatest: 'Show latest quotas for this plan',
+    showCurrent: 'Show your current subscription',
+    latestTab: 'Latest',
+    currentTab: 'Current',
+    cancelToSubscribe:
+      'Cancel your subscription to subscribe to the latest quota next period',
+
+    current: 'Current subscription: {{plan}} · revision {{revision}}',
+    owned: 'Purchased revision {{revision}}',
+    latest: 'Latest revision {{revision}}',
+    changed:
+      'Your purchased benefits and the latest version differ. Highlighted rows show the changes.',
+    same: 'Benefits match latest revision {{revision}}. Your purchased revision remains unchanged.',
+    unavailable:
+      'The latest plan is unavailable. Your purchased benefits remain in effect.',
+    benefit: 'Benefit',
+    change: 'Changed',
+    enabled: 'Enabled',
+    disabled: 'Disabled',
+    monthlyCredits: 'Monthly bonus credits',
+    retention: 'Chat history retention (days)',
+    unknown:
+      'Current subscription details are unavailable. Refresh or manage your subscription in Space; latest catalog benefits are not your purchased benefits.',
+    handoff:
+      'Manage your subscription in Space. Cancel automatic renewal before purchasing a new version. Prepaid subscriptions end automatically unless renewed before expiry.',
+    cancelFirst:
+      'Cancel automatic renewal in subscription management first. Cancellation preserves paid benefits until the end of the period, without a refund. After confirmation, you can purchase the latest version, effective when payment succeeds.',
+    canceled:
+      'Renewal is canceled. Paid benefits remain until the end of the period, without a refund. A new purchase applies its benefits when payment succeeds.',
+    prepaid:
+      'This prepaid subscription ends automatically. You can renew your current plan before expiry; after expiry, subscriptions use the latest quotas for each plan.',
+    renew: 'Renew current subscription',
+    buying: 'Purchasing revision {{revision}}.',
+    fields: {
+      bots_max: 'Bots',
+      members_max: 'Members',
+      pipelines_max: 'Processors',
+      plugins_max: 'Extensions',
+      knowledge_bases_max: 'Knowledge bases',
+      managed_sandbox_sessions_max: 'Sandbox sessions',
+    },
+  },
+  cloudPlans: {
+    subscriptionUnavailable: 'Not available to subscribe',
+    subscriptionUnavailableHint:
+      'This plan is not accepting new subscriptions. Please choose another plan. Existing subscriptions and scheduled automatic renewals are unaffected.',
+    platformNames: {
+      qqofficial: 'QQ Official API',
+      dingtalk: 'DingTalk',
+      discord: 'Discord',
+      telegram: 'Telegram',
+      lark: 'Lark',
+      slack: 'Slack',
+      kook: 'KOOK',
+      line: 'LINE',
+      wecom: 'WeCom',
+      wecombot: 'WeComBot',
+      wecomcs: 'WeComCustomerService',
+      officialaccount: 'Official Account',
+      wechatpad: 'WeChatPad',
+      openclaw_weixin: 'OpenClaw WeChat',
+      aiocqhttp: 'OneBot v11',
+      satori: 'Satori',
+    },
+    manageSubscription: 'Manage subscription',
+    downgradeUnavailable: 'Cannot downgrade to Free',
+    features: {
+      multiUserWorkspace: 'Multi-user workspace',
+      remoteE2BSandbox: 'Remote E2B sandbox configuration',
+      communitySupport: 'Community support',
+      everythingInFree: 'Everything in Free',
+      alwaysOnSandbox: 'One always-on global sandbox',
+      higherWorkspaceLimits: 'Higher workspace limits',
+    },
+    title: 'Compare plans',
+    description: 'Choose a plan for {{workspace}}',
+    billing: 'Billing cycle',
+    monthly: 'Monthly',
+    annual: 'Yearly',
+    currency: 'Currency',
+    loading: 'Loading plans…',
+    error: 'Could not load plans',
+    retry: 'Retry',
+    empty: 'No plans available',
+    current: 'Current plan',
+    recommended: 'Recommended',
+    free: 'Free',
+    annualNote: 'Equivalent to {{price}} / month',
+    ownerOnly: 'Owner or admin only',
+    choose: 'Continue to payment',
+    handoff:
+      'Continue in Space to sign in and pay. Your selection will be preserved.',
+    quotas: 'Workspace quotas',
+    unlimited: 'Unlimited',
+    retention: 'Message history · {{count}} days',
+    retentionLabel: 'Message history retention',
+    retentionHelp:
+      'Message history is automatically removed after this period.',
+    credits: '{{count}} model credits every month',
+    creditsLabel: 'Model credits',
+    creditsHelp:
+      'Credits are granted each subscription month, including on yearly plans. When credits run out, you can still use your own configured model providers.',
+    platforms: 'Mainstream platforms supported',
+    excludedPlatforms: 'Excluded: {{platforms}}',
+    allPlatforms: 'All currently available platforms',
+    limits: {
+      bots: 'Bots',
+      pipelines: 'Processors',
+      knowledge_bases: 'Knowledge bases',
+      plugins: 'Extensions',
+      members: 'Members',
+      managed_sandbox_sessions: 'Managed sandbox sessions',
+    },
+  },
+  workspaceSandbox: {
+    quotaCheck:
+      'Disk quotas are checked before and after commands, not continuously.',
+    testRun: 'Test run',
+    testRunCost:
+      'Creates a temporary sandbox, uses one slot and may incur charges.',
+    checkHint:
+      'Lightweight checks do not create a sandbox. Test run is optional.',
+    queryUnsupported:
+      'This service does not expose template queries; the template is unverified. You can save or run an optional test.',
+    limitsTitle: 'Workspace limits',
+    limitsHelp:
+      'Blank values inherit deployment defaults. Changes apply to new tasks only.',
+    inherit: 'Inherit default',
+    limitMax: 'Maximum: {{value}}',
+    limitUnsupported: 'Unsupported by this backend or deployment policy',
+    e2bLimitUnsupported:
+      'Controlled by the E2B template/service; this setting is unsupported',
+    invalidLimits: 'Enter values within the displayed bounds',
+
+    confirm: 'Confirm and save',
+    cancel: 'Cancel',
+    current: 'Currently active: {{backend}}',
+    unsaved: 'Unsaved',
+    configureE2b: 'Configure E2B',
+    apiUrl: 'API URL',
+    sandboxUrl: 'Sandbox URL',
+    template: 'Template',
+    keyConfigured: 'Configured; leave blank to keep',
+    keyRequired: 'Enter API key',
+    keyHelp:
+      'Stored API keys are never returned. Enter a new key when changing service URLs.',
+    noManagedProcesses: 'This environment does not support stdio MCP servers.',
+    label: 'Execution environment',
+    description:
+      'All new tasks in this workspace use this environment. Running tasks keep their current environment.',
+    saved: 'Saved; applies to new tasks',
+    saveFailed: 'Failed to save execution environment',
+    loadFailed: 'Failed to check environments',
+    refresh: 'Check again',
+    noEnvironment: 'No available environment',
+    unavailable:
+      'The selected environment is unavailable. New tasks cannot start sandbox execution.',
+    templateVerified:
+      'Template verified: temporary sandbox created, executed and deleted',
+    limitLabels: {
+      timeout_sec: 'Command timeout (seconds)',
+      idle_ttl_sec: 'Idle cleanup (seconds)',
+      max_sessions: 'Maximum sandboxes',
+      cpus: 'CPU cores',
+      memory_mb: 'Memory (MiB)',
+      pids_limit: 'Process limit',
+      workspace_quota_mb: 'Workspace disk quota (MiB)',
+    },
+    reasons: {
+      resource_not_found: 'Requested service resource not found',
+      rate_limited: 'Too many requests; retry later',
+      template_not_found: 'Template not found or not visible to this account',
+      template_query_failed: 'Template query failed; check service status',
+      template_not_ready: 'Template build is not ready',
+      network_error: 'Cannot reach service; check URLs and network',
+      capacity_limited:
+        'Service capacity exhausted or rate limited; retry later',
+      permission_denied: 'Permission denied for the supplied credentials',
+      template_creation_failed:
+        'Sandbox creation failed; check template status and service capacity',
+      template_execution_failed: 'Sandbox created but execution check failed',
+      template_cleanup_failed:
+        'Temporary sandbox cleanup failed; check E2B service',
+
+      environment_unavailable: 'Unavailable',
+      policy_restricted: 'Restricted by platform policy',
+      probe_failed: 'Environment check failed',
+      docker_missing: 'Docker CLI is not installed',
+      docker_unreachable: 'Docker daemon is stopped or access is denied',
+      nsjail_missing: 'nsjail is not installed',
+      cgroup_unavailable: 'nsjail cgroup resource limits are not ready',
+      isolation_unavailable:
+        'nsjail namespace, mount or network isolation failed',
+      sdk_missing: 'E2B SDK is not installed',
+      missing_credentials: 'E2B API key is missing',
+      connection_failed: 'Cannot connect to E2B; check URLs and network',
+      authentication_failed: 'E2B authentication failed; check API key',
+      probe_timeout: 'Check timed out; check service and network',
+      invalid_configuration: 'E2B URLs or credentials are incomplete',
+      not_checked: 'Configuration changed; check again',
+    },
+  },
+  workspaceLanguage: {
+    label: 'Workspace language',
+    description:
+      'Language for backend messages and default bot replies. Your interface language stays independent.',
+    saved: 'Language saved',
+    saveFailed: 'Failed to save language',
+  },
+  slackSetup,
+  inflight: {
+    autoCollapse: 'Auto-collapse',
+    empty: 'No events are being processed',
+    move: 'Drag vertically; use arrow keys to move',
+    botLogs: 'Robot logs',
+    processorLogs: 'Processor logs',
+
+    title: 'In flight',
+    expand: 'Expand',
+    collapse: 'Collapse',
+    reconnecting: 'Reconnecting; showing the last received state.',
+    details: 'View details',
+    debug: 'Debug event',
+    limited: 'Showing a limited set. Open the dashboard for all executions.',
+    queued: 'Queued',
+    running: 'Processing',
+    waiting: 'Waiting for input',
+    tool: 'Calling a tool',
+    thinking: 'Thinking',
+    replying: 'Preparing reply',
+    generating: 'Generating reply',
+    completed: 'Completed',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+    ignored: 'Ignored',
+  },
+  githubStarPrompt: {
+    title: 'LangBot has handled {{total}} events for you',
+    description:
+      'If LangBot has been helpful, a Star on GitHub helps more people discover it.',
+    later: 'Maybe later',
+    star: 'Star',
+    close: 'Close',
+  },
   assistant: {
+    movePosition: 'Move assistant horizontally',
+    resizeHeight: 'Resize assistant height',
+    sessions: 'Conversations',
+    currentChat: 'Current conversation',
+    stop: 'Stop task',
+    stopped:
+      'Stopped. An in-progress tool may already have taken effect. Check its resource before retrying.',
+    setupRequired:
+      'Sign in to LangBot Account or configure a model to start using the workspace assistant.',
+    loginAccount: 'Sign in to LangBot Account',
+    configureModels: 'Configure models',
+    providerCheckFailed: 'Could not check model providers. Please try again.',
+    retrySetup: 'Retry',
+    preparing: 'Preparing assistant…',
+    thinking: 'Model responding · Round {{round}}',
+    executing: 'Executing tool…',
+    toolRunning: 'Running',
+    recommendationFailed:
+      'Could not load a recommended model. Please select a model.',
+    expand: 'Expand workspace assistant',
+    collapse: 'Collapse workspace assistant',
     modelHint: 'Switch assistant model for your next message',
     details: 'View raw data',
     found: 'Found {{count}} items',
@@ -22,6 +293,9 @@ const enUS = {
       get_pipeline: 'Read Pipeline',
       get_knowledge_schema: 'Read knowledge engine schema',
       list_operation_logs: 'Read operation logs',
+      workspace_search: 'Search workspace capabilities',
+      workspace_describe: 'Inspect operation definition',
+      workspace_call: 'Execute workspace operation',
     },
     resources: {
       models: 'Find chat models',
@@ -35,11 +309,14 @@ const enUS = {
     newChat: 'New conversation',
     close: 'Close',
     welcome:
-      'Tell me what you want to build. I can inspect this Workspace and propose knowledge-base and Pipeline changes for you to confirm.',
+      'Tell me what you want to build. I can inspect this Workspace and propose configurations for bots, Agents, knowledge bases, Pipelines and more, then apply them after your confirmation.',
     discover: 'What models, knowledge bases and Pipelines are available?',
     build: 'Help me create a knowledge-base question-answering application.',
     toolResult: 'Operation result',
     review: 'Review the exact operations before executing',
+    dangerousWarning:
+      'Sensitive Operation: This operation carries high risk and may be irreversible. Please verify arguments carefully before confirming.',
+    parameters: 'Parameters:',
     confirm: 'Confirm and execute',
     decline: 'Decline',
     working: 'Working…',
@@ -55,6 +332,14 @@ const enUS = {
   sidebarGuide: {
     steps: {
       monitoring: {
+        rangeDays: 'Last {{days}} days',
+        customRange: 'Custom time range',
+        rangeStart: 'Start time',
+        rangeEnd: 'End time',
+        rangeHint: 'Start must precede end. Maximum range: 365 days.',
+        autoRefreshLabel: 'Auto refresh',
+        autoRefreshOff: 'Auto refresh: off',
+        autoRefreshEvery: 'Refresh every {{seconds}} s',
         title: 'Review activity',
         description:
           'Review bot activity, model usage, message volume, and system performance at a glance.',
@@ -105,6 +390,11 @@ const enUS = {
         description:
           'Pipelines handle message events and reply automatically with AI. Configure group triggers, private chat rules, and message filters here.',
       },
+      speech: {
+        title: 'Configure speech capabilities',
+        description:
+          'Configure speech recognition (ASR) and text-to-speech (TTS) models to handle voice messages and synthesized voice replies.',
+      },
       ai: {
         title: 'Configure AI capabilities',
         description:
@@ -136,6 +426,14 @@ const enUS = {
           'Send test messages to check triggers, AI replies, and output processing. Any configuration changes are saved before testing.',
       },
       monitoring: {
+        rangeDays: 'Last {{days}} days',
+        customRange: 'Custom time range',
+        rangeStart: 'Start time',
+        rangeEnd: 'End time',
+        rangeHint: 'Start must precede end. Maximum range: 365 days.',
+        autoRefreshLabel: 'Auto refresh',
+        autoRefreshOff: 'Auto refresh: off',
+        autoRefreshEvery: 'Refresh every {{seconds}} s',
         title: 'Review run history',
         description:
           'Use the tab beside the title to review past conversations, processing steps, and errors when replies are missing or unexpected.',
@@ -303,6 +601,16 @@ const enUS = {
     editionCloud: 'Cloud',
   },
   common: {
+    refresh: 'Refresh',
+    clickToCopy: 'Click to copy',
+    finish: 'Finish',
+    operationFailed: 'Operation failed',
+    optional: 'Optional',
+    failureReasonNotRecorded:
+      'The failure reason was not recorded. Check the bot logs or retry to capture more details.',
+    loadFailedTitle: 'Unable to load this content',
+    loadFailedHint:
+      'Please try again in a moment. If this continues, check your connection and service status.',
     customValue: 'Custom',
     loadFailed: 'Failed to load. Please try again.',
     search: 'Search',
@@ -501,6 +809,9 @@ const enUS = {
     help: 'Get Help',
   },
   models: {
+    starModel: 'Star model (default for new processors)',
+    unstarModel: 'Unstar model',
+    starModelFailed: 'Could not update starred model',
     codex: {
       account: 'ChatGPT subscription',
       description:
@@ -688,6 +999,10 @@ const enUS = {
     chat: 'Chat',
     embedding: 'Embedding',
     rerank: 'Rerank',
+    asr: 'ASR (Speech Recognition)',
+    tts: 'TTS (Text to Speech)',
+    asrTab: 'ASR',
+    ttsTab: 'TTS',
     rerankUrlTooltip:
       'Full URL override for rerank endpoint (e.g. https://dashscope.aliyuncs.com/compatible-api/v1/reranks)',
     rerankPathTooltip: 'Path appended to base URL (default: rerank)',
@@ -754,16 +1069,21 @@ const enUS = {
     saveSuccess: 'Saved successfully',
     saveError: 'Save failed: ',
     createSuccess: 'Created successfully. Continue configuring the bot',
+    autoCreatedPipeline:
+      'Automatically created a pipeline and bound message events',
     createError: 'Creation failed: ',
     deleteSuccess: 'Deleted successfully',
     deleteError: 'Delete failed: ',
     deleteConfirmation: 'Are you sure you want to delete this bot?',
     platformAdapter: 'Platform/Adapter Selection',
     selectAdapter: 'Select Adapter',
+    saveAndEnable: 'Save and enable',
+    searchAdapters: 'Search adapters',
+    noMatchingAdapters: 'No matching adapters found',
     legacyAdapters: 'Legacy adapters',
     legacyAdapterBadge: 'Legacy',
     legacyAdaptersHint:
-      'These adapters have newer event-driven counterparts.\nThey are kept only for existing configurations and are not recommended for new bots.',
+      'Legacy adapters mainly send and receive messages and remain available for existing bot configurations.\nNew adapters connect to the same platform using events, including messages and supported friend requests or group changes, routed to processors.\nPrefer the new adapter for new bots. Existing bots can keep using legacy adapters. When switching, review connection settings and event routes; this does not upgrade your platform account.',
     adapterConfig: 'Adapter Configuration',
     viewAdapterDocs: 'View Docs',
     bindPipeline: 'Bind Pipeline',
@@ -776,6 +1096,10 @@ const enUS = {
     earlier: 'Earlier',
     dateFormat: '{{month}}/{{day}}',
     setBotEnableError: 'Failed to set bot enable status',
+    enabling: 'Enabling…',
+    disabling: 'Disabling…',
+    enableConfirmed: 'Enabled',
+    disableConfirmed: 'Disabled',
     log: 'Log',
     configuration: 'Configuration',
     logs: 'Logs',
@@ -784,6 +1108,28 @@ const enUS = {
     routingConnection: 'Routing & Connection',
     routingConnectionDescription:
       'Bind the pipeline that processes messages for this bot',
+    routingHelp: {
+      title: 'What is event routing?',
+      intro:
+        'Bots receive more than messages: friend requests, group invitations and other events too.',
+      events: 'Incoming events',
+      agents: 'Different agents',
+      message: 'Message received',
+      friend: 'Friend request',
+      group: 'Joined a group',
+      messageAction: 'Reply agent → Answer',
+      friendAction: 'Review agent → Review',
+      groupAction: 'Welcome agent → Greet',
+      rules: 'Your routing rules · Example',
+      instructions:
+        'Agents follow your instructions and use tools to reply, review requests and more.',
+      plugin:
+        'For advanced workflows, plugin processors register events in bulk and handle them with code. Add a plugin processor configuration below.',
+      docs: 'Develop your own plugin processor',
+      runnerDocs: 'Develop your own Agent runner',
+      pause: 'Pause',
+      play: 'Play',
+    },
     eventRouting: 'Event Routing',
     eventRoutingDescription: 'Choose which processor handles each event.',
     eventBindings: 'Event Routes',
@@ -792,7 +1138,8 @@ const enUS = {
     commonScenarios: 'Common scenarios',
     dragEventRoute: 'Drag route {{index}}',
     behaviorReplyMessages: 'Reply to messages',
-    behaviorReplyMessagesDescription: 'Send incoming messages to a processor.',
+    behaviorReplyMessagesDescription:
+      'Handle private messages and group messages that mention this bot.',
     behaviorWelcomeMembers: 'Welcome new members',
     behaviorWelcomeMembersDescription:
       'Run a processor when someone joins a group.',
@@ -822,7 +1169,8 @@ const enUS = {
     enabled: 'Enabled',
     eventBindingDescriptionPlaceholder: 'Rule description',
     noEventBindings: 'No event routes',
-    unsupportedPipelineEvent: 'Pipelines can only be used for message.* events',
+    unsupportedPipelineEvent:
+      'Pipelines can only be used for message.received events',
     disable: 'Disable',
     enable: 'Enable',
     disabledBindings: 'Disabled',
@@ -832,6 +1180,7 @@ const enUS = {
     advancedEventValues: 'View all',
     eventGroup: 'Group',
     eventGroupNames: {
+      wecomcs: 'WeCom Customer Service',
       bot: 'Bot status',
       feedback: 'Feedback',
       friend: 'Friends',
@@ -846,6 +1195,9 @@ const enUS = {
     routeFallbackCatchAll: '{{route}} is the catch-all route.',
     routeFallbackIgnored:
       'Events that match no route are ignored. Add a catch-all route only when every event needs an explicit outcome.',
+    matchRecords: 'Match records',
+    matchRecordsDescription:
+      'Latest result for each rule and recent unmatched events, from bot memory logs. Cleared on restart.',
     testRoute: 'Check route',
     adapterEventDebugAction: 'Test listener',
     adapterEventDebugTitle: 'Platform event debugging',
@@ -931,6 +1283,15 @@ const enUS = {
     eventWildcard: 'All events',
     eventNamespaceWildcard: '{{namespace}}.*',
     eventNames: {
+      wecombot_enter_chat: 'User entered bot chat',
+      wecombot_template_card_event: 'Template card interaction',
+      dingtalk_card_action: 'DingTalk card interaction',
+      wecomcs_enter_session: 'Customer entered conversation',
+      wecomcs_msg_send_fail: 'Customer service message failed',
+      wecomcs_servicer_status_change: 'Representative availability changed',
+      wecomcs_session_status_change: 'Customer service conversation changed',
+      wecomcs_reject_customer_msg_switch_change:
+        'Customer message rejection changed',
       message_received: 'Message received',
       message_edited: 'Message edited',
       message_deleted: 'Message deleted',
@@ -940,6 +1301,7 @@ const enUS = {
       friend_added: 'Friend added',
       group_member_joined: 'Member joined group',
       group_member_left: 'Member left group',
+      group_info_updated: 'Group information updated',
       group_member_banned: 'Member banned',
       bot_invited_to_group: 'Bot invited to group',
       bot_removed_from_group: 'Bot removed from group',
@@ -948,6 +1310,22 @@ const enUS = {
       platform_specific: 'Platform-specific event',
     },
     eventDescriptions: {
+      wecombot_enter_chat:
+        'A user opened the bot chat. Use this event for welcome workflows.',
+      wecombot_template_card_event:
+        'A user clicked or submitted a template card. Managed form callbacks are handled separately.',
+      dingtalk_card_action:
+        'Card clicks and submissions; feedback and managed forms are handled separately.',
+      wecomcs_enter_session:
+        'A customer opened a service link; includes entry source and welcome code.',
+      wecomcs_msg_send_fail:
+        'WeChat reported an outgoing message failure, with message ID and failure type.',
+      wecomcs_servicer_status_change:
+        'A representative started, stopped or suspended service.',
+      wecomcs_session_status_change:
+        'A representative accepted, transferred, closed or reopened a conversation.',
+      wecomcs_reject_customer_msg_switch_change:
+        'A representative enabled or disabled rejection of customer messages.',
       all: 'Matches every event received by this adapter.',
       namespace: 'Matches all {{group}} events.',
       namespace_bot:
@@ -955,7 +1333,7 @@ const enUS = {
       namespace_feedback: 'Matches feedback events from a platform or user.',
       namespace_friend: 'Matches friend requests and friendship changes.',
       namespace_group:
-        'Matches member joins, leaves, removals, and other group events.',
+        'Matches group events such as membership changes and group information updates.',
       namespace_message:
         'Matches received, edited, deleted, and reaction message events.',
       namespace_platform:
@@ -971,6 +1349,8 @@ const enUS = {
       friend_added: 'A friend relationship was created.',
       group_member_joined: 'A member joins a group where the bot is present.',
       group_member_left: 'A member leaves a group where the bot is present.',
+      group_info_updated:
+        'Group details such as its name or owner have changed.',
       group_member_banned: 'A group member is banned or removed.',
       bot_invited_to_group: 'The bot is invited to a group.',
       bot_removed_from_group: 'The bot is removed from a group.',
@@ -983,6 +1363,9 @@ const enUS = {
       'All conditions must match to trigger this binding. Leave empty to always trigger.',
     conditionsEmpty: 'No conditions — always triggers.',
     addFilter: 'Add condition',
+    filterIsAtBot: 'Mentions this bot',
+    mentionYes: 'Yes',
+    mentionNo: 'No',
     filterChatType: 'Session type',
     filterChatId: 'Session ID',
     filterMessageText: 'Message text',
@@ -1057,6 +1440,22 @@ const enUS = {
     imagesAttached: 'image(s) attached',
     noLogs: 'No logs yet',
     sessionMonitor: {
+      resetContext: 'Reset context',
+      resetDescription:
+        'New messages will start with an empty context. Monitoring history is kept; files and long-term memory are unchanged. Wait for active tasks to finish before resetting.',
+      resetSuccess:
+        'Context reset. New messages will start a fresh conversation.',
+      resetError:
+        'Could not reset context. Wait for active tasks to finish and try again.',
+      resetScopeMember:
+        "This chat keeps a separate context for each group member, so only this member's context is reset.",
+      resetScopeGroup:
+        "This group shares one context, so the whole group's conversation is reset, not just this member's.",
+      inGroup: 'in {{group}}',
+      filterByGroup: 'Same group',
+      groupFilterActive: 'Group {{group}}',
+      clearGroupFilter: 'Show all sessions',
+
       title: 'Sessions',
       sessions: 'Sessions',
       noSessions: 'No sessions found',
@@ -1085,13 +1484,13 @@ const enUS = {
     admins: {
       title: 'Admins',
       description:
-        "Launchers (person/group IDs) that have admin privilege for this bot's commands",
+        "Users (by person ID) with admin privilege for this bot's commands",
       addAdmin: 'Add Admin',
       launcherType: 'Type',
-      launcherId: 'ID',
+      launcherId: 'User ID',
       typePerson: 'Person',
       typeGroup: 'Group',
-      placeholderId: 'User or group ID',
+      placeholderId: 'User ID',
       addSuccess: 'Admin added',
       addError: 'Failed to add admin: ',
       deleteSuccess: 'Admin removed',
@@ -1104,7 +1503,26 @@ const enUS = {
     },
   },
   agents: {
+    apiToolsSelectAll: 'Select all',
     monitoring: {
+      rangeDays: 'Last {{days}} days',
+      customRange: 'Custom time range',
+      rangeStart: 'Start time',
+      rangeEnd: 'End time',
+      rangeHint: 'Start must precede end. Maximum range: 365 days.',
+      autoRefreshLabel: 'Auto refresh',
+      autoRefreshOff: 'Auto refresh: off',
+      autoRefreshEvery: 'Refresh every {{seconds}} s',
+      runStatus: 'Run status',
+      toolCalls: 'Tool calls',
+      delivery: 'Message delivery',
+      sendFailed: 'Send failed',
+      sendCount: '{{count}} send calls succeeded',
+      noSend: 'No send recorded',
+      noSteps: 'No execution steps recorded yet.',
+      recipient: 'Recipient',
+      actionCompleted: 'Tool completed successfully.',
+      simulatedAction: 'Simulated action; no real message was sent.',
       description:
         'Follow each task from its triggering event through model output and tool execution.',
       empty:
@@ -1209,6 +1627,9 @@ const enUS = {
       'Handle message events only, with AI generating replies directly and practical features such as knowledge bases and plugins.',
     allEvents: 'Supports all events',
     messageEventsOnly: 'Message events only',
+    selectAgentRunner: 'Select Agent runner',
+    selectProcessorPlugin: 'Select processor plugin',
+    createBasicInfoDescription: 'Set a name, icon and plugin',
     chooseType: 'Choose how it works',
     chooseTypeDescription:
       'Choose the processor model first. You can configure it further after creation.',
@@ -1266,7 +1687,7 @@ const enUS = {
     eventToolUnavailable: 'Unavailable',
     eventApiToolsDescription:
       'Targets are frozen from the current event. The Agent only supplies action parameters.',
-    platformApiTools: 'Platform tools',
+    platformApiTools: 'Bot tools',
     platformApiToolsDescription:
       'The Agent may choose user, group, or message IDs. Grant only what the workflow needs.',
     apiToolEvents: 'Events',
@@ -1322,6 +1743,16 @@ const enUS = {
     restoringRunnerInstall:
       'Restoring the Runner plugin installation and waiting for the runner…',
     noInstalledRunners: 'No Runner extension is installed yet.',
+    runnerDiagnosis: {
+      missing:
+        'The selected Runner or its plugin is missing. Install or restore the plugin.',
+      disabled: 'The selected Runner plugin is disabled. Enable it in Plugins.',
+      runtime:
+        'The Plugin Runtime is unavailable or disabled. Restore its connection before running.',
+      repair: 'Manage plugins and runtime',
+      draft:
+        'Repair opens in a new tab. Your Runner selection and unsaved draft stay here.',
+    },
     installingRunner: 'Installing {{runner}}...',
     runnerInstallSuccess: '{{runner}} is installed and ready to select',
     selectedRunnerUnavailable: 'Selected runner is unavailable',
@@ -1506,6 +1937,218 @@ const enUS = {
     uploadLocal: 'Upload Local',
     debugging: 'Debugging',
     uploadLocalPlugin: 'Upload Local Plugin',
+    spaceUpload: {
+      descriptionInstalled:
+        'Upload the locally installed plugin {{author}}/{{name}} to the marketplace.',
+      shareInstalledAction: 'Share to Space',
+      installedPackageTitle: 'The installed plugin package will be uploaded',
+      installedPackageHint:
+        'A locally installed plugin is uploaded exactly as the .lbpkg it runs; author, name and version come from its manifest. To change them, edit the source, rebuild and reinstall.',
+      menuAction: 'Upload to Extension Market',
+      title: 'Upload plugin to Extension Market',
+      description:
+        'Build the debugging plugin {{author}}/{{name}} and publish it to the Extension Market.',
+      loadFailed: 'Failed to load plugin upload information',
+      spaceNotConnected:
+        'This Workspace is not bound to a LangBot Account. Bind one before uploading.',
+      label: 'Name',
+      version: 'Version',
+      pluginDescription: 'Description',
+      repository: 'Repository',
+      repositoryPublicHint:
+        'When syncing to GitHub, a missing repository is created and an existing private repository is switched to public.',
+      author: 'Author',
+      authorHint:
+        'Publishing uses this author identity on the Extension Market.',
+      license: 'License',
+      licensePlaceholder: 'Select a license',
+      licenseNone: 'Not specified',
+      changelog: 'Changelog',
+      syncGithub: 'Sync to GitHub',
+      syncGithubHint:
+        'Commit and push the plugin working directory. By default the local git configuration is reused; a repository URL and token below can override it. When a token is provided and the GitHub repository does not exist yet, it is created automatically.',
+      repoUrl: 'Repository URL (optional)',
+      repoUrlHint: 'Leave empty to reuse the local git origin.',
+      token: 'Access token (optional)',
+      tokenPlaceholder: 'Only used for this push',
+      branch: 'Branch',
+      commitMessage: 'Commit message',
+      syncOnly: 'Sync to GitHub only',
+      gitSynced: 'Synchronised to GitHub',
+      gitCommittedNoRemote:
+        'Committed locally, but no remote was configured to push to',
+      gitNothing: 'No changes to synchronise',
+      gitFailed: 'Git sync failed: ',
+      uploadSuccess: 'Plugin uploaded to Extension Market',
+      reviewOnSpace: 'Submit for review on Extension Market',
+      uploadFailed: 'Failed to upload plugin: ',
+      basicInfo: 'Basic information',
+      changeIcon: 'Change icon',
+      iconInvalidType: 'Please choose an image file',
+      iconTooLarge: 'Icon must be smaller than 10 MB',
+      labelRequired: 'Provide a name in at least one language',
+      langEn: 'English',
+      langZhHans: 'Chinese (Simplified)',
+      langZhHant: 'Chinese (Traditional)',
+      langJa: 'Japanese',
+      langTh: 'Thai',
+      langVi: 'Vietnamese',
+      langEs: 'Spanish',
+      uploadButton: 'Upload to Extension Market',
+      notDebugHint:
+        'Only plugins connected for debugging can be uploaded. Start debugging with `lbp run` first.',
+      stepInfo: 'Plugin Info',
+      stepSettings: 'Release Notes',
+      stepConfirm: 'Confirm & Upload',
+      stepResult: 'Upload Result',
+      startUpload: 'Start Upload',
+      uploadingTitle: 'Uploading to Extension Market...',
+      uploadingDesc:
+        'Packaging local plugin files, validating manifest, and syncing to LangBot Space...',
+      uploadSuccessTitle: 'Plugin Uploaded Successfully!',
+      uploadSuccessDesc:
+        'Plugin {{author}}/{{name}} (v{{version}}) has been submitted to LangBot Space.',
+      reviewNoticeTitle: 'Review Notice',
+      reviewNoticeDesc:
+        'The plugin has entered the review queue. Once approved, it will be publicly available in the Extension Market.',
+      viewInSpace: 'View in Space Marketplace',
+      viewMyPlugins: 'Manage My Plugins',
+      finishAndClose: 'Done',
+      retryUpload: 'Retry Upload',
+      backToEdit: 'Back to Edit',
+      manifestNotice:
+        'The following information is read from the plugin manifest (manifest.yaml) for confirmation only. To modify it, please edit your manifest file and restart debugging.',
+      manifestSource: 'Confirmed from manifest',
+      nextStep: 'Next',
+      prevStep: 'Back',
+      nextToSettings: 'Next: Release Notes',
+      nextToConfirm: 'Next: Confirm & Upload',
+      confirmAndUpload: 'Confirm and Upload to Market',
+      noDescription: 'No description provided',
+      noRepository: 'No repository specified',
+      noLicense: 'No license specified',
+      changelogPlaceholder:
+        'Enter release notes for this version (e.g., new features, bug fixes)...',
+      changelogHint:
+        'Changelog will be displayed in the plugin version history on the Extension Market.',
+      reviewSummaryTitle: 'Pre-flight Review',
+      reviewTargetMarket: 'Target Market',
+      reviewTargetMarketValue: 'Extension Market (LangBot Space)',
+      reviewAccountStatus: 'Account Status',
+      reviewAccountConnected: 'Connected to LangBot Account',
+      reviewAccountNotConnected: 'Account not connected (Upload will fail)',
+      spaceNotConnectedTitle: 'Extension Market Account Not Bound',
+      bindSpaceButton: 'Connect LangBot Account',
+      bindRequiredToProceed: 'Please connect your account to proceed',
+      prerequisitesTitle: 'Publishing Preparation',
+      prerequisitesDescription:
+        'Connect your LangBot Account and configure your creator identity before publishing.',
+      req1Title: 'Connect LangBot Account',
+      req1Desc: 'Link this local instance to your LangBot Account.',
+      reqBound: 'Connected',
+      reqCompleted: 'Ready',
+      req2Title: 'Space Creator Profile',
+      req2Desc:
+        'Configure a creator profile on Space with a slug matching the plugin author name.',
+      req2WaitSpace: 'Requires LangBot Account connection first',
+      req2NoCreator:
+        'No creator profile has been set up for this LangBot Account',
+      req2Mismatch: 'Creator slug mismatch',
+      req2MismatchDetail:
+        'Space creator slug is @{{creator}}, but plugin manifest author is {{author}}. Please update author in manifest.yaml or switch accounts.',
+      createCreatorButton: 'Set Up Creator Profile',
+      manageCreatorButton: 'View Creator Settings',
+      pendingReq: 'Pending',
+      autoProceedTip: '',
+      refreshStatus: 'Refresh Status',
+      reviewGitSync: 'GitHub Sync',
+      reviewGitSyncEnabled: 'Enabled (pushing to {{branch}})',
+      reviewGitSyncDisabled: 'Disabled',
+      reviewChangelog: 'Release Notes',
+      reviewChangelogEmpty: '(No release notes provided)',
+      pluginIdentifier: 'Plugin Identifier',
+      banners: {
+        guideTitle: 'How to resolve:',
+        disabledTooltip:
+          'Please follow the banner instructions above before uploading',
+        bindButton: 'Connect LangBot Account',
+        reauthButton: 'Re-authenticate Account',
+        createCreatorButton: 'Create Creator Profile',
+        manageCreatorButton: 'Manage Creator Profile',
+        viewMyPluginsButton: 'View My Plugins on Space',
+        refreshButton: 'Refresh Status',
+        retryButton: 'Retry Upload',
+        readyToUpload: {
+          title: 'Ready to Publish',
+          description:
+            'LangBot Account and creator profile are ready. Please review details below and click confirm to upload.',
+        },
+        notConnected: {
+          title: 'LangBot Account Not Connected',
+          description:
+            'This local instance is not yet connected to a LangBot Account. A LangBot Account is required to verify identity and publish plugins.',
+          guide:
+            'Please click "Connect LangBot Account" below to authorize sign-in. Once connected, you can publish plugins.',
+        },
+        noCreator: {
+          title: 'Space Creator Profile Not Created',
+          description:
+            'Publishing plugins requires a Creator Profile to attribute ownership and showcase your public author page on the marketplace.',
+          guide:
+            'Please click "Create Creator Profile" below to configure your unique slug, bio, and avatar. Then return here and click "Refresh Status".',
+        },
+        authorMismatch: {
+          title: 'Plugin Author Does Not Match Space Creator Slug',
+          description:
+            'The author declared in your plugin manifest is "{{author}}", but your Space creator slug is "@{{creator}}". The marketplace requires them to match exactly.',
+          guide:
+            'How to resolve:\n1. Update manifest.yaml in your plugin directory and set metadata.author to "{{creator}}";\n2. Or switch your connected LangBot Account to the one matching "{{author}}". Then click "Refresh Status".',
+        },
+        pendingReview: {
+          title: 'A Submission Is Already Pending Review',
+          description:
+            'A previous submission for this plugin is currently pending review. Please wait for the current review to complete before submitting another version.',
+          guide:
+            'Please click "View My Plugins on Space" below to check your submission review progress and reviewer feedback.',
+        },
+        sessionExpired: {
+          title: 'Space Authentication Session Expired',
+          description:
+            'The Space access token has expired or is invalid. Authentication failed.',
+          guide:
+            'Please click "Re-authenticate Account" below to sign in again, then retry uploading.',
+        },
+        validationFailed: {
+          title: 'Plugin Package Validation Failed',
+          description:
+            'Package inspection or certification precheck failed: {{detail}}',
+          guide:
+            'Please check your manifest.yaml fields, semantic version format, and ensure all icon and README assets exist. Fix and retry.',
+        },
+        genericError: {
+          title: 'Plugin Publish Failed',
+          description: '{{detail}}',
+          guide:
+            'Please check your network connection or try again later. If the issue persists, visit the Space community.',
+        },
+      },
+      errors: {
+        noCreatorProfile:
+          'Please set up a creator profile on Space before uploading plugins',
+        authorMismatch:
+          'Plugin author "{{author}}" does not match your Space creator slug "@{{slug}}"',
+        pendingReview:
+          'You already have a plugin submission pending review. Please wait for it to complete',
+        sessionExpired:
+          'LangBot Account login session has expired. Please re-authenticate',
+        notConnected:
+          'Please connect a LangBot Account before uploading plugins',
+        packageFailed:
+          'Failed to build the plugin package. Please check your plugin code and files',
+        inspectFailed: 'Plugin manifest inspection failed: {{detail}}',
+        certPrecheckFailed: 'Plugin certification precheck failed: {{detail}}',
+      },
+    },
     localPreview: {
       title: 'Preview Local Plugin Package',
       unpacking: 'Unpacking package preview...',
@@ -1546,6 +2189,10 @@ const enUS = {
     updating: 'Updating...',
     updateSuccess: 'Plugin updated successfully',
     updateError: 'Update failed: ',
+    installedVersion: 'Installed version v{{version}}',
+    updateToVersion: 'Update to v{{version}}',
+    confirmUpdatePluginVersion:
+      'Update plugin {{author}}/{{name}} from v{{from}} to v{{to}}?',
     saveConfigSuccessNormal: 'Configuration saved successfully',
     saveConfigError: 'Configuration save failed: ',
     config: 'Configuration',
@@ -1612,6 +2259,12 @@ const enUS = {
       depsProgress:
         '{{installed}}/{{total}} installed · {{remaining}} remaining',
       installComplete: 'Installation successful',
+      followUp: {
+        nextSteps: 'Next steps',
+        agents: 'Create an Agent or plugin processor',
+        pipelines: 'Create a pipeline',
+        knowledge: 'Create a knowledge base',
+      },
       updateComplete: 'Plugin updated successfully',
       installCompletePlugin: 'Plugin installed successfully',
       installCompleteMCP: 'MCP Server installed successfully',
@@ -1624,6 +2277,13 @@ const enUS = {
     },
   },
   market: {
+    typeTiles: {
+      all: 'All extensions',
+      allDesc: 'Plugins, MCP servers and skills',
+      pluginDesc: 'Platforms, tools, runners and more',
+      mcpDesc: 'Tools served by external MCP servers',
+      skillDesc: 'Teach Agents new ways of working',
+    },
     certifiedPlugin: 'Certified plugin',
     certificationTooltip:
       'This version has passed a review of data isolation and compatibility with shared runtimes, and its package is signed.',
@@ -1895,6 +2555,7 @@ const enUS = {
     triggerConditions: 'Trigger',
     safetyControls: 'Safety',
     outputProcessing: 'Output',
+    speechProcessing: 'Speech',
     nameRequired: 'Name cannot be empty',
     descriptionRequired: 'Description cannot be empty',
     createSuccess: 'Created successfully. Please edit pipeline parameters',
@@ -1930,6 +2591,10 @@ const enUS = {
       addPlugin: 'Add Plugin',
       selectPlugins: 'Select Plugins',
       pluginsTitle: 'Plugins',
+      pluginScopeHint:
+        'Only controls event listeners, tools and commands for this pipeline; does not affect the Runner selected in AI settings.',
+      runnerScopeHint:
+        'Select the Runner independently here, regardless of extension plugin switches. Its plugin must still be installed and available.',
       mcpServersTitle: 'MCP Servers',
       mcpResourcesTitle: 'MCP Resources',
       noMCPServersSelected: 'No MCP servers selected',
@@ -1944,6 +2609,9 @@ const enUS = {
       enableAllPlugins: 'Enable All Plugins',
       enableAllMCPServers: 'Enable All MCP Servers',
       enableAllSkills: 'Enable All Skills',
+      toolsDescription:
+        'Choose which event tools, bot tools and workspace operations the agent may call. Pipelines reply with the model text output automatically, so no reply tool is needed.',
+      saveTools: 'Save tool access',
       allPluginsEnabled: 'All plugins enabled',
       allMCPServersEnabled: 'All MCP servers enabled',
       allSkillsEnabled: 'All skills enabled',
@@ -1974,7 +2642,7 @@ const enUS = {
       mcpToolsScopeTooltip:
         'Only tools from MCP servers currently allowed in Extensions are shown here.',
       skillToolsScopeTooltip:
-        'Skill tools are available when LangBot skill service and the Box sandbox backend are ready. They let the agent activate or register skills.',
+        'Skill activation and read-only resources work without Box. Registering a skill from the agent workspace still requires the Box sandbox.',
       selectTools: 'Select tools',
       resourcesTitle: 'Resources',
       resourcesDescription:
@@ -2027,6 +2695,14 @@ const enUS = {
       uploading: 'Uploading...',
     },
     monitoring: {
+      rangeDays: 'Last {{days}} days',
+      customRange: 'Custom time range',
+      rangeStart: 'Start time',
+      rangeEnd: 'End time',
+      rangeHint: 'Start must precede end. Maximum range: 365 days.',
+      autoRefreshLabel: 'Auto refresh',
+      autoRefreshOff: 'Auto refresh: off',
+      autoRefreshEvery: 'Refresh every {{seconds}} s',
       title: 'Run logs',
       workbench: 'Configure & debug',
       description:
@@ -2260,6 +2936,21 @@ const enUS = {
     newVersionAvailable: 'New Version Available',
     viewUpdateGuide: 'View Update Guide',
     noReleaseNotes: 'No release notes available',
+    latestBadge: 'Latest',
+    currentBadge: 'Current',
+    viewOnWebsite: 'View on website',
+    whatsNewInCurrent: "What's new in this version",
+    releasesIncluded: '{{count}} releases included',
+    upToDate: "You're on the latest version",
+    showOlderReleases: 'Show {{count}} older releases',
+    viewFullChangelog: 'View full changelog',
+    changeTypes: {
+      new: 'New',
+      improved: 'Improved',
+      changed: 'Changed',
+      fixed: 'Fixed',
+      security: 'Security',
+    },
   },
   systemSettings: {
     title: 'System Settings',
@@ -2397,11 +3088,43 @@ const enUS = {
     space_account_not_registeredTitle: 'Account not registered',
     space_account_not_registered:
       'No local account is registered for this LangBot Account email. Ask the Workspace owner for an invitation.',
+    space_dedicated_member_requiredTitle: 'Not a member of this instance',
+    space_dedicated_member_required:
+      "Your LangBot Account hasn't been invited to this instance. Ask its owner to invite you from the Cloud page on LangBot Space, then accept the invitation and try again.",
     space_account_binding_requiredTitle: 'LangBot Account connection required',
     space_account_binding_required:
       'This local account must connect a LangBot Account from Account settings before using LangBot Account login.',
   },
+  dailyMessageQuota: {
+    planLimited: '{{count}} messages per day',
+    planUnlimited: 'Unlimited daily messages',
+    planHelp:
+      'Messages your bots can process per day, counted per UTC day and reset at 00:00 UTC. Only messages a bot actually handles count. Once used up, new messages that day are not processed and the user is told why.',
+    title: "Today's messages",
+    usage: '{{used}} / {{limit}}',
+    remaining: '{{count}} left',
+    resetsAt: 'Resets {{time}}',
+    today: 'today {{time}}',
+    tomorrow: 'tomorrow {{time}}',
+    exhausted: "Today's quota is used up",
+    exhaustedHint: 'New messages are paused until {{time}}',
+    nearLimit: 'Almost used up',
+    upgrade: 'Upgrade plan',
+    unlimited: 'Unlimited',
+    settingsTitle: 'Daily message quota',
+    settingsDescription:
+      'Messages your bots can process per day, including Debug Chat. Counted per UTC day; group messages that do not trigger a bot are not counted.',
+    unlimitedDescription: 'Your plan does not limit daily messages.',
+    errorTitle: "Today's message quota is used up",
+    errorBody:
+      'This workspace has already processed {{limit}} messages today, so this message was not processed. The quota resets {{time}}.',
+    errorUpgrade: 'Upgrade for a higher quota',
+    unavailable: "Today's usage is unavailable right now",
+  },
   workspace: {
+    dedicatedSpaceMembersHint:
+      'Members who sign in with their LangBot Account are invited from the Cloud page on LangBot Space. The invitation below creates a separate password account on this instance.',
+    manageOnSpace: 'Manage on LangBot Space',
     title: 'Workspace',
     description: 'Manage members, roles, and invitation links',
     selectTitle: 'Choose a Workspace',
@@ -2415,8 +3138,7 @@ const enUS = {
     upgradePlan: 'Change or upgrade plan',
     ossSingletonDescription:
       'This self-hosted instance has one Workspace and can include multiple users.',
-    cloudManagedDescription:
-      'This Workspace is hosted by LangBot Cloud. Manage members here; billing opens in Cloud.',
+    cloudManagedDescription: 'This Workspace is hosted by LangBot Cloud.',
     loadFailed: 'Failed to load Workspace information',
     members: 'Members',
     you: 'You',
@@ -2432,6 +3154,10 @@ const enUS = {
       failed: 'Invitation link created, but email could not be sent',
     },
     invitationCreateFailed: 'Failed to create invitation',
+    memberLimitReached:
+      'Your workspace has reached its member limit ({{max}}, including pending invitations). Upgrade your plan to invite more members.',
+    memberLimitReachedToast:
+      'Member limit reached. Upgrade your plan to invite more members.',
     oneTimeLinkWarning: 'Copy this link now. It is shown only once.',
     copyInvitation: 'Copy invitation link',
     invitationCopied: 'Invitation link copied',
@@ -2485,6 +3211,135 @@ const enUS = {
     },
   },
   monitoring: {
+    rangeDays: 'Last {{days}} days',
+    customRange: 'Custom time range',
+    rangeStart: 'Start time',
+    rangeEnd: 'End time',
+    rangeHint: 'Start must precede end. Maximum range: 365 days.',
+    autoRefreshLabel: 'Auto refresh',
+    autoRefreshOff: 'Auto refresh: off',
+    autoRefreshEvery: 'Refresh every {{seconds}} s',
+    unified: {
+      inputs: 'Event / input',
+      outputs: 'Generated results',
+      deliveries: 'Delivery records',
+      conversation: 'Conversation context',
+      related: 'Related executions',
+      events: 'Execution events',
+      llm_calls: 'Model calls',
+      tool_calls: 'Tool calls',
+      errors: 'Errors',
+      payload: 'Details',
+      metadata: 'Technical details',
+      loadMore: 'Load more',
+      noRecords: 'No records',
+      contextHint:
+        'Conversation context is not necessarily part of this execution.',
+      unhandled: 'No processor run',
+      roles: {
+        user: 'User',
+        assistant: 'Assistant',
+        system: 'System',
+        tool: 'Tool',
+      },
+    },
+    execution: {
+      title: 'Executions',
+      subtitle:
+        'Every inbound event and the execution it triggered, across agents and pipelines.',
+      tabs: { executions: 'Executions' },
+      filters: {
+        source: 'Type',
+        sourceAll: 'All types',
+        sourceAgent: 'Agents',
+        sourcePipeline: 'Pipelines',
+        mode: 'Traffic',
+        modeAll: 'Live + debug',
+        modeLive: 'Live only',
+        modeDebug: 'Debug only',
+        status: 'Status',
+        statusAll: 'All statuses',
+      },
+      status: {
+        completed: 'Completed',
+        failed: 'Failed',
+        running: 'Running',
+        queued: 'Queued',
+        cancelled: 'Cancelled',
+        ignored: 'Ignored',
+      },
+      // prettier-ignore
+      kind: {
+        agent: 'Agent',
+        pipeline: 'Pipeline',
+        processor: 'Processor',
+      },
+      columns: {
+        time: 'Time',
+        target: 'Processor',
+        status: 'Status',
+        duration: 'Duration',
+        tokens: 'Tokens',
+      },
+      debug: 'Debug',
+      empty: 'No executions in this range',
+      loading: 'Loading executions...',
+      triggeredBy: 'Triggered by {{trigger}}',
+      handledByPlugin: 'Handled by plugin {{plugin}}',
+      handledByUnknownPlugin: 'Handled by an unidentified plugin',
+      filteredByStage: 'Stopped by pipeline · {{stage}}',
+      filteredByUnknownStage: 'Stopped by pipeline',
+      filterStages: {
+        BanSessionCheckStage: 'Access control',
+        GroupRespondRuleCheckStage: 'Group respond rules',
+        PreContentFilterStage: 'Content filter / ignore rules',
+        PostContentFilterStage: 'Output content filter',
+        RequireRateLimitOccupancy: 'Rate limit',
+      },
+      cards: {
+        latencyHint:
+          'P50/P95: about 50%/95% of runs finish within this time. Based on recent completed Agent runs, excluding queue time.',
+        tokensHint:
+          'Only recorded usage is included. Totals may be incomplete when models do not return usage.',
+        totalExecutions: 'Executions',
+        bySource: '{{agent}} agent · {{pipeline}} pipeline',
+        successRate: 'Execution Success Rate',
+        successRateHint:
+          'Successes ÷ (successes + failures). In-progress, ignored and cancelled runs are excluded.',
+        denominator: '{{completed}} succeeded out of {{denominator}} finished',
+        running: 'Running',
+        queued: 'Queued',
+        waiting: 'Waiting input',
+        failed: 'Failed',
+        ignored: 'Ignored',
+        latency: 'Execution time',
+        p50: 'P50',
+        p95: 'P95',
+        sample: 'Based on {{count}} runs',
+        tokens: 'Tokens',
+        coverage: 'usage on {{withUsage}}/{{calls}} calls',
+        debugRuns: 'Includes {{count}} debug runs',
+      },
+      detail: {
+        title: 'Execution',
+        timeline: 'Timeline',
+        executionId: 'Execution ID',
+        eventId: 'Event',
+        queue: 'Queue',
+        runner: 'Runner',
+        created: 'Created',
+        duration: 'Duration',
+        usage: 'Usage',
+        noEvents: 'No trace events recorded',
+        query: 'Inbound message',
+        modelCalls: 'Model calls',
+        toolCalls: 'Tool calls',
+        errors: 'Errors',
+        loadError: 'Failed to load execution trace',
+        openObject: 'Open object',
+        a11yDescription: 'Full trace of this execution',
+      },
+    },
     title: 'Dashboard',
     description: 'Monitor bot activities, LLM calls, and system performance',
     overview: 'Overview',
@@ -2500,6 +3355,9 @@ const enUS = {
       pipeline: 'Pipeline',
       allBots: 'All Bots',
       selectBot: 'Select Bot',
+      processor: 'Processor',
+      allProcessors: 'All Processors',
+      selectProcessor: 'Select Processor',
       allPipelines: 'All Pipelines',
       selectPipeline: 'Select Pipeline',
       loading: 'Loading...',
@@ -2524,6 +3382,15 @@ const enUS = {
       feedback: 'User Feedback',
       sessions: 'Session Analysis',
       errors: 'Error Logs',
+    },
+    pipelineTrace: {
+      received: 'Received message',
+      processing: 'Processing',
+      replies: 'Replies',
+      noSteps: 'No model or tool calls recorded',
+      success: 'Success',
+      error: 'Failed',
+      pending: 'Pending',
     },
     messageList: {
       timestamp: 'Timestamp',
@@ -2732,9 +3599,9 @@ const enUS = {
     statusDetail: 'Status',
     pluginDisabled: 'Plugin system is disabled',
     boxDisabled:
-      'Box sandbox is disabled in config — sandbox tools, skill add/edit, and stdio MCP are unavailable',
+      'Box sandbox is disabled in config — execution tools and stdio MCP are unavailable',
     boxUnavailable:
-      'Box sandbox is unavailable — sandbox tools, skill add/edit, and stdio MCP are unavailable',
+      'Box sandbox is unavailable — execution tools and stdio MCP are unavailable',
     boxRequiredHint:
       'This feature requires the Box runtime. Enable it in config (box.enabled = true) and ensure the runtime is healthy.',
     boxBackend: 'Backend',
@@ -2748,6 +3615,7 @@ const enUS = {
     nav: {
       workspace: 'Workspace',
       operationTrace: 'Operation Log',
+      alerts: 'Alerts',
       models: 'Models',
       api: 'API',
       storage: 'Storage',
@@ -2839,6 +3707,7 @@ const enUS = {
       skill: 'Skill',
       knowledge_base: 'Knowledge base',
       mcp_server: 'MCP server',
+      content: 'Shared content',
       runtime: 'Runtime',
       system: 'System',
       resource: 'Resource',
@@ -2849,6 +3718,8 @@ const enUS = {
       error: 'Failed',
     },
     actions: {
+      content_publish: 'Share content to Space',
+      plugin_publish: 'Publish extension to Space',
       audit_log_view: 'View operation logs',
       settings_update: 'Update tracing settings',
       settings_view: 'View tracing settings',
@@ -3210,6 +4081,8 @@ const enUS = {
         'Use an installed Runner or try again later.',
       browseRunners: 'Browse Runner Extensions',
       installAndContinue: 'Install & Continue',
+      autoConfirmPermissions:
+        'Declared plugin permissions will be granted automatically. You can adjust them in plugin settings.',
       installing: 'Installing...',
       useInstalled: 'Use This Runner',
       installedUnavailable: 'Installed, Runner Unavailable',
@@ -3347,14 +4220,265 @@ const enUS = {
     selectFromSidebar: 'Select a plugin page from the sidebar',
     invalidPage: 'Invalid plugin page',
   },
-  beta_banner: {
+  cloud_banner: {
     message:
-      'This environment is in Beta testing. Service stability is not guaranteed. Consider using',
-    cloud_link: 'LangBot Cloud (dedicated environment)',
+      'You are using LangBot Cloud, the managed service. For dedicated capacity and higher quotas, consider',
+    dedicated_link: 'LangBot Cloud (dedicated environment)',
+    cta_dedicated: 'see dedicated plans',
     or: 'or',
-    oss_link: 'self-hosted open-source version',
+    self_hosted_link: 'the self-hosted open-source version',
     period: '.',
     dismiss: 'Dismiss',
+  },
+  workspaceOperations: {
+    title: 'Workspace Operations',
+    description:
+      'Configure workspace unified API operations that this processor can invoke.',
+    scopeHint:
+      'Allow this processor to invoke LangBot workspace unified API operations under its own identity.',
+    searchPlaceholder: 'Search operation name, ID, or description...',
+    selectAll: 'Select All',
+    deselectAll: 'Deselect All',
+    selectedCount: '{{count}} selected',
+    totalCount: '{{count}} total',
+    noOperations: 'No workspace operations available',
+    noSearchResults: 'No matching operations found',
+    riskRead: 'Read',
+    riskWrite: 'Write',
+    riskDangerous: 'Dangerous',
+    requiresPermission: 'Requires permission: {{permission}}',
+    dangerousConfirmTitle: 'Contains Dangerous Workspace Operations',
+    dangerousConfirmDescription:
+      'This processor faces IM users; anyone who can chat with the Bot may trigger these operations. Are you sure you want to save?',
+    dangerousConfirmAction: 'Confirm Save',
+    dangerousConfirmCancel: 'Cancel',
+    saveWorkspaceOperations: 'Save Workspace Operations',
+    saveSuccess: 'Workspace operations saved successfully',
+    saveFailed: 'Failed to save workspace operations',
+    configuredCount: '{{count}} operations configured',
+    expandDomain: 'Expand',
+    collapseDomain: 'Collapse',
+    ungrantableRemoved:
+      'Some operations were unselected or removed due to insufficient permissions.',
+  },
+  sensitiveTools: {
+    badge: '{{count}} sensitive tools',
+    title: 'Sensitive or high-risk tools enabled',
+    description:
+      'If a bound bot serves untrusted users, turn the matching tools off on the "{{page}}" page.',
+    list: 'Includes: {{items}}',
+    listMore: 'Includes: {{items}} and more ({{count}} total)',
+    listSeparator: ', ',
+  },
+  alerts: {
+    enableHint: 'Enable alerts',
+    cta: {
+      title: 'Email alerts for free with a LangBot Account',
+      pointFree: 'Free official sending, 20 emails per day',
+      pointNoSetup: 'No SMTP or Resend setup needed',
+      pointPrivate: 'Sent only to your own LangBot Account address',
+      selfHosted: 'Prefer your own mail server?',
+      selfHostedLink: 'Configure SMTP or Resend in config.yaml →',
+    },
+    title: 'Alerts',
+    description:
+      'Email and webhook notifications when bots, Pipelines or models keep failing',
+    enabled: 'Alerts on',
+    firingCount: '{{count}} firing',
+    allClear: 'All clear',
+    sendTest: 'Send test',
+    saveBeforeTest: 'Save your changes before sending a test',
+    saved: 'Alert settings saved',
+    saveFailed: 'Failed to save alert settings: {{error}}',
+    loadFailed: 'Failed to load alerts: {{error}}',
+    testSent: 'Test alert sent to {{count}} destination(s)',
+    testPartial: 'Test alert sent with errors; see the delivery log',
+    testNoChannel:
+      'No channel is set up yet; choose an email channel or a webhook',
+    testFailed: 'Failed to send test alert: {{error}}',
+    disabledInstanceWide:
+      'Alerts are turned off for this instance (alerts.enabled in config.yaml).',
+    emailTitle: 'Email',
+    emailDescription: 'Currently sent via: {{channel}}',
+    recipients: 'Recipients (Workspace owners and admins)',
+    noRecipients: 'No owner or admin has an email address.',
+    extraRecipients: 'Extra recipients (your mail service only, up to 10)',
+    spaceRecipientsHint:
+      'LangBot Space only mails admins who signed in with LangBot Space, at their own Space address. Free quota: 20 per day, 200 per month per account.',
+    channel: {
+      auto: 'Automatic',
+      autoDescription:
+        'Your mail service when configured, otherwise LangBot Space',
+      instance: 'Your mail service',
+      instanceConfigured: '{{provider}} configured in config.yaml',
+      instanceMissing:
+        'Not configured. Set the email section (SMTP or Resend) in config.yaml',
+      space: 'LangBot Space (official)',
+      spaceAvailable: 'Free official sending to {{accounts}}',
+      spaceMissing: 'Sign in with a LangBot Account to use it',
+      off: 'Off',
+      offDescription: 'Only show alerts here and send webhooks',
+      none: 'not sent (no channel available)',
+      ready: 'Ready',
+      unavailable: 'Unavailable',
+    },
+    rulesTitle: 'Rules',
+    rulesDescription:
+      'An alert opens when failures reach the threshold within the window.',
+    minutesWithin: 'min, at least',
+    failuresOrMore: 'failures',
+    notifyResolved: 'Notify when an alert recovers',
+    throttleHint:
+      'Each alert is sent once when it opens, then reminded after 6h, 12h and every 24h while it keeps failing.',
+    rule: {
+      pipeline_failures: 'Pipeline failures',
+      pipeline_failuresDescription: 'Processing errors in one Pipeline',
+      model_failures: 'Model call failures',
+      model_failuresDescription: 'Failed requests to one model',
+      bot_offline: 'Bot stopped with an error',
+      bot_offlineDescription:
+        'Alerts immediately; recovers when the bot starts again',
+    },
+    webhooksTitle: 'Webhooks',
+    webhooksDescription:
+      'Selected webhooks receive alert.fired, alert.reminder and alert.resolved events.',
+    noWebhooks: 'No webhooks yet. Add one in Settings → API.',
+    webhookDisabled: 'Disabled',
+    incidentsTitle: 'Recent alerts',
+    noIncidents: 'No alerts yet.',
+    incidentMeta: '{{count}} failure(s) · opened {{time}}',
+    state: {
+      firing: 'Firing',
+      resolved: 'Resolved',
+    },
+    deliveriesTitle: 'Delivery log',
+    noDeliveries: 'Nothing has been sent yet.',
+    kind: {
+      fired: 'Alert',
+      reminder: 'Reminder',
+      resolved: 'Recovered',
+      test: 'Test',
+    },
+    via: {
+      email: 'Email',
+      space: 'LangBot Space',
+      webhook: 'Webhook',
+    },
+    status: {
+      sent: 'Sent',
+      failed: 'Failed',
+      rate_limited: 'Quota reached',
+      skipped: 'Skipped',
+    },
+  },
+  promptLibrary: {
+    emptyTitle: 'Templates are on their way ✨',
+    emptyBody: 'Hit “Share” next to a prompt and be the first!',
+    bindToFavorite: 'Bind an account to favorite',
+    originalLanguage: 'original',
+    open: 'Prompt library',
+    title: 'Prompt library',
+    description:
+      'Search reviewed prompts shared on LangBot Space. Save the configuration after applying one.',
+    kindMessaging: 'Messaging',
+    kindAgent: 'Agent',
+    searchPlaceholder: 'Search name, description, tags or text',
+    tabAll: 'All',
+    tabFavorites: 'Favorites',
+    favoritesNeedAccount: 'Bind a LangBot Account to favorite prompts',
+    otherKindHint:
+      'You are browsing {{kind}} prompts, written for a different use. Check they fit before applying.',
+    noFavorites: 'No favorite prompts yet',
+    empty: 'No matching prompts',
+    loadFailed: 'Failed to load the prompt library',
+    favoriteFailed: 'Could not update the favorite',
+    applied: 'Applied. Save to take effect.',
+    uses: '{{count}} uses',
+    favorite: 'Favorite',
+    variablesHint: 'Variables:',
+    append: 'Append to current prompt',
+    replace: 'Replace current prompt',
+    replaceTitle: 'Replace the current prompt?',
+    replaceDescription:
+      'The current prompt will be overwritten (you can still discard before saving).',
+    selectHint: 'Select a prompt on the left to preview',
+  },
+  spaceShare: {
+    modeNew: 'Publish as new',
+    modeUpdate: 'Update existing ({{count}})',
+    pickExisting: 'Choose the item to update',
+    unlisted: 'unlisted',
+    identifierHint:
+      'Lowercase letters, digits, - or _. Fixed after publishing.',
+    bindAccount: 'Bind LangBot Account',
+    autoTranslateNotice:
+      'Write it in one language. We translate it into other languages automatically after upload.',
+    shareShort: 'Share',
+    shareToSpace: 'Share to Space',
+    findingsBlockTitle:
+      'Possible credentials found — remove them before sharing',
+    findingsWarnTitle: 'Contains personal or internal data',
+    submitFailed: 'Submission failed',
+    submittedTitle: 'Submitted for review',
+    submittedAgentReview:
+      '{{id}} is being reviewed automatically and will appear on LangBot Space once approved.',
+    submittedManualReview: '{{id}} is waiting for a manual review.',
+    viewProgress: 'View review progress on LangBot Space',
+    needAccountTitle: 'LangBot Account required',
+    needAccount:
+      'Bind a LangBot Account to share. Your contribution is published under that account’s LangBot Space creator profile.',
+    needCreatorTitle: 'No creator profile yet',
+    needCreator:
+      'Set up a creator profile on LangBot Space to share. You only need to do this once.',
+    openCreator: 'Set up creator profile',
+    acknowledgeWarnings: 'I confirm this information can be public',
+    displayName: 'Display name',
+    identifier: 'Identifier',
+    descriptionLabel: 'Description',
+    changelog: 'Changelog',
+    reviewNotice:
+      'Submissions are reviewed before they become public on LangBot Space. Sharing the same name again publishes a new version.',
+    submit: 'Submit for review',
+    promptTitle: 'Share prompt to LangBot Space',
+    promptDescriptionMessaging:
+      'Published as a Messaging prompt that others can find in pipeline settings.',
+    promptDescriptionAgent:
+      'Published as an Agent prompt that others can find in Agent settings.',
+    detectedVariables: 'Detected variables:',
+    skillTitle: 'Share Skill to LangBot Space',
+    skillDescription:
+      'Uploads the current Skill package. The review checks scripts and outbound requests.',
+    packageFiles: 'Files to submit',
+    mcpTitle: 'Share MCP server to LangBot Space',
+    mcpDescription:
+      'Remote MCP only. Credentials are never uploaded: they become placeholders that installers fill in with their own values.',
+    mcpPublishedConfig: 'Configuration to publish',
+    mcpToolsCount: 'Includes a snapshot of {{count}} tools',
+    mcpRedactedTitle: '{{count}} credentials removed',
+    mcpRedactedHint:
+      'Installers will be asked for these values. Give each a friendly label:',
+    mcpInputLabelPlaceholder: 'Label (default: {{label}})',
+    mcpNoCredentials:
+      'No credentials found; the configuration is published as is.',
+    mcpNeedsConnection:
+      'Connect successfully first; the tool list is published with it',
+    mcpFillInputsTitle: 'Fill in credentials before enabling',
+    mcpFillInputs:
+      'This community MCP server needs your own values for {{names}}. Replace them, save, then enable it.',
+    finding: {
+      openai_key: 'OpenAI key',
+      anthropic_key: 'Anthropic key',
+      github_token: 'GitHub token',
+      slack_token: 'Slack token',
+      aws_access_key: 'AWS access key',
+      google_api_key: 'Google API key',
+      private_key: 'Private key',
+      jwt: 'JWT token',
+      langbot_key: 'LangBot key',
+      email: 'Email address',
+      phone: 'Phone number',
+      private_url: 'Internal URL',
+    },
   },
 };
 export default enUS;

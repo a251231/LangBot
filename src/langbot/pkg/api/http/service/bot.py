@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 import typing
 import json
+import asyncio
 import sqlalchemy
 
 from ....core import app
@@ -16,7 +17,10 @@ from .tenant import TenantContext, require_workspace_uuid, scope_statement
 from ....utils import httpclient
 from ....platform.sources import http_bot_signing
 from ....platform.adapter_names import canonical_adapter_name
+from ....cloud.plan_policy import require_workspace_platform
 from ....agent.runner.errors import RunnerNotFoundError
+from ....i18n import t
+from ...application.contracts import ApplicationAPIError, ApplicationAPIException
 
 
 class BotService:
@@ -42,6 +46,7 @@ class BotService:
 
     def __init__(self, ap: app.Application) -> None:
         self.ap = ap
+        self._default_pipeline_lock = asyncio.Lock()
 
     def _get_adapter_component(self, adapter_name: str) -> engine.Component | None:
         """Return the discovered platform adapter component for an adapter name."""
@@ -52,19 +57,19 @@ class BotService:
         return None
 
     def _adapter_declares_webhook_url(self, adapter_name: str) -> bool:
-        """Whether the adapter manifest declares a generated webhook URL config item."""
+        """Whether the manifest needs a generated public bot ingress URL."""
         component = self._get_adapter_component(adapter_name)
         if component is None:
             return False
 
         for config_item in component.spec.get('config', []):
-            if config_item.get('type') == 'webhook-url':
+            if config_item.get('type') == 'webhook-url' or config_item.get('name') == '__system.onebot_ws_url':
                 return True
         return False
 
     @staticmethod
     def _is_message_event_pattern(event_pattern: str) -> bool:
-        return event_pattern == 'message.*' or event_pattern.startswith('message.')
+        return event_pattern == 'message.received'
 
     @staticmethod
     def _event_pattern_covers(supported_pattern: str, binding_pattern: str) -> bool:
@@ -200,6 +205,22 @@ class BotService:
             'diagnostic_steps': cls._format_diagnostic_steps(diagnostic_steps),
             'diagnostic_details': diagnostic_steps or [],
         }
+
+    @staticmethod
+    def _extract_dry_run_bot_account_id(
+        context: typing.Any,
+        event_data: typing.Any,
+    ) -> str | None:
+        """Extract bot_account_id from dry-run context for is_at_bot filter support."""
+        if isinstance(context, dict):
+            val = context.get('bot_account_id')
+            if val is not None:
+                return str(val)
+        if isinstance(event_data, dict):
+            val = event_data.get('bot_account_id')
+            if val is not None:
+                return str(val)
+        return None
 
     @staticmethod
     def _build_dry_run_event(event_type: str, event_data: typing.Any, context: typing.Any) -> dict[str, typing.Any]:
@@ -353,6 +374,7 @@ class BotService:
             bindings,
             event,
             event_type,
+            bot_account_id=self._extract_dry_run_bot_account_id(context, event_data),
         )
         if selected_binding is None:
             return self._diagnostic_result(
@@ -489,6 +511,60 @@ class BotService:
             ],
         )
 
+    async def _build_default_event_bindings(self, context: TenantContext) -> list[dict]:
+        """Build the default event bindings for a new bot.
+
+        Two bindings route message.received to the first available pipeline:
+        - private chat: always respond
+        - group chat: require an @mention of the bot (is_at_bot=true)
+
+        The group @mention check runs at the routing layer, so messages that
+        do not match never create a pipeline task. Existing bots keep their
+        current bindings; this only applies to bots created without any.
+        """
+        # Serialize first-bot setup without retaining an unbounded lock per Workspace.
+        async with self._default_pipeline_lock:
+            pipelines = await self.ap.pipeline_service.get_pipelines(context)
+            if pipelines:
+                selected = next((item for item in pipelines if item.get('is_default')), pipelines[0])
+                pipeline_uuid = selected.get('uuid')
+            else:
+                pipeline_uuid = await self.ap.pipeline_service.create_pipeline(
+                    context, {'name': t('New Pipeline'), 'description': '', 'emoji': '⚙️'}, default=True
+                )
+        if not pipeline_uuid:
+            return []
+
+        return [
+            {
+                'id': str(uuid.uuid4()),
+                'event_pattern': 'message.received',
+                'target_type': 'pipeline',
+                'target_uuid': pipeline_uuid,
+                'filters': [
+                    {'field': 'chat_type', 'operator': 'eq', 'value': 'person'},
+                ],
+                'priority': 0,
+                'enabled': True,
+                'description': 'Private chat: respond directly',
+                'order': 0,
+            },
+            {
+                'id': str(uuid.uuid4()),
+                'event_pattern': 'message.received',
+                'target_type': 'pipeline',
+                'target_uuid': pipeline_uuid,
+                'filters': [
+                    {'field': 'chat_type', 'operator': 'eq', 'value': 'group'},
+                    {'field': 'is_at_bot', 'operator': 'eq', 'value': True},
+                ],
+                'priority': 0,
+                'enabled': True,
+                'description': 'Group chat: respond only when the bot is @mentioned',
+                'order': 1,
+            },
+        ]
+
     async def _normalize_event_bindings(self, context: TenantContext, bindings: list[dict] | None) -> list[dict]:
         """Validate and normalize Bot event bindings."""
         if not bindings:
@@ -507,7 +583,7 @@ class BotService:
 
             if target_type == 'pipeline':
                 if not self._is_message_event_pattern(event_pattern):
-                    raise ValueError('Pipeline can only be bound to message events')
+                    raise ValueError('Pipeline can only be bound to message.received')
                 result = await self.ap.persistence_mgr.execute_async(
                     scope_statement(
                         sqlalchemy.select(persistence_pipeline.LegacyPipeline.uuid).where(
@@ -620,6 +696,40 @@ class BotService:
             bot['adapter'] = canonical_adapter_name(bot['adapter'])
         return serialized
 
+    async def require_processor_unbound(self, context: TenantContext, processor_uuid: str) -> None:
+        """Refuse to remove a Pipeline or Agent that a Bot still routes events to.
+
+        Deleting a bound target used to leave the binding dangling, so every
+        matching inbound event was routed to a missing target and dropped.
+        """
+        from ....platform.botmgr import RuntimeBot
+
+        processor_uuid = str(processor_uuid or '').strip()
+        if not processor_uuid:
+            return
+        bot_names: list[str] = []
+        for bot in await self.get_bots(context):
+            bindings = RuntimeBot._get_event_bindings_from_value(bot.get('event_bindings') or [])
+            subscriptions = bot.get('plugin_processors') or []
+            if any(str(binding.get('target_uuid') or '').strip() == processor_uuid for binding in bindings) or any(
+                isinstance(subscription, dict) and subscription.get('processor_uuid') == processor_uuid
+                for subscription in (subscriptions if isinstance(subscriptions, list) else [])
+            ):
+                bot_names.append(str(bot.get('name') or bot.get('uuid')))
+        if bot_names:
+            raise ApplicationAPIException(
+                ApplicationAPIError(
+                    'resource_in_use',
+                    t(
+                        'This item is still used by the event bindings of these bots: {bots}. '
+                        'Change those bindings first, then delete it.',
+                        bots=', '.join(sorted(bot_names)),
+                    ),
+                    409,
+                    {'bots': sorted(bot_names)},
+                )
+            )
+
     async def get_bot(self, context: TenantContext, bot_uuid: str, include_secret: bool = False) -> dict | None:
         """获取机器人"""
         result = await self.ap.persistence_mgr.execute_async(
@@ -684,27 +794,43 @@ class BotService:
     async def create_bot(self, context: TenantContext, bot_data: dict) -> str:
         """Create bot"""
         workspace_uuid = require_workspace_uuid(context)
+        if not isinstance(bot_data, dict):
+            raise ValueError('bot_data must be an object')
+        for field in ('name', 'adapter'):
+            if not isinstance(bot_data.get(field), str) or not bot_data[field].strip():
+                raise ValueError(f'bot_data.{field} is required and must be a non-empty string')
+        if not isinstance(bot_data.get('adapter_config'), dict):
+            raise ValueError('bot_data.adapter_config is required and must be an object')
         # Check limitation
-        limitation = self.ap.instance_config.data.get('system', {}).get('limitation', {})
+        from .workspace_limits import workspace_limits
+
+        limitation = await workspace_limits(self.ap, workspace_uuid)
         max_bots = limitation.get('max_bots', -1)
         if max_bots >= 0:
             existing_bots = await self.get_bots(context)
             if len(existing_bots) >= max_bots:
                 raise ValueError(f'Maximum number of bots ({max_bots}) reached')
 
-        # TODO: 检查配置信息格式
         bot_data = await self._prepare_bot_data(context, bot_data, include_uuid=True)
+        await require_workspace_platform(self.ap, workspace_uuid, bot_data['adapter'])
         bot_data['uuid'] = str(uuid.uuid4())
         bot_data['workspace_uuid'] = workspace_uuid
-        bot_data.setdefault('event_bindings', [])
+        if not bot_data.get('event_bindings'):
+            bot_data['event_bindings'] = await self._build_default_event_bindings(context)
+        else:
+            bot_data['event_bindings'] = await self._normalize_event_bindings(context, bot_data['event_bindings'])
         bot_data.setdefault('plugin_processors', [])
+        # The column is NOT NULL; a caller that omits the optional description
+        # must not get a 500 from the database constraint.
+        bot_data.setdefault('description', '')
 
         await self.ap.persistence_mgr.execute_async(sqlalchemy.insert(persistence_bot.Bot).values(bot_data))
 
         bot = await self.get_bot(context, bot_data['uuid'], include_secret=True)
 
         try:
-            await self.ap.platform_mgr.load_bot(context, bot)
+            if bot.get('enable'):
+                await self.ap.platform_mgr.load_bot(context, bot)
         except Exception as exc:
             raise BotApplyError(bot_error_message(exc, bot), bot['uuid']) from exc
 
@@ -715,6 +841,9 @@ class BotService:
         workspace_uuid = require_workspace_uuid(context)
         update_data = await self._prepare_bot_data(context, bot_data, include_uuid=False)
         update_data.pop('workspace_uuid', None)
+        if 'adapter' in update_data or update_data.get('enable'):
+            current = await self.get_bot(context, bot_uuid, include_secret=True)
+            await require_workspace_platform(self.ap, workspace_uuid, update_data.get('adapter', current['adapter']))
 
         result = await self.ap.persistence_mgr.execute_async(
             scope_statement(
@@ -736,12 +865,77 @@ class BotService:
                     runtime_bot.bot_entity.description = update_data['description']
             return
 
+        await self._apply_bot_configuration(context, bot_uuid)
+
+    async def bind_event_route(
+        self,
+        context: TenantContext,
+        bot_uuid: str,
+        expected_binding: dict,
+        target_type: typing.Literal['agent', 'pipeline'],
+        target_uuid: str,
+        dry_run: bool = False,
+    ) -> dict:
+        """Change one existing route, conditional on the binding inspected by the client."""
+        binding_id = expected_binding.get('id')
+        if not isinstance(binding_id, str) or not binding_id or not target_uuid.strip():
+            raise ValueError('A binding ID and target UUID are required')
+        if target_type not in {'agent', 'pipeline'}:
+            raise ValueError('Unsupported event binding target type')
+        model = persistence_bot.Bot
+        # Compare the database representation in SQL. PostgreSQL JSON has no
+        # equality operator, and re-encoding the value can change its whitespace.
+        snapshot = sqlalchemy.cast(model.event_bindings, sqlalchemy.Text)
+        result = await self.ap.persistence_mgr.execute_async(
+            scope_statement(sqlalchemy.select(snapshot).where(model.uuid == bot_uuid), model, context)
+        )
+        original = result.scalar_one_or_none()
+        if original is None:
+            raise WorkspaceNotFoundError('Bot not found')
+        routes = json.loads(original)
+        if isinstance(routes, str):
+            routes = json.loads(routes)
+        if not isinstance(routes, list):
+            raise ValueError('Invalid event bindings')
+        matches = [route for route in routes if isinstance(route, dict) and route.get('id') == binding_id]
+        conflict = ApplicationAPIError('binding_conflict', t('The bot route changed. Read the current binding.'), 409)
+        if len(matches) != 1 or matches[0] != expected_binding:
+            raise ApplicationAPIException(conflict)
+        before = matches[0]
+        changed = dict(before, target_type=target_type, target_uuid=target_uuid.strip())
+        if not await self._normalize_event_bindings(context, [changed]):
+            raise ValueError('Invalid event binding')
+        different = changed != before
+        if different and not dry_run:
+            routes[routes.index(before)] = changed
+            written = await self.ap.persistence_mgr.execute_async(
+                scope_statement(
+                    sqlalchemy.update(model)
+                    .where(model.uuid == bot_uuid, snapshot == original)
+                    .values(event_bindings=routes),
+                    model,
+                    context,
+                )
+            )
+            if written.rowcount != 1:
+                raise ApplicationAPIException(conflict)
+            await self._apply_bot_configuration(context, bot_uuid)
+        return {
+            'bot_uuid': bot_uuid,
+            'before': before,
+            'binding': changed,
+            'changed': different,
+            'dry_run': dry_run,
+        }
+
+    async def _apply_bot_configuration(self, context: TenantContext, bot_uuid: str) -> None:
         # Persisted configuration is distinct from applying it to the running adapter.
+        workspace_uuid = require_workspace_uuid(context)
         bot = await self.get_bot(context, bot_uuid, include_secret=True)
         try:
             await self.ap.platform_mgr.remove_bot(context, bot_uuid)
-            runtime_bot = await self.ap.platform_mgr.load_bot(context, bot)
-            if runtime_bot.enable:
+            if bot.get('enable'):
+                runtime_bot = await self.ap.platform_mgr.load_bot(context, bot)
                 await runtime_bot.run()
         except Exception as exc:
             raise BotApplyError(bot_error_message(exc, bot), bot['uuid']) from exc
@@ -775,7 +969,8 @@ class BotService:
             raise WorkspaceNotFoundError('Bot not found')
         runtime_bot = await self.ap.platform_mgr.get_bot_by_uuid(context, bot_uuid)
         if runtime_bot is None:
-            raise Exception('Bot not found')
+            # Saved but disabled/unconfigured bots have no runtime logs yet.
+            return [], 0
 
         logs, total_count = await runtime_bot.logger.get_logs(from_index, max_count)
 
@@ -849,6 +1044,169 @@ class BotService:
             'routes': routes,
             'unmatched_events': unmatched_events[-10:],
             'stale_routes': stale_routes,
+        }
+
+    async def preview_group_filter_migration(self, context: TenantContext, bot_uuid: str) -> dict[str, typing.Any]:
+        """Preview the effect of promoting the pipeline at-bot rule to a routing-layer filter.
+
+        Detects bots whose pipeline trigger still requires at-bot, and whose event
+        bindings do not already filter group messages by is_at_bot. Returns the
+        proposed binding changes plus a per-pipeline summary. Does not persist.
+        """
+        from ....platform.botmgr import RuntimeBot
+
+        bot = await self.get_bot(context, bot_uuid, include_secret=False)
+        if bot is None:
+            raise WorkspaceNotFoundError('Bot not found')
+
+        bindings = RuntimeBot._get_event_bindings_from_value(bot.get('event_bindings') or [])
+        pipeline_uuids = {
+            str(b.get('target_uuid')) for b in bindings if b.get('target_type') == 'pipeline' and b.get('target_uuid')
+        }
+
+        # Load each pipeline's trigger config to detect at-bot still enabled.
+        pipeline_flags: dict[str, dict[str, typing.Any]] = {}
+        for pipeline_uuid in pipeline_uuids:
+            pipeline = await self.ap.pipeline_service.get_pipeline(context, pipeline_uuid)
+            trigger = (pipeline or {}).get('config', {}).get('trigger', {}) if pipeline else {}
+            group_rules = trigger.get('group-respond-rules', {}) if isinstance(trigger, dict) else {}
+            pipeline_flags[pipeline_uuid] = {
+                'at_bot_enabled': bool(group_rules.get('at')) if isinstance(group_rules, dict) else False,
+                'prefix': group_rules.get('prefix', []) if isinstance(group_rules, dict) else [],
+                'regexp': group_rules.get('regexp', []) if isinstance(group_rules, dict) else [],
+                'random': group_rules.get('random', 0.0) if isinstance(group_rules, dict) else 0.0,
+            }
+
+        # A binding "already has the at-bot filter" if it filters chat_type=group
+        # AND requires is_at_bot=true (or non-false).
+        def _has_group_at_filter(binding: dict) -> bool:
+            filters = binding.get('filters') or []
+            if not isinstance(filters, list):
+                return False
+            has_group = any(
+                isinstance(f, dict)
+                and f.get('field') == 'chat_type'
+                and f.get('operator', 'eq') == 'eq'
+                and f.get('value') == 'group'
+                for f in filters
+            )
+            has_at = any(
+                isinstance(f, dict)
+                and f.get('field') == 'is_at_bot'
+                and f.get('operator', 'eq') == 'eq'
+                and f.get('value') is True
+                for f in filters
+            )
+            return has_group and has_at
+
+        needs_migration = [pipeline_uuid for pipeline_uuid, flags in pipeline_flags.items() if flags['at_bot_enabled']]
+        bindings_with_at_filter = [b for b in bindings if _has_group_at_filter(b)]
+        bindings_missing_at_filter = [
+            b
+            for b in bindings
+            if b.get('target_type') == 'pipeline'
+            and str(b.get('target_uuid') or '') in needs_migration
+            and not _has_group_at_filter(b)
+        ]
+
+        proposed_bindings: list[dict[str, typing.Any]] = []
+        for binding in bindings_missing_at_filter:
+            new_binding = json.loads(json.dumps(binding))
+            filters = list(new_binding.get('filters') or [])
+            if not any(
+                isinstance(f, dict) and f.get('field') == 'chat_type' and f.get('value') == 'group' for f in filters
+            ):
+                filters.append({'field': 'chat_type', 'operator': 'eq', 'value': 'group'})
+            if not any(isinstance(f, dict) and f.get('field') == 'is_at_bot' for f in filters):
+                filters.append({'field': 'is_at_bot', 'operator': 'eq', 'value': True})
+            new_binding['filters'] = filters
+            proposed_bindings.append(new_binding)
+
+        return {
+            'bot_uuid': bot_uuid,
+            'needs_migration': bool(bindings_missing_at_filter),
+            'pipelines_with_at_bot': sorted(needs_migration),
+            'pipeline_flags': pipeline_flags,
+            'bindings_already_filtered': [b.get('id') for b in bindings_with_at_filter],
+            'bindings_to_update': [
+                {
+                    'binding_id': b.get('id'),
+                    'event_pattern': b.get('event_pattern'),
+                    'target_type': b.get('target_type'),
+                    'target_uuid': b.get('target_uuid'),
+                    'current_filters': b.get('filters') or [],
+                    'proposed_filters': next(
+                        (p.get('filters') for p in proposed_bindings if p.get('id') == b.get('id')),
+                        b.get('filters') or [],
+                    ),
+                }
+                for b in bindings_missing_at_filter
+            ],
+        }
+
+    async def apply_group_filter_migration(
+        self,
+        context: TenantContext,
+        bot_uuid: str,
+        *,
+        disable_pipeline_at_bot: bool = True,
+    ) -> dict[str, typing.Any]:
+        """Apply the group filter migration previewed by preview_group_filter_migration.
+
+        Updates the bot's event_bindings to add is_at_bot=true filter on group
+        bindings whose pipeline still has at-bot enabled. Optionally disables the
+        pipeline's at-bot trigger rule so the filter is not checked twice. Existing
+        prefix/regexp/random rules remain untouched. Idempotent.
+        """
+        from ....platform.botmgr import RuntimeBot
+
+        preview = await self.preview_group_filter_migration(context, bot_uuid)
+        if not preview['needs_migration']:
+            return {'bot_uuid': bot_uuid, 'applied': False, 'reason': 'no_migration_needed'}
+
+        bot = await self.get_bot(context, bot_uuid, include_secret=False)
+        if bot is None:
+            raise WorkspaceNotFoundError('Bot not found')
+
+        bindings = RuntimeBot._get_event_bindings_from_value(bot.get('event_bindings') or [])
+        bindings_by_id = {b.get('id'): b for b in bindings if b.get('id')}
+        for item in preview['bindings_to_update']:
+            binding_id = item['binding_id']
+            existing = bindings_by_id.get(binding_id)
+            if existing is None:
+                continue
+            existing['filters'] = item['proposed_filters']
+
+        update_payload = {
+            'event_bindings': await self._normalize_event_bindings(context, bindings),
+        }
+        await self.update_bot(context, bot_uuid, update_payload)
+
+        updated_pipelines: list[str] = []
+        if disable_pipeline_at_bot:
+            for pipeline_uuid in preview['pipelines_with_at_bot']:
+                pipeline = await self.ap.pipeline_service.get_pipeline(context, pipeline_uuid, include_secret=True)
+                if not pipeline:
+                    continue
+                config = pipeline.get('config') or {}
+                trigger = config.get('trigger') or {}
+                group_rules = trigger.get('group-respond-rules') or {}
+                if not isinstance(group_rules, dict) or not group_rules.get('at'):
+                    continue
+                new_config = json.loads(json.dumps(config))
+                new_config.setdefault('trigger', {}).setdefault('group-respond-rules', {})['at'] = False
+                await self.ap.pipeline_service.update_pipeline(
+                    context,
+                    pipeline_uuid,
+                    {'config': new_config},
+                )
+                updated_pipelines.append(pipeline_uuid)
+
+        return {
+            'bot_uuid': bot_uuid,
+            'applied': True,
+            'updated_bindings': [item['binding_id'] for item in preview['bindings_to_update']],
+            'disabled_pipeline_at_bot': updated_pipelines,
         }
 
     async def send_http_bot_test_message(
@@ -943,7 +1301,10 @@ class BotService:
             raise WorkspaceNotFoundError('Bot not found')
         result = await self.ap.persistence_mgr.execute_async(
             scope_statement(
-                sqlalchemy.select(persistence_bot.BotAdmin).where(persistence_bot.BotAdmin.bot_uuid == bot_uuid),
+                sqlalchemy.select(persistence_bot.BotAdmin).where(
+                    persistence_bot.BotAdmin.bot_uuid == bot_uuid,
+                    persistence_bot.BotAdmin.launcher_type == 'person',
+                ),
                 persistence_bot.BotAdmin,
                 context,
             )
@@ -952,6 +1313,12 @@ class BotService:
 
     async def add_bot_admin(self, context: TenantContext, bot_uuid: str, launcher_type: str, launcher_id: str) -> int:
         from ....entity.persistence import bot as persistence_bot
+
+        if launcher_type != 'person':
+            raise ValueError('Bot admins must be person launchers')
+        launcher_id = launcher_id.strip()
+        if not launcher_id:
+            raise ValueError('launcher_id is required')
 
         workspace_uuid = require_workspace_uuid(context)
         if await self.get_bot(context, bot_uuid, include_secret=False) is None:

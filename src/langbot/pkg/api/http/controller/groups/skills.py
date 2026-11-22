@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import quart
 
-from langbot.pkg.cloud.entitlements import EntitlementFeatureUnavailableError
-from langbot_plugin.box.errors import BoxError
-
 from ...authz import Permission
 from ...context import RequestContext
 from .....operation_trace import service as settings_service
+from .....skill.repository import SkillRevisionConflictError, SkillRevisionNotFoundError
+from .....workspace.errors import WorkspaceNotFoundError
+from .....i18n import t
 from .. import group
 
 
@@ -17,6 +17,43 @@ class SkillsRouterGroup(group.RouterGroup):
 
     async def initialize(self) -> None:
         @self.route(
+            '/<skill_name>/package/preview',
+            methods=['POST'],
+            auth_type=group.AuthType.USER_TOKEN_OR_API_KEY,
+            permission=Permission.RESOURCE_VIEW,
+        )
+        @self.route(
+            '/<skill_name>/package',
+            methods=['POST'],
+            auth_type=group.AuthType.USER_TOKEN_OR_API_KEY,
+            permission=Permission.RESOURCE_MANAGE,
+        )
+        async def publish_package(skill_name: str, request_context: RequestContext) -> quart.Response:
+            upload = (await quart.request.files).get('file')
+            form = await quart.request.form
+            base_revision = str(form.get('base_revision', '')).strip()
+            if upload is None or not base_revision:
+                return self.http_status(400, -1, t('file and base_revision are required'))
+            # Bound bytes before decompression; the shared SDK bounds the tree.
+            content = upload.read(10 * 1024 * 1024 + 1)
+            if len(content) > 10 * 1024 * 1024:
+                return self.http_status(413, -1, t('Skill package exceeds the 10MB upload limit'))
+            method = (
+                self.ap.skill_service.preview_skill_package
+                if quart.request.path.endswith('/preview')
+                else self.ap.skill_service.publish_skill_package
+            )
+            try:
+                result = await method(request_context, skill_name, content, base_revision)
+                return self.success(data=result)
+            except SkillRevisionConflictError as exc:
+                return self.http_status(409, -1, str(exc))
+            except WorkspaceNotFoundError as exc:
+                return self.http_status(404, -1, str(exc))
+            except ValueError as exc:
+                return self.http_status(400, -1, str(exc))
+
+        @self.route(
             '',
             methods=['GET'],
             auth_type=group.AuthType.USER_TOKEN_OR_API_KEY,
@@ -25,12 +62,7 @@ class SkillsRouterGroup(group.RouterGroup):
         async def list_skills(request_context: RequestContext) -> quart.Response:
             try:
                 skills = await self.ap.skill_service.list_skills(request_context)
-            except EntitlementFeatureUnavailableError:
-                # Plans without managed sandbox support have no runnable skills.
-                # Treat that capability absence as an empty collection so the
-                # shared UI can render normally instead of surfacing a 500.
-                return self.success(data={'skills': []})
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
             return self.success(data={'skills': skills})
 
@@ -48,7 +80,7 @@ class SkillsRouterGroup(group.RouterGroup):
             try:
                 skill = await self.ap.skill_service.create_skill(request_context, data)
                 return self.success(data={'skill': skill})
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
 
         @self.route(
@@ -60,11 +92,39 @@ class SkillsRouterGroup(group.RouterGroup):
         async def get_skill(skill_name: str, request_context: RequestContext) -> quart.Response:
             try:
                 skill = await self.ap.skill_service.get_skill(request_context, skill_name)
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
             if not skill:
                 return self.http_status(404, -1, 'Skill not found')
             return self.success(data={'skill': skill})
+
+        @self.route(
+            '/<skill_name>/package',
+            methods=['GET'],
+            auth_type=group.AuthType.USER_TOKEN_OR_API_KEY,
+            permission=Permission.RESOURCE_VIEW,
+        )
+        async def get_skill_package(skill_name: str, request_context: RequestContext) -> quart.Response:
+            try:
+                package = await self.ap.skill_service.get_skill_package(
+                    request_context,
+                    skill_name,
+                    quart.request.args.get('revision'),
+                )
+            except SkillRevisionNotFoundError as exc:
+                return self.http_status(404, -1, str(exc))
+            except ValueError as exc:
+                return self.http_status(400, -1, str(exc))
+            return quart.Response(
+                package['content'],
+                mimetype='application/zip',
+                headers={
+                    'Content-Disposition': f'attachment; filename="{package["filename"]}"',
+                    'ETag': f'"{package["sha256"]}"',
+                    'X-LangBot-Skill-Revision': package['revision'],
+                    'Cache-Control': 'private, no-store',
+                },
+            )
 
         @self.route(
             '/<skill_name>',
@@ -80,11 +140,13 @@ class SkillsRouterGroup(group.RouterGroup):
                 data = await quart.request.json
                 try:
                     previous = await self.ap.skill_service.get_skill(request_context, skill_name)
-                except (ValueError, BoxError):
+                except ValueError:
                     previous = None
                 try:
                     skill = await self.ap.skill_service.update_skill(request_context, skill_name, data)
-                except (ValueError, BoxError) as exc:
+                except SkillRevisionConflictError as exc:
+                    return self.http_status(409, -1, str(exc))
+                except ValueError as exc:
                     return self.http_status(400, -1, str(exc))
 
                 changes = settings_service.changed_fields(
@@ -101,7 +163,7 @@ class SkillsRouterGroup(group.RouterGroup):
             try:
                 await self.ap.skill_service.delete_skill(request_context, skill_name)
                 return self.success()
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
 
         @self.route(
@@ -123,7 +185,9 @@ class SkillsRouterGroup(group.RouterGroup):
                     include_hidden=include_hidden,
                 )
                 return self.success(data=result)
-            except (ValueError, BoxError) as exc:
+            except SkillRevisionConflictError as exc:
+                return self.http_status(409, -1, str(exc))
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
 
         @self.route(
@@ -136,7 +200,7 @@ class SkillsRouterGroup(group.RouterGroup):
             try:
                 result = await self.ap.skill_service.read_skill_file(request_context, skill_name, path)
                 return self.success(data=result)
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
 
         @self.route(
@@ -148,13 +212,22 @@ class SkillsRouterGroup(group.RouterGroup):
         async def write_skill_file(skill_name: str, path: str, request_context: RequestContext) -> quart.Response:
             data = await quart.request.json
             content = data.get('content', '')
+            base_revision = str(data.get('base_revision', '') or '').strip() or None
             if content is None:
                 return self.http_status(400, -1, 'Missing required field: content')
 
             try:
-                result = await self.ap.skill_service.write_skill_file(request_context, skill_name, path, content)
+                result = await self.ap.skill_service.write_skill_file(
+                    request_context,
+                    skill_name,
+                    path,
+                    content,
+                    base_revision=base_revision,
+                )
                 return self.success(data=result)
-            except (ValueError, BoxError) as exc:
+            except SkillRevisionConflictError as exc:
+                return self.http_status(409, -1, str(exc))
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
 
         @self.route(
@@ -191,7 +264,7 @@ class SkillsRouterGroup(group.RouterGroup):
             try:
                 skill = await self.ap.skill_service.install_from_github(request_context, data)
                 return self.success(data={'skills': skill})
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
             except Exception:
                 raise
@@ -215,7 +288,7 @@ class SkillsRouterGroup(group.RouterGroup):
             try:
                 preview = await self.ap.skill_service.preview_install_from_github(request_context, data)
                 return self.success(data={'skills': preview})
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
             except Exception:
                 raise
@@ -243,7 +316,7 @@ class SkillsRouterGroup(group.RouterGroup):
                     source_paths=form.getlist('source_paths'),
                 )
                 return self.success(data={'skills': skill})
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
             except Exception:
                 raise
@@ -266,24 +339,7 @@ class SkillsRouterGroup(group.RouterGroup):
                     filename=file.filename or '',
                 )
                 return self.success(data={'skills': preview})
-            except (ValueError, BoxError) as exc:
+            except ValueError as exc:
                 return self.http_status(400, -1, str(exc))
             except Exception:
                 raise
-
-        @self.route(
-            '/scan',
-            methods=['GET'],
-            auth_type=group.AuthType.USER_TOKEN_OR_API_KEY,
-            permission=Permission.RESOURCE_MANAGE,
-        )
-        async def scan_skill_directory(request_context: RequestContext) -> quart.Response:
-            path = quart.request.args.get('path', '').strip()
-            if not path:
-                return self.http_status(400, -1, 'Missing required parameter: path')
-
-            try:
-                result = await self.ap.skill_service.scan_directory_async(request_context, path)
-                return self.success(data=result)
-            except (ValueError, BoxError) as exc:
-                return self.http_status(400, -1, str(exc))

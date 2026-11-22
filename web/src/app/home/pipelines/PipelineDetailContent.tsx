@@ -1,7 +1,7 @@
 import EntityLoadState from '@/components/EntityLoadState';
 import { isCurrentPipelineConfig } from './pipeline-config-safety';
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -17,8 +17,11 @@ import EntityBasicInfoDialog, {
 import EntityTitleEditButton from '@/app/home/components/entity-basic-info/EntityTitleEditButton';
 import { useSidebarData } from '@/app/home/components/home-sidebar/SidebarDataContext';
 import { useTranslation } from 'react-i18next';
-import { useCurrentWorkspace } from '@/app/infra/http';
+import { backendClient, useCurrentWorkspace } from '@/app/infra/http';
 import { httpClient } from '@/app/infra/http/HttpClient';
+import SensitiveToolsWarning, {
+  collectSensitiveTools,
+} from '@/app/home/components/sensitive-tools/SensitiveToolsWarning';
 import { Pipeline } from '@/app/infra/entities/api';
 
 export default function PipelineDetailContent({
@@ -51,10 +54,9 @@ export default function PipelineDetailContent({
     return () => setDetailEntityName(null);
   }, [id, isCreateMode, pipelines, setDetailEntityName, t]);
 
-  const [activeView, setActiveView] = useState<'workbench' | 'monitoring'>(
-    'workbench',
-  );
-  useEffect(() => setActiveView('workbench'), [id]);
+  const [searchParams] = useSearchParams();
+  const activeView =
+    searchParams.get('tab') === 'logs' ? 'monitoring' : 'workbench';
   const [isWebSocketConnected, setIsWebSocketConnected] = useState(false);
   const [formDirty, setFormDirty] = useState(false);
   const [formSaving, setFormSaving] = useState(false);
@@ -62,6 +64,7 @@ export default function PipelineDetailContent({
   const [loadFailed, setLoadFailed] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [pipelineDetails, setPipelineDetails] = useState<Pipeline | null>(null);
+  const [sensitiveTools, setSensitiveTools] = useState<string[]>([]);
   const pipelineFormRef = useRef<PipelineFormHandle>(null);
   const sidebarPipeline = pipelines.find((item) => item.id === id);
 
@@ -75,6 +78,30 @@ export default function PipelineDetailContent({
         if (!cancelled) setPipelineDetails(response.pipeline);
       })
       .catch(() => setLoadFailed(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [id, isCreateMode, loadAttempt]);
+
+  // The extensions tab reports live edits; this covers the other tabs.
+  useEffect(() => {
+    if (isCreateMode) return;
+    let cancelled = false;
+    setSensitiveTools([]);
+    backendClient
+      .getPipelineExtensions(id)
+      .then((data) => {
+        if (cancelled) return;
+        setSensitiveTools(
+          collectSensitiveTools(
+            data.available_platform_tools || [],
+            data.allowed_platform_tools || [],
+            data.available_workspace_operations || [],
+            data.workspace_operations || [],
+          ),
+        );
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -187,8 +214,13 @@ export default function PipelineDetailContent({
     <>
       <ProcessorDetailWorkbench
         key={id}
-        onViewChange={setActiveView}
         title={`${pipelineEmoji} ${pipelineName}`}
+        hints={
+          <SensitiveToolsWarning
+            tools={sensitiveTools}
+            settingsPage={t('pipelines.extensions.title')}
+          />
+        }
         titleAction={
           canManage ? (
             <EntityTitleEditButton onClick={() => setBasicInfoOpen(true)} />
@@ -218,6 +250,7 @@ export default function PipelineDetailContent({
               onCancel={() => navigate(routeBase)}
               onDirtyChange={setFormDirty}
               onSavingChange={setFormSaving}
+              onSensitiveToolsChange={setSensitiveTools}
             />
           </fieldset>
         }

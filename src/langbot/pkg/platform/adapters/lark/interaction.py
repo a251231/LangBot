@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from langbot.pkg.i18n import t
+
 import json
 import time
 import typing
@@ -61,8 +63,7 @@ def _field_form_elements(
     component_name = 'lbi_field_0'
     label = str(field.get('label') or field_id)
     placeholder = str(
-        field.get('placeholder')
-        or ('Select an option / 请选择' if field_type == 'select' else 'Enter a value / 请输入')
+        field.get('placeholder') or (t('Select an option') if field_type == 'select' else t('Enter a value'))
     )
     required = bool(field.get('required'))
     if field_type == 'select':
@@ -122,7 +123,7 @@ def _field_form_elements(
     submit_button = {
         'tag': 'button',
         'name': 'lbi_submit',
-        'text': {'tag': 'plain_text', 'content': 'Submit / 提交'},
+        'text': {'tag': 'plain_text', 'content': t('Submit')},
         'type': 'primary',
         'width': 'fill',
         'form_action_type': 'submit',
@@ -360,7 +361,7 @@ async def send_interaction(adapter: typing.Any, params: dict[str, typing.Any]) -
     reply_target = params.get('reply_target')
     callback_token = str(params.get('callback_token') or '')
     if not isinstance(request, dict) or not isinstance(reply_target, dict) or not callback_token:
-        raise ValueError('interaction.request requires request, reply_target, and callback_token')
+        raise ValueError('send_interaction requires request, reply_target, and callback_token')
 
     update_target = params.get('update_target')
     submitted_values = _stored_submitted_values(
@@ -382,7 +383,7 @@ async def send_interaction(adapter: typing.Any, params: dict[str, typing.Any]) -
     target_type = str(reply_target.get('target_type') or '')
     target_id = str(reply_target.get('target_id') or '')
     if target_type not in {'group', 'person'} or not target_id:
-        raise ValueError('interaction.request has an invalid reply target')
+        raise ValueError('send_interaction has an invalid reply target')
     card_request = (
         CreateCardRequest.builder()
         .request_body(
@@ -428,15 +429,22 @@ async def acknowledge_interaction(adapter: typing.Any, params: dict[str, typing.
     submission = params.get('submission')
     update_target = params.get('update_target')
     if not isinstance(request, dict) or not isinstance(submission, dict) or not isinstance(update_target, dict):
-        raise ValueError('interaction.acknowledge requires request, submission, and update_target')
-    submitted_values = [
-        *_stored_submitted_values(update_target.get('submitted_values')),
-        *_submission_display_values(request, submission),
-    ]
+        raise ValueError('update_interaction requires request, submission, and update_target')
+    state = params.get('state', 'submitted')
+    submitted_values = _stored_submitted_values(update_target.get('submitted_values'))
+    if state == 'submitted':
+        submitted_values.extend(_submission_display_values(request, submission))
+    else:
+        submitted_values.append({'label': '', 'value': 'Expired' if state == 'expired' else 'Cancelled'})
+    card = (
+        build_submitted_card(request, submission, _stored_submitted_values(update_target.get('submitted_values')))
+        if state == 'submitted'
+        else build_submitted_card(request, {}, submitted_values)
+    )
     return await _update_interaction_card(
         adapter,
         update_target,
-        build_submitted_card(request, submission, _stored_submitted_values(update_target.get('submitted_values'))),
+        card,
         submitted_values,
     )
 
@@ -506,7 +514,7 @@ def _event_from_parts(
     actor_id: typing.Any,
     chat_id: typing.Any,
     message_id: typing.Any,
-) -> platform_events.PlatformSpecificEvent | None:
+) -> platform_events.InteractionCallbackEvent | None:
     payload = _mapping(_action_attr(action, 'value'))
     callback_token = str(payload.get('lbi') or '')
     if not callback_token:
@@ -531,17 +539,21 @@ def _event_from_parts(
         data['option_ref'] = payload.get('o')
     if payload.get('fm'):
         data['values'] = _form_submission_values(action, payload)
-    return platform_events.PlatformSpecificEvent(
-        type='platform.specific',
+    return platform_events.InteractionCallbackEvent(
         adapter_name='lark-omni',
-        action='interaction.submitted',
-        data=data,
+        callback_token=callback_token,
+        values=data.get('values', {}),
+        actor_id=data['actor_id'],
+        target_type=target_type,
+        target_id=target_id,
+        callback_context={'message_id': str(message_id)} if message_id else {},
+        raw_submission=data,
         timestamp=time.time(),
         source_platform_object=raw,
     )
 
 
-def interaction_event_from_callback(event: typing.Any) -> platform_events.PlatformSpecificEvent | None:
+def interaction_event_from_callback(event: typing.Any) -> platform_events.InteractionCallbackEvent | None:
     action = getattr(getattr(event, 'event', None), 'action', None)
     operator = getattr(getattr(event, 'event', None), 'operator', None)
     context = getattr(getattr(event, 'event', None), 'context', None)
@@ -554,7 +566,7 @@ def interaction_event_from_callback(event: typing.Any) -> platform_events.Platfo
     )
 
 
-def interaction_event_from_webhook(data: dict[str, typing.Any]) -> platform_events.PlatformSpecificEvent | None:
+def interaction_event_from_webhook(data: dict[str, typing.Any]) -> platform_events.InteractionCallbackEvent | None:
     event = data.get('event') if isinstance(data.get('event'), dict) else {}
     action = event.get('action') if isinstance(event.get('action'), dict) else {}
     operator = event.get('operator') if isinstance(event.get('operator'), dict) else {}

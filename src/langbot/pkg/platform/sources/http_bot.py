@@ -22,7 +22,7 @@ Design notes:
   (``pkg/api/http/controller/groups/webhooks.py``) calls
   ``handle_unified_webhook`` on this adapter.
 
-See docs/platforms/http-bot.md for the full integration guide.
+See dev-docs/platforms/http-bot.md for the full integration guide.
 """
 
 from __future__ import annotations
@@ -89,16 +89,41 @@ class _SessionOutbound:
 
 
 class _SyncCollector:
-    """Collects reply parts for a /sync request and resolves when the turn ends."""
+    """Collects reply parts and signals receipt of a final message.
+
+    Streamed chunks carry the accumulated content of one reply so far, so a
+    chunk replaces the earlier snapshot of the same reply instead of being
+    appended; every distinct reply is kept once, in delivery order.
+    """
 
     def __init__(self) -> None:
-        self.parts: list = []
+        self.replies: list[list] = []
+        # stream key -> index in ``replies`` while that streamed reply is open
+        self.open_streams: dict[str, int] = {}
         self.done: asyncio.Event = asyncio.Event()
+
+    @property
+    def parts(self) -> list:
+        return [part for reply in self.replies for part in reply]
+
+    def add(self, parts: list, *, stream_key: str | None, closes_stream: bool) -> None:
+        if stream_key is None:
+            self.replies.append(list(parts))
+            return
+        index = self.open_streams.get(stream_key)
+        if index is None:
+            index = len(self.replies)
+            self.replies.append([])
+            self.open_streams[stream_key] = index
+        self.replies[index] = list(parts)
+        if closes_stream:
+            self.open_streams.pop(stream_key, None)
 
 
 class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
     """Standalone HTTP adapter (inbound webhook + outbound callbacks)."""
 
+    ap: typing.Any = pydantic.Field(default=None, exclude=True)
     bot_uuid: str = pydantic.Field(default='', exclude=True)
 
     listeners: dict[
@@ -161,6 +186,9 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
 
     async def is_muted(self, group_id: int) -> bool:
         return False
+
+    def get_supported_apis(self) -> list[str]:
+        return ['send_message', 'reply_message']
 
     async def is_stream_output_supported(self) -> bool:
         return True
@@ -374,7 +402,7 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         return quart.jsonify({'code': 0, 'msg': 'reset', 'data': {'session_id': session_id, 'removed': removed}}), 200
 
     async def _reset_session(self, launcher_type: str, launcher_id: str) -> bool:
-        """Drop the matching session so the next message starts a fresh conversation."""
+        """Reset scoped Runner state and history through the shared context service."""
         execution_context = getattr(self.logger, 'execution_context', None)
         if (
             execution_context is None
@@ -384,30 +412,13 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             or not self.bot_uuid
         ):
             raise RuntimeError('http_bot reset requires a trusted execution scope')
-        expected_prefix = (
-            execution_context.instance_uuid,
-            execution_context.workspace_uuid,
-            execution_context.placement_generation,
-            self.bot_uuid,
-            launcher_type,
-        )
-
-        sess_mgr = self.ap.sess_mgr
-        before = len(sess_mgr.session_list)
-        sess_mgr.session_list = [
-            s for s in sess_mgr.session_list if not self._matches_session_scope(s, expected_prefix, launcher_id)
-        ]
-        return len(sess_mgr.session_list) < before
-
-    @staticmethod
-    def _matches_session_scope(session, expected_prefix: tuple[str, str, int, str, str], launcher_id: str) -> bool:
-        session_key = getattr(session, '_langbot_session_key', None)
-        return (
-            isinstance(session_key, tuple)
-            and len(session_key) == 6
-            and session_key[:5] == expected_prefix
-            and str(session_key[5]) == launcher_id
-        )
+        try:
+            await self.ap.monitoring_service.reset_session_context(
+                execution_context, self.bot_uuid, f'{launcher_type}_{launcher_id}'
+            )
+        except LookupError:
+            return False
+        return True
 
     # -- outbound -------------------------------------------------------------
 
@@ -544,6 +555,8 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         message: platform_message.MessageChain,
         is_final: bool,
         stream: bool,
+        stream_key: str | None = None,
+        closes_stream: bool = False,
     ) -> dict:
         session_id = self._extract_session_id(message_source)
         reply_to = self._extract_reply_to(message_source)
@@ -562,7 +575,7 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         # If a /sync request is awaiting this session, collect instead of POSTing.
         collector = self.sync_waiters.get(session_id)
         if collector is not None:
-            collector.parts.extend(parts)
+            collector.add(parts, stream_key=stream_key if stream else None, closes_stream=closes_stream)
             if is_final:
                 collector.done.set()
             return payload
@@ -582,6 +595,12 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             'message': [c.model_dump() if hasattr(c, 'model_dump') else c.__dict__ for c in message],
             'timestamp': datetime.now().isoformat(),
         }
+        collector = self.sync_waiters.get(str(target_id))
+        if collector is not None:
+            collector.add(payload['message'], stream_key=None, closes_stream=False)
+            collector.done.set()
+            return payload
+
         await self._enqueue_callback(str(target_id), payload)
         return payload
 
@@ -602,7 +621,16 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         is_final: bool = False,
     ) -> dict:
         message_is_final = is_final and getattr(bot_message, 'tool_calls', None) is None
-        return await self._emit_reply(message_source, message, is_final=message_is_final, stream=True)
+        # Chunks of one reply share ``resp_message_id`` and each carries the
+        # reply's accumulated content, so /sync keeps only the latest snapshot.
+        return await self._emit_reply(
+            message_source,
+            message,
+            is_final=message_is_final,
+            stream=True,
+            stream_key=str(getattr(bot_message, 'resp_message_id', None) or ''),
+            closes_stream=is_final,
+        )
 
     # -- sync convenience mode ------------------------------------------------
 
@@ -612,6 +640,9 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         Lossy by design (drops streaming/ordering nuance); documented as such.
         Concurrency-safe: routing is via the per-session ``_sync_waiters``
         registry that ``_emit_reply`` consults, not by patching methods.
+        A final message can precede Agent output-file delivery, so collection
+        also waits for the inbound listener to finish. Legacy queued pipelines
+        may finish their listener before sending any reply.
         """
         if session_id in self.sync_waiters:
             return self._err('duplicate', 'a sync request is already in flight for this session')
@@ -622,12 +653,19 @@ class HttpBotAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         if listener_task is None:
             self.sync_waiters.pop(session_id, None)
             return self._err('overloaded', 'too many inbound messages are already being processed')
+
+        async def wait_for_turn():
+            await collector.done.wait()
+            await asyncio.shield(listener_task)
+
         try:
             timeout = int(self.config.get('callback_timeout', 15)) * 4
             try:
-                await asyncio.wait_for(collector.done.wait(), timeout=timeout)
+                await asyncio.wait_for(wait_for_turn(), timeout=timeout)
             except asyncio.TimeoutError:
                 await self.logger.warning(f'http_bot sync wait timed out for session {session_id}')
+            except Exception:
+                await self.logger.warning(f'http_bot sync listener failed for session {session_id}')
         finally:
             self.sync_waiters.pop(session_id, None)
             state = self.outbound_states.get(session_id)

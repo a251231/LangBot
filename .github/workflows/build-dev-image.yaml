@@ -1,8 +1,29 @@
 name: Build Dev Image
 
+# Tag churn control: every push used to publish a permanent
+# `rockchin/langbot:sha-<sha>` tag plus a branch-name tag, so ~265 feature,
+# agent, experiment and test branches had each accumulated dozens of Docker Hub
+# tags (678 live tags, 467 of them `sha-*`). Only `master` now builds on push;
+# any other branch can still be built through workflow_dispatch.
+#
+# Master pushes alone still added ~10 `sha-*` tags a day (LANG-417), so a push
+# now only moves the `master` tag. The immutable `sha-<sha>` tag that Cloud
+# promotion pins is opt-in: dispatch this workflow on the commit's branch with
+# `immutable_tag` checked (the default). Every run records the pushed index
+# digest in the job summary.
 on:
   push:
+    branches:
+      - master
+    paths-ignore:
+      - "plugins/**"
+      - ".github/workflows/plugins-*.yml"
   workflow_dispatch:
+    inputs:
+      immutable_tag:
+        description: "Also publish the immutable rockchin/langbot:sha-<commit> tag"
+        type: boolean
+        default: true
 
 jobs:
   build-dev-image:
@@ -28,8 +49,17 @@ jobs:
           set -euo pipefail
           branch_tag="${GITHUB_REF#refs/heads/}"
           branch_tag="${branch_tag//\//-}"
-          echo "branch_tag=${branch_tag}" >> "$GITHUB_OUTPUT"
-          echo "sha_tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          tags="${IMAGE_REPO}:${branch_tag}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${IMMUTABLE_TAG}" == "true" ]]; then
+            tags+=$'\n'"${IMAGE_REPO}:sha-${GITHUB_SHA}"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          IMMUTABLE_TAG: ${{ inputs.immutable_tag }}
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -37,7 +67,8 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and push immutable Core image
+      - name: Build and push Core image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -45,9 +76,21 @@ jobs:
           platforms: linux/arm64,linux/amd64
           build-args: |
             LANGBOT_BUILD_REVISION=${{ github.sha }}
-          tags: |
-            ${{ env.IMAGE_REPO }}:${{ steps.image.outputs.branch_tag }}
-            ${{ env.IMAGE_REPO }}:${{ steps.image.outputs.sha_tag }}
+          tags: ${{ steps.image.outputs.tags }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Record image digest
+        shell: bash
+        env:
+          TAGS: ${{ steps.image.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ${IMAGE_REPO}"
+            echo
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- digest: \`${IMAGE_REPO}@${DIGEST}\`"
+            while IFS= read -r tag; do echo "- tag: \`${tag}\`"; done <<< "${TAGS}"
+          } >> "$GITHUB_STEP_SUMMARY"

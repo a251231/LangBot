@@ -1,218 +1,156 @@
 # AGENTS.md
 
-本文件用于指导 Codex、Claude Code、GitHub Copilot 等代码代理在 LangBot 仓库内协作。除非用户明确要求其他语言，所有面向用户的沟通、分析、总结和技术说明都使用中文。`CLAUDE.md` 是指向本文件的符号链接；需要修改代理规则时编辑 `AGENTS.md`。
+除非用户明确要求其他语言，面向用户的沟通、分析、总结和技术说明均使用中文；代码注释与 docstring 保持英文。本 Fork 的上游同步与保留定制清单见 `docs/UPSTREAM_SYNC.md`。
 
-非平凡的后端、前端、运行时、插件、Box、MCP、持久化或跨仓库 SDK 变更前，先阅读 `ARCHITECTURE.md`。本文件是工作检查清单，`ARCHITECTURE.md` 是系统地图。
+This file guides code agents working in the LangBot main repository. `CLAUDE.md` is a symlink to this file; edit `AGENTS.md`.
 
-## 角色与协作方式
+Read `ARCHITECTURE.md` before non-trivial backend, frontend, runtime, plugin, Box, MCP, persistence, or SDK (`sdk/`) changes. This file is the working checklist; `ARCHITECTURE.md` is the system map.
 
-- 以资深全栈工程师、软件架构师、技术导师和技术伙伴的身份参与协作。
-- 先理解项目结构、业务目标、约束和已有实现，再给出方案或修改代码。
-- 优先用事实和可验证证据推理，避免猜接口、猜字段、猜业务。
-- 解释解决思路和取舍，帮助用户把方法迁移到类似场景。
-- 多方案并存时，说明适用场景、实施成本、维护成本和风险，再给出推荐方案。
-- 交流风格务实、清晰、耐心，优先解决实际问题，避免过度设计。
+## Repository Layout
 
-## 语言与文档规则
+This is a monorepo: Core, WebUI, public docs, the plugin SDK, official plugins and agent skills share one checkout but not one release.
 
-- 用户交流、分析报告、API 文档和技术文档优先使用中文。
-- 不要无故改动程序中的中文文本，避免引入编码或乱码问题。
-- LangBot 是全球化项目，代码注释、docstring、面向最终用户的产品文案和新增用户可见字符串需要考虑国际化；代码注释默认使用英文，除非上下文已经明确采用中文。
-- 修改前端或用户可见内容时，注意 i18n、兼容性和安全性。
+| Path | Contents | Notes |
+| --- | --- | --- |
+| `src/langbot/` | Core backend (Quart, `pkg/api`, `pkg/platform`, `pkg/pipeline`, `pkg/plugin`, ...) | Python `>=3.11,<4.0`, managed by `uv`. |
+| `web/` | WebUI: Vite + React Router 7 + shadcn/ui + Tailwind | `pnpm`; dev server `3000`, backend `5300`. |
+| `docs/` | **Public user/developer documentation**, published at https://langbot.app/docs/ | Fumapress, Node.js 24, `zh`/`en`/`ja` trees. Write for users and plugin authors; keep the three languages in step. |
+| `dev-docs/` | **Internal design notes, contracts, reviews and test reports** for maintainers and agents | Not published. `architecture/` (Application API, i18n, ...), `event-based-agents/` (standard events/platform APIs and per-adapter records), `review/`, OpenAPI snapshots. |
+| `sdk/` | Plugin SDK, `lbp` CLI, Plugin Runtime (`lbp rt`) and Box Runtime (`lbp box`), published to PyPI as `langbot-plugin` | Independent package (Python `>=3.10`, hatchling), own tests/CI (`sdk-*.yml`) and releases via `sdk/vX.Y.Z` tags. Core source installs use `sdk/` through `uv`; standalone Core PyPI packages retain the exact published dependency. See `sdk/AGENTS.md` and `sdk/RELEASING.md`. |
+| `plugins/` | Official plugins (`Runner/`, `KnowledgeEngine/`, `misc/`), indexed by `plugins/catalog.json` | Independent packages, CI and Marketplace releases; never bundled in Core artifacts. See `plugins/AGENTS.md`. |
+| `skills/` | Agent skills (`skills/skills/<name>/SKILL.md`) and the `lbs` QA harness | Single source of truth for LangBot agent skills. See `skills/AGENTS.md`. |
+| `tests/` | Core unit, integration, e2e and manual tests | |
+| `tools/` | Regression harness, contracts, profiles and fixtures | See `tools/README.md`. |
+| `scripts/` | Maintenance scripts, including catalog export and SDK code generation | |
+| `docker/`, `packaging/`, `examples/`, `res/` | Deployment manifests, distro packages, integration examples, static resources | |
 
-## 快速事实
+Choose `docs/` or `dev-docs/` by reader: anything a user or plugin author needs goes in `docs/`; design rationale, internal contracts and evidence go in `dev-docs/`. Do not duplicate content between them; link instead. The former `langbot-app/langbot-docs`, `langbot-app/langbot-plugins` and `langbot-app/langbot-plugin-sdk` repositories are archives: never edit or target them.
 
-- 后端：Python `>=3.11,<4.0`，依赖使用 `uv` 管理。
-- 前端：`web/` 是 Vite + React Router 7 + shadcn/ui + Tailwind，依赖使用 `pnpm` 管理。
-- 后端框架：Quart，经 Hypercorn 监听 `api.port`，默认 `5300`。
-- 前端开发服务：`web/` 默认端口 `3000`，通过 `VITE_API_BASE_URL` 指向后端。
-- Plugin、Box、runtime 契约位于兄弟仓库 `langbot-plugin-sdk`，本仓库通过 `pyproject.toml` 中的 `langbot-plugin` 版本固定。
+Related repository: [`langbot-cli`](https://github.com/langbot-app/langbot-cli) (`lbctl`, the Service API client).
 
-## 项目概览
+Other references: dev environment `docs/zh/develop/dev-config.mdx`, Plugin Runtime debugging `docs/zh/develop/plugin-runtime.mdx`, API-key auth `dev-docs/API_KEY_AUTH.md`, Box internals `dev-docs/review/box-architecture.md`.
 
-LangBot 是一个开源的 LLM 原生即时通讯机器人开发平台，目标是提供开箱即用的 IM 机器人开发体验，并支持 Agent、RAG、MCP、Box、Skill 等 LLM 应用能力。项目支持多种全球即时通讯平台，提供丰富 API，便于定制开发。
-
-主要目录：
-
-- `src/langbot`：项目主 Python 包。
-- `src/langbot/pkg`：后端核心包。
-- `src/langbot/pkg/platform`：消息平台适配、机器人管理、消息会话管理等。
-- `src/langbot/pkg/provider`：LLM provider、工具 provider、runner 等。
-- `src/langbot/pkg/pipeline`：pipeline、stage、query pool、监控辅助等。
-- `src/langbot/pkg/api`：HTTP API controller/service，以及 LangBot 自身 MCP server。
-- `src/langbot/pkg/plugin`：LangBot 与插件系统的桥接层。
-- `src/langbot/pkg/box`：Box 沙箱运行时服务。
-- `src/langbot/pkg/skill`：内置 Skill 管理。
-- `src/langbot/libs`：历史 SDK，例如 `qq_official_api`、`wecom_api` 等。
-- `src/langbot/templates`：配置、组件、嵌入组件等模板。
-- `web`：前端代码。
-- `skills`：LangBot agent skills 的仓库内单一事实来源。
-- `plugins`：本地插件目录。
-
-## 常用命令
-
-后端：
+## Essential Commands
 
 ```bash
 uv sync --dev
 uv run main.py
 uv run pre-commit install
+
+cd web && pnpm install && pnpm dev   # pnpm build / pnpm lint / pnpm test:e2e
+cd docs && npm ci && npm run dev
 ```
 
-前端：
-
-```bash
-cd web
-pnpm install
-pnpm dev
-pnpm build
-```
-
-常用测试：
+Focused tests (run the narrowest useful one first, in Linux to match CI; on Windows use Linux containers through `wslc` of WSL3):
 
 ```bash
 uv run pytest tests/unit_tests -q
 uv run pytest tests/integration -q
 uv run pytest tests/integration/persistence -q
 uv run pytest tests/manual/mcp_smoke.py
-
-cd web
-pnpm lint
-pnpm test:e2e
 ```
 
-优先运行最窄的有效测试；需要增强信心时再扩大验证范围。
+## Before-Merge Acceptance
 
-## 重要参考
+Agents must choose and run the existing acceptance paths that exercise the changed boundary before recommending merge. Start with the [test asset map and evidence checklist](dev-docs/CROSS_COMPONENT_TESTING.md#test-assets-for-developers-and-agents). PR unit/smoke checks alone do not establish cross-component behavior. The [cross-component test guide](dev-docs/CROSS_COMPONENT_TESTING.md) lists the commands and environment requirements:
 
-- 架构地图：`ARCHITECTURE.md`。
-- 开发环境文档：https://langbot.app/docs/zh/develop/dev-config。
-- Plugin runtime / CLI / SDK 调试：https://langbot.app/docs/zh/develop/plugin-runtime。
-- Service API CLI：独立仓库 `langbot-cli` 的 `lbctl` 管理运行中的工作区；与 SDK 的 `lbp` 分工独立。
-- 仓库内 `skills/` 是 LangBot Agent 技能的单一事实来源。
-- API Key 认证：`docs/API_KEY_AUTH.md`。
-- Box 深度说明：`docs/review/box-architecture.md` 及同目录相关文件。
-- SDK 仓库：修改共享实体、插件 API、action protocol、`lbp rt` 或 `lbp box` 时查看 `../langbot-plugin-sdk/`。
+- Shared SDK entities, APIs or Runtime protocol: Core with the in-tree SDK and representative official plugin consumers, retaining their declared SDK support and released-SDK checks.
+- File transfer, installation grants or Box routing: full HTTP → installed Plugin Runtime Runner → Box → HTTP file delivery, plus the affected real Box backend.
+- Skill/content persistence: PostgreSQL/MinIO publication and media contracts, restricted-role RLS, two Core processes with restart and cache removal.
 
-## 插件系统架构
+Select by changed behavior; do not mechanically run every backend. Missing environments, unrun cases and skip/xfail are unverified acceptance, not passes. Record the candidate SHA, SDK source/version, actual backend/service configuration (without secrets), commands, results and untested scope in the PR. Use the approved developer Linux environment; developer self-testing does not mean running on the agent's Mac. These are acceptance instructions, not changes to branch protection, required checks or branch freshness rules.
 
-LangBot 由 LLM 工具、命令、消息平台适配器、LLM requester 等内部组件组成。为满足扩展性和灵活性，项目实现了生产级插件系统。
+## SDK Work (`sdk/`)
 
-- 每个插件运行在独立进程中，由 Plugin Runtime 统一管理。
-- Runtime 支持 `stdio` 和 `websocket` 两种模式。
-- 用户直接启动 LangBot 且非容器环境时，通常使用 `stdio` 模式。
-- 容器或生产部署场景使用 `websocket` 模式。
-- 插件开发时，可使用 `lbp` 命令行工具启动插件，并通过 WebSocket 连接运行中的 Runtime 进行调试。
-
-插件 SDK、CLI、Runtime 和实体定义位于 [`langbot-plugin-sdk`](https://github.com/langbot-app/langbot-plugin-sdk)。
-
-## 跨仓库 SDK 工作
-
-当变更 LangBot 与 SDK 共享的契约时：
+Core declares `langbot-plugin==X` in package metadata and resolves it to the editable local `sdk/` source for `uv sync`. Checkouts, Docker, release ZIPs and fnOS carry this source, so coordinated Core/SDK changes do not require a prior SDK release. Standalone Core PyPI installs still resolve the published dependency. When changing SDK contracts (shared entities, plugin APIs, action protocol, `lbp rt`, `lbp box`), change `sdk/` and the Core bridge in the same PR and test them together:
 
 ```bash
-# 在 langbot-plugin-sdk 中，并使用 LangBot 的 .venv
-uv pip install .
-
-# 在 LangBot 中，保留本地安装的 SDK
-uv run --no-sync main.py
+uv sync --dev
+uv run main.py                                 # add --standalone-runtime / --standalone-box
+uv run lbp rt                                  # or: lbp box, for standalone debugging
+cd sdk && uv run pytest -q                     # SDK's own environment (Python >=3.10)
 ```
 
-独立 runtime 调试：
+CI mirrors this: Core jobs use the same local source, `sdk-tests.yml` tests the SDK alone, and the main Core job proves in-tree SDK provenance and retains the affected cross-component contracts. Official plugin checks preserve their independent released-SDK and candidate-SDK paths. Before publishing the standalone Core PyPI package, release the SDK (`sdk/vX.Y.Z` tag → PyPI), update the Core pin and pass `scripts/check_sdk_release_pin.py`. Docker/source deployments do not require that SDK publication. Never create a GitHub Release for the SDK. Details: `sdk/RELEASING.md`.
 
-```bash
-# 在 langbot-plugin-sdk 中
-uv run --no-sync lbp rt
-uv run --no-sync lbp box
+Config keys in `data/config.yaml` / `src/langbot/templates/config.yaml`: `plugin.runtime_ws_url` (Docker default `langbot_plugin_runtime:5400/control/ws`), `box.enabled` / `box.backend` / `box.runtime.endpoint` (Docker default `langbot_box:5410`), `api.global_api_key`.
 
-# 在 LangBot 中
-uv run --no-sync main.py --standalone-runtime
-uv run --no-sync main.py --standalone-box
-```
+## Change Rules
 
-需要重点核对的配置键：
+- New schema changes use Alembic under `src/langbot/pkg/persistence/alembic/versions/`. LangBot 4.x does not support upgrading 3.x databases.
+- Platform adapters only translate platform protocols; pipeline and business logic belong in `pkg/pipeline/` or services.
+- Conversation payload columns, including new ones, must use `MediaReferenceText` and persist image references only. See the [media persistence contract](ARCHITECTURE.md#persistence-and-configuration).
+- Interactive session lists use `SessionSummaryReader` to read only `monitoring_sessions`; `SessionSummaryWriter` maintains summaries in the source transaction. Historical initialization completes before writers start, never in requests or application background tasks. Follow the [conversation summary contract](ARCHITECTURE.md#conversation-summary-boundary) and keep `uv run pytest --required-suite session_summary` passing.
+- User-facing behavior changes update `docs/` (zh/en/ja) in the same pass; internal contract changes update the matching `dev-docs/` note.
+- Code comments and docstrings must be English. Commit message format: `<type>(<scope>): <subject>`.
+- Keep compatibility and security in mind; LangBot serves both self-hosted/community and toB deployments.
 
-- Plugin runtime：`plugin.runtime_ws_url`，Docker 默认主机 `langbot_plugin_runtime:5400/control/ws`。
-- Box runtime：`box.enabled`、`box.backend`、`box.runtime.endpoint`，Docker 默认主机 `langbot_box:5410`。
-- API/MCP auth：`api.global_api_key`。
+## Unified API (Workspace and Execution API)
 
-## 开发标准
+`src/langbot/pkg/api/application/` is the transport-independent business boundary. Design: [Application API foundation](dev-docs/architecture/application-api.md).
 
-- 保持简单，避免不必要的实体、抽象和复杂度。
-- 优先复用已有模块、接口和项目约定，不随意创造新协议或新入口。
-- 修改前先定位真实调用链、真实字段名、真实配置和真实数据形态。
-- 调整 `lbctl` 使用的 Service API 路由或能力时，同步检查 `langbot-cli` 仓库兼容性。
-- LangBot 4.x 数据库升级支持 4.x 迁移链；3.x 数据库需要独立迁移流程。
-- HTTP API 变更如果应被 agent 访问，必须同步更新 `src/langbot/pkg/api/mcp/server.py` 中对应 MCP tool，以及 `skills/` 下相关 skill。
-- 新增数据库 schema 变更使用 `src/langbot/pkg/persistence/alembic/versions/` 下的 Alembic 迁移；不要新增旧式 `dbmXXX` 迁移。
-- 新平台行为只在平台适配器里做平台翻译；pipeline/业务逻辑应放在 `pkg/pipeline/` 或 service 层。
-- 涉及权限、认证、外部 API、消息回调、插件运行时的变更时，必须评估安全和兼容性。
-- 涉及前端体验时，保持现有 shadcn 和 Tailwind 风格，注意响应式、可访问性和 i18n。
-- 代码改动保持小而聚焦；不要顺手重构无关模块。
+- **Workspace operations** (`ap.application_api`): an explicit, versioned catalog of operation IDs such as `pipeline.list`, each with permission, principals, side effects, streaming mode and input/output schemas. Service operations are allowlisted in `service_operations.py`; label, summary, risk (read/write/high) and exposure (`none` / `assistant` / `all`) live in `operation_docs.py`. A public service method is not an operation until it is listed.
+- **Execution operations** (`ExecutionAPI` in `execution.py`): the actions an installed plugin or a running Runner may call (models, RAG, tools, replies, `send_message`, `call_platform_api`, state, Box/files), bound to the trusted installation and run.
 
-## Runtime 常见坑
+When adding or changing a Workspace capability:
 
-- 本地 stdio Plugin Runtime 断开后不会自动重连；该路径断开时通常需要重启 LangBot。
-- `5400` / `5401` 上的孤儿 runtime 进程经常导致插件调试失败。
-- 本地安装 SDK 后使用 `uv run --no-sync`，否则 `uv` 可能恢复到 `pyproject.toml` 固定版本。
-- Box 显示“no backend”可能只是 Docker 正在运行但当前用户没有 Docker socket 权限。
-- 不要混淆 LangBot 连接的外部 MCP server（`pkg/provider/tools/loaders/mcp.py`）和 LangBot 自身暴露的 `/mcp` server（`pkg/api/mcp/`）。
+1. Implement it once in the service layer and register it as an operation; do not write per-consumer business logic. Workspace identity comes only from the trusted `RequestContext`, never from arguments.
+2. Decide and state in the PR how each consumer supports it:
+   - **HTTP** route and response mapping (`pkg/api/http/`);
+   - **MCP** tool in `pkg/api/mcp/server.py` plus the `langbot-mcp-ops` skill;
+   - **Workspace assistant** and LocalAgent tools, including default tool sets for new Agents/Pipelines;
+   - **Plugins**: exposure, principals, risk, wildcard eligibility, and the manifest permission a plugin must declare;
+   - **`lbctl`** compatibility in `langbot-cli`.
+   Existing HTTP/MCP entrypoints are still being migrated onto this boundary; do not add a second implementation beside it.
+3. If the plugin-visible catalog changed, regenerate the SDK typed proxy with `uv run python scripts/generate_plugin_workspace_api.py` (writes `sdk/src/langbot_plugin/api/proxies/workspace_domains.py`; `--check` detects drift) and ship it in an SDK release.
+4. Update `docs/*/plugin/dev/apis/workspace.mdx` and `permissions.mdx` when operations, risks or permissions change.
+5. Verify through every adopted transport: denied access, missing resources, invalid input, cancellation and secret handling.
 
-## 数据库迁移
+Plugin-/run-callable actions belong in the `ExecutionAPI` catalog; never add a side channel that bypasses installation grants, run binding or frozen run resources. Instance administration, login, public ingress, OAuth callbacks and Runtime handshakes stay outside the catalog.
 
-LangBot 使用 Alembic 管理数据库迁移，支持 SQLite 和 PostgreSQL。迁移文件位于：
+## Platform Adapters: Standard Events and APIs
 
-```text
-src/langbot/pkg/persistence/alembic/versions/
-```
+EBA adapters live in `src/langbot/pkg/platform/adapters/<platform>/`. `pkg/platform/sources/` holds the legacy single-file adapters and is **frozen**: do not update, fix or extend them, and never add new adapters there. New platforms and all adapter work go into `adapters/<platform>/` (port a platform that only exists in `sources/` instead of patching it). Standard definitions: `dev-docs/event-based-agents/01-event-system.md` (events) and `02-platform-api.md` (entities and APIs), implemented in the SDK under `langbot_plugin/api/entities/builtin/platform/`.
 
-如果修改了数据库实体定义，在项目根目录运行：
+- Align with the standard definitions first. Map native events to a standard event (`message.received`, `message.edited`, `group.member_joined`, `bot.muted`, ...) and native operations to a standard API (`send_message`, `reply_message`, `get_group_info`, ...) whenever the semantics match, even if the platform names or shapes differ. Use `platform.specific` events and `call_platform_api` actions only for capabilities with no standard equivalent.
+- Extend existing standard messages/APIs before inventing new ones (example: Slack threads ride on the standard message APIs).
+- Propose a new standard event/API only for a capability common across platforms. Change it as one unit: SDK entity/event, the support matrix in `01`/`02`, every affected adapter, `docs/*/plugin/dev/apis/platform.mdx`, and the ExecutionAPI/Workspace consumers that expose it.
+- `manifest.yaml` must match the implementation: `supported_events`, `supported_apis.required` / `optional`, and `platform_specific_apis`. Unimplemented optional APIs raise `NotSupportedError`; never silently no-op.
+- Record each adapter in `dev-docs/event-based-agents/adapters/<platform>.md` against `acceptance-checklist.md`. Workflow: the `langbot-eba-adapter-dev` skill.
 
-```bash
-uv run python -m langbot.pkg.persistence.alembic_runner autogenerate "description of your change"
-```
+## Plugin Development
 
-该命令要求 `data/config.yaml` 存在。生成脚本后必须人工 review；如需数据迁移，例如修改 JSON 字段内容，需要手动补充迁移代码。迁移会在 LangBot 启动时自动执行。
+- SDK, `lbp` CLI and Plugin Runtime: `sdk/` (package `langbot-plugin`). Author docs: `docs/en/plugin/dev/` (`basic-info`, `permissions`, `components/*` for EventListener, Command, Tool, Runner, KnowledgeEngine, KnowledgeRetriever, Parser, Page, and `apis/*` for common, messages, platform, workspace, agent-run, llm-requests, pipeline-events).
+- API catalogs: plugins call Workspace operations through `self.plugin.workspace.<domain>.<op>()` (runners: `ctx.api.workspace`), limited to operations declared in `spec.permissions` and granted by a member. `self.plugin.workspace.list()` returns the granted catalog at runtime; the full catalogs come from `ApplicationAPI.operation_catalog()` and `scripts/export_execution_catalog.py`. Runners expose only `ctx.resources.workspace_operations` to models.
+- Reference implementations: `plugins/` (start from `plugins/catalog.json`; `misc/HelloPlugin` is the minimal example, `Runner/LocalAgent` the full Runner).
+- Workflow and pitfalls: the `langbot-plugin-dev` skill. Release rules: `plugins/RELEASING.md`.
 
-## MCP 与外部工具使用规则
+## Backend Message Language
 
-默认离线优先。只有在需要最新信息、官方文档、飞书资源、外部 API 或用户明确要求时才调用外部服务。调用外部工具时保持最小必要、可追溯和安全。
+- LangBot-owned errors, notices and default replies use the owning Workspace's `message_language` (default `en_US`), independent of WebUI language, resolved from a trusted Workspace/bot context and isolated per request/task/callback.
+- Use `pkg/i18n` `t()` with stable English templates and named parameters; add the key and placeholders to all eight catalogs (`en_US`, `zh_Hans`, `zh_Hant`, `ja_JP`, `es_ES`, `ru_RU`, `th_TH`, `vi_VN`). Configurable Pipeline notices go through `pipeline_notice()`.
+- Never translate raw provider/plugin diagnostics, protocol values or machine-readable codes, and never use substring replacement. China-only adapters and field validation diagnostics are exempt.
+- Details and tests: [Backend message language](dev-docs/architecture/backend-i18n.md).
 
-- Sequential Thinking：用于复杂任务拆解、方案评估和执行计划。
-- Web 搜索：用于最新网页信息、官方链接、新闻和公告，优先官方来源和权威来源。
-- Context7：用于 SDK、API、框架官方文档查询，先解析库 ID，再聚焦 topic 获取文档。
-- Serena 或语义检索：用于大型代码库中的符号检索、引用分析和精确重构。
-- 飞书 / Lark：操作飞书文档、Wiki、多维表格、电子表格等资源应优先使用对应 `lark-*` 技能或 `lark-cli`；写入、删除、权限变更等高风险操作前必须确认用户意图。
+## Runtime Pitfalls
 
-## 提交规范
+- Local stdio Plugin Runtime disconnects do not auto-reconnect; restart LangBot if that path breaks.
+- Orphan runtime processes on `5400`/`5401` commonly break plugin debugging.
+- Standard root `uv sync` and `uv run` use `sdk/`. Use isolated environments for published-SDK compatibility checks.
+- A false Box "no backend" often means Docker is running but the current user lacks Docker socket permission.
+- Do not confuse external MCP servers LangBot connects to (`pkg/provider/tools/loaders/mcp.py`) with LangBot's own `/mcp` server (`pkg/api/mcp/`).
 
-如果用户要求提交 commit，提交信息遵循：
+## Principles
 
-```text
-<type>(<scope>): <subject>
-```
+- Keep it simple, stupid.
+- Entities should not be multiplied unnecessarily.
+- 八荣八耻
 
-例如 `feat(api): add webhook token rotation`、`fix(plugin): validate config save errors`。
-
-## 项目分析检查清单
-
-接手任务时优先确认：
-
-- 项目结构、技术栈和运行方式。
-- 关键模块、核心数据模型和主要业务流程。
-- 依赖关系、配置文件、环境变量和外部服务。
-- 代码质量、测试覆盖、异常处理和日志。
-- 性能瓶颈、分页/批量处理、缓存策略和并发风险。
-- 认证授权、输入校验、数据安全和审计追溯。
-- 可扩展性、模块边界和向后兼容性。
-
-## 八荣八耻
-
-以瞎猜接口为耻，以认真查询为荣。  
-以模糊执行为耻，以寻求确认为荣。  
-以臆想业务为耻，以人类确认为荣。  
-以创造接口为耻，以复用现有为荣。  
-以跳过验证为耻，以主动测试为荣。  
-以破坏架构为耻，以遵循规范为荣。  
-以假装理解为耻，以诚实无知为荣。  
-以盲目修改为耻，以谨慎重构为荣。
+    以瞎猜接口为耻，以认真查询为荣。
+    以模糊执行为耻，以寻求确认为荣。
+    以臆想业务为耻，以人类确认为荣。
+    以创造接口为耻，以复用现有为荣。
+    以跳过验证为耻，以主动测试为荣。
+    以破坏架构为耻，以遵循规范为荣。
+    以假装理解为耻，以诚实无知为荣。
+    以盲目修改为耻，以谨慎重构为荣。

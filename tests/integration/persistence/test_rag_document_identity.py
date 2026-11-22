@@ -16,6 +16,9 @@ from alembic.script import ScriptDirectory
 
 from langbot.pkg.api.http.context import ExecutionContext
 from langbot.pkg.entity.persistence.base import Base
+from langbot.pkg.entity.persistence.artifact import Artifact
+from langbot.pkg.entity.persistence.content import ContentObject
+from langbot.pkg.entity.persistence.skill import SkillVersion
 from langbot.pkg.entity.persistence.pipeline import LegacyPipeline
 from langbot.pkg.entity.persistence.rag import File, KnowledgeBase
 from langbot.pkg.entity.persistence.user import User
@@ -54,7 +57,7 @@ DOCUMENT_IDENTITY_REVISION = '0025_rag_document_identity'
 CONTEXT = ExecutionContext(instance_uuid='instance-a', workspace_uuid='workspace-a', placement_generation=5)
 
 
-@pytest_asyncio.fixture(params=['sqlite', 'postgres'])
+@pytest_asyncio.fixture(params=['sqlite', pytest.param('postgres', marks=pytest.mark.postgres)])
 async def database(request, tmp_path):
     admin = None
     schema = 'ke_identity_' + uuid.uuid4().hex
@@ -111,7 +114,11 @@ async def create_schema(engine, *, legacy=False):
                 )
             )
         else:
-            await conn.run_sync(lambda sync: File.__table__.create(sync))
+            await conn.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync, tables=[ContentObject.__table__, SkillVersion.__table__, Artifact.__table__, File.__table__]
+                )
+            )
         for workspace in ('workspace-a', 'workspace-b'):
             await conn.execute(
                 sa.insert(Workspace).values(
@@ -183,6 +190,7 @@ async def read_file_row(runtime, file_id='host-id'):
 @pytest.mark.parametrize(
     'engine_id', ['dify-upstream', 'fastgpt-collection', 'ragflow-upstream', 'host-id', ' opaque ID ']
 )
+@pytest.mark.contract('rag_identity')
 async def test_ingest_persists_exact_engine_identity_and_restart_delete(runtime, engine_id):
     file = await seed(runtime)
     runtime.ap.plugin_connector.call_rag_ingest.return_value['document_id'] = engine_id

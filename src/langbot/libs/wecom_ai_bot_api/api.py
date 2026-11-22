@@ -415,6 +415,16 @@ def _bytes_to_data_uri(data: bytes) -> str:
         mime_type = 'application/pdf'
     elif data[:4] == b'PK\x03\x04':
         mime_type = 'application/zip'
+    elif data.startswith(b'#!AMR'):
+        mime_type = 'audio/amr'
+    elif data.startswith((b'#!SILK_V3', b'\x02#!SILK_V3')):
+        mime_type = 'audio/silk'
+    elif data.startswith(b'RIFF') and len(data) >= 12 and data[8:12] == b'WAVE':
+        mime_type = 'audio/wav'
+    elif data.startswith(b'ID3') or (len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        mime_type = 'audio/mpeg'
+    elif data.startswith(b'OggS'):
+        mime_type = 'audio/ogg'
     else:
         mime_type = 'application/octet-stream'
 
@@ -508,6 +518,29 @@ async def parse_wecom_bot_message(
             return await asyncio.to_thread(_bytes_to_data_uri, data)
         return None
 
+    async def _safe_download_voice(url: str, per_msg_aeskey: str = '') -> Tuple[Optional[str], Optional[int]]:
+        """Download, decrypt, and transcode voice message to MP3 data URI for universal browser playback."""
+        data, _filename = await _safe_download(url, per_msg_aeskey)
+        if not data:
+            return None, None
+        from langbot.pkg.utils import audio as audio_utils
+
+        fmt = audio_utils.detect_audio_format(data)
+        duration = int(round(audio_utils.estimate_audio_duration(data, fmt))) if data else None
+
+        # Transcode AMR / SILK to MP3 so web browsers and media players can decode directly
+        if fmt in ('amr', 'silk') and audio_utils.is_ffmpeg_available():
+            try:
+                mp3_bytes = await audio_utils.transcode_audio(data, 'mp3', fmt)
+                b64 = base64.b64encode(mp3_bytes).decode('utf-8')
+                return f'data:audio/mpeg;base64,{b64}', duration
+            except Exception as exc:
+                await logger.warning(f'Failed to transcode {fmt} voice to MP3: {exc}')
+
+        mime = 'audio/mpeg' if fmt == 'mp3' else ('audio/wav' if fmt == 'wav' else f'audio/{fmt}')
+        b64 = base64.b64encode(data).decode('utf-8')
+        return f'data:{mime};base64,{b64}', duration
+
     if msg_type == 'text':
         message_data['content'] = msg_json.get('text', {}).get('content')
     elif msg_type == 'markdown':
@@ -534,10 +567,12 @@ async def parse_wecom_bot_message(
         }
         if voice_info.get('content'):
             message_data['content'] = voice_info.get('content')
-        # if (message_data['voice'].get('filesize') or 0) <= max_inline_file_size:
-        #     voice_base64 = await _safe_download_as_data_uri(download_url, per_msg_aeskey)
-        #     if voice_base64:
-        #         message_data['voice']['base64'] = voice_base64
+        if (message_data['voice'].get('filesize') or 0) <= max_inline_file_size:
+            voice_base64, duration = await _safe_download_voice(download_url, per_msg_aeskey)
+            if voice_base64:
+                message_data['voice']['base64'] = voice_base64
+                if duration:
+                    message_data['voice']['length'] = duration
     elif msg_type == 'video':
         video_info = msg_json.get('video', {}) or {}
         download_url = video_info.get('url')
@@ -638,9 +673,11 @@ async def parse_wecom_bot_message(
                 if voice_info.get('content'):
                     texts.append(voice_info.get('content'))
                 if (voice_data.get('filesize') or 0) <= max_inline_file_size:
-                    voice_base64 = await _safe_download_as_data_uri(download_url, item_aeskey)
+                    voice_base64, duration = await _safe_download_voice(download_url, item_aeskey)
                     if voice_base64:
                         voice_data['base64'] = voice_base64
+                        if duration:
+                            voice_data['length'] = duration
                 voices.append(voice_data)
             elif item_type == 'video':
                 video_info = item.get('video', {}) or {}
@@ -740,6 +777,12 @@ async def parse_wecom_bot_message(
             }
             if voice_info.get('content'):
                 quote_data['content'] = voice_info.get('content')
+            if (voice_data.get('filesize') or 0) <= max_inline_file_size:
+                voice_base64, duration = await _safe_download_voice(download_url, item_aeskey)
+                if voice_base64:
+                    voice_data['base64'] = voice_base64
+                    if duration:
+                        voice_data['length'] = duration
             # Same as private chat: append aeskey to url for plugin processing
             if download_url and item_aeskey:
                 voice_data['url'] = download_url + f'?aeskey={item_aeskey}'
@@ -1658,6 +1701,8 @@ class WecomBotClient:
         self._card_action_callback: Optional[Callable] = None
         self._stream_last_content: dict[str, str] = {}
         self._dispatch_tasks: set[asyncio.Task] = set()
+        self._welcome_replies: dict[str, asyncio.Future] = {}
+        self._handled_form_tasks: dict[str, float] = {}
         # Optional `source` block injected into every interactive template_card
         # the client builds. Set via `set_card_source` from the adapter after
         # reading config. Format: {icon_url, desc, desc_color}.
@@ -1764,7 +1809,12 @@ class WecomBotClient:
             event: 由企业微信消息转换的内部事件对象。
         """
         try:
-            await self._handle_message(event)
+            if event.msgtype == 'event':
+                kind = 'template_card_event' if extract_wecom_event_type(event) == 'template_card_event' else 'event'
+                for handler in self._message_handlers.get(kind, []):
+                    await handler(event)
+            else:
+                await self._handle_message(event)
         except Exception:
             await self.logger.error(traceback.format_exc())
 
@@ -1996,10 +2046,47 @@ class WecomBotClient:
         if event_type == 'template_card_event':
             return await self._handle_template_card_event(msg_json, nonce)
 
+        if event_type == 'enter_chat':
+            return await self._handle_enter_chat(msg_json, nonce)
+
+        if msg_json.get('msgtype') == 'event':
+            event = wecombotevent.WecomBotEvent({**msg_json, 'type': msg_json.get('chattype', 'single')})
+            if not self._start_dispatch_task(event):
+                return Response('Busy', status=503)
+            return await self._encrypt_and_reply({}, nonce)
+
         if msg_json.get('msgtype') == 'stream':
             return await self._handle_post_followup_response(msg_json, nonce)
 
         return await self._handle_post_initial_response(msg_json, nonce)
+
+    async def reply_welcome(self, message_id: str, content: str) -> dict:
+        """Complete the pending HTTP welcome response before its deadline."""
+        future = self._welcome_replies.get(message_id)
+        if future is None or future.done():
+            raise ValueError('WeCom welcome reply window has expired or was already used')
+        future.set_result({'msgtype': 'text', 'text': {'content': content}})
+        return {'ok': True}
+
+    async def _handle_enter_chat(self, msg_json: dict[str, Any], nonce: str):
+        message_id = str(msg_json.get('msgid') or '')
+        if not message_id or message_id in self._welcome_replies:
+            return await self._encrypt_and_reply({}, nonce)
+        future = asyncio.get_running_loop().create_future()
+        self._welcome_replies[message_id] = future
+        try:
+            event = wecombotevent.WecomBotEvent({**msg_json, 'type': msg_json.get('chattype', 'single')})
+            if not self._start_dispatch_task(event):
+                return Response('Busy', status=503)
+            try:
+                reply = await asyncio.wait_for(asyncio.shield(future), timeout=4.5)
+            except asyncio.TimeoutError:
+                reply = {}
+            return await self._encrypt_and_reply(reply, nonce)
+        finally:
+            self._welcome_replies.pop(message_id, None)
+            if not future.done():
+                future.cancel()
 
     async def _handle_template_card_event(self, msg_json: dict[str, Any], nonce: str) -> tuple[Response, int]:
         """Handle a button click on a button_interaction template_card.
@@ -2014,10 +2101,29 @@ class WecomBotClient:
 
             await self.logger.info(f'收到按钮点击: task_id={task_id} event_key={event_key!r} card_type={card_type}')
 
+            now = time.monotonic()
+            self._handled_form_tasks = {
+                key: seen for key, seen in self._handled_form_tasks.items() if now - seen < 3600
+            }
+            if task_id in self._handled_form_tasks:
+                return await self._encrypt_and_reply({}, nonce)
             session = self.stream_sessions.get_session_by_task_id(task_id)
             if session is None:
-                await self.logger.warning(f'未找到 task_id={task_id} 对应的 session，按钮点击被丢弃')
+                if not task_id.startswith('dify-'):
+                    event = wecombotevent.WecomBotEvent(
+                        {
+                            **msg_json,
+                            'type': msg_json.get('chattype', 'single'),
+                            'msgtype': 'event',
+                            'eventtype': 'template_card_event',
+                        }
+                    )
+                    if not self._start_dispatch_task(event):
+                        return Response('Busy', status=503)
             else:
+                self._handled_form_tasks[task_id] = now
+                if len(self._handled_form_tasks) > 2048:
+                    self._handled_form_tasks.pop(next(iter(self._handled_form_tasks)))
                 if self._card_action_callback is not None:
                     try:
                         await self._card_action_callback(session, event_key, task_id, msg_json)
@@ -2123,7 +2229,7 @@ class WecomBotClient:
 
         Args:
             msg_id: 原始企业微信消息 ID。
-            content: 模型产生的片段内容。
+            content: 流水线传入的累计正文快照。
             is_final: 是否为最终片段。
 
         Returns:
@@ -2138,12 +2244,8 @@ class WecomBotClient:
             return False
 
         previous_content = self._stream_last_content.get(msg_id, '')
-        if previous_content and content.startswith(previous_content):
-            next_content = content
-        elif previous_content and not content:
-            next_content = previous_content
-        else:
-            next_content = previous_content + content if previous_content else content
+        # Pipeline delivery provides a snapshot, not a provider delta.
+        next_content = content or previous_content
         if len(next_content) > _MAX_STREAM_CONTENT_CHARS:
             next_content = next_content[-_MAX_STREAM_CONTENT_CHARS:]
 

@@ -51,27 +51,36 @@ def _do_upgrade(connection: Connection, revision: str = 'head') -> None:
 
 def _normalize_legacy_revisions(connection: Connection) -> None:
     """Map renamed migration ids to their current ids before Alembic resolves the graph."""
-    if not sa.inspect(connection).has_table('alembic_version'):
-        return
+    started_tx = not connection.in_transaction()
+    try:
+        if not sa.inspect(connection).has_table('alembic_version'):
+            return
 
-    revisions = {row[0] for row in connection.execute(sa.text('SELECT version_num FROM alembic_version')).fetchall()}
-    for legacy_revision, current_revision in _LEGACY_REVISION_ALIASES.items():
-        if legacy_revision not in revisions:
-            continue
+        revisions = {
+            row[0] for row in connection.execute(sa.text('SELECT version_num FROM alembic_version')).fetchall()
+        }
+        for legacy_revision, current_revision in _LEGACY_REVISION_ALIASES.items():
+            if legacy_revision not in revisions:
+                continue
 
-        if current_revision in revisions:
-            connection.execute(
-                sa.text('DELETE FROM alembic_version WHERE version_num = :revision'),
-                {'revision': legacy_revision},
-            )
-        else:
-            connection.execute(
-                sa.text('UPDATE alembic_version SET version_num = :current WHERE version_num = :legacy'),
-                {'current': current_revision, 'legacy': legacy_revision},
-            )
+            if current_revision in revisions:
+                connection.execute(
+                    sa.text('DELETE FROM alembic_version WHERE version_num = :revision'),
+                    {'revision': legacy_revision},
+                )
+            else:
+                connection.execute(
+                    sa.text('UPDATE alembic_version SET version_num = :current WHERE version_num = :legacy'),
+                    {'current': current_revision, 'legacy': legacy_revision},
+                )
 
-        revisions.discard(legacy_revision)
-        revisions.add(current_revision)
+            revisions.discard(legacy_revision)
+            revisions.add(current_revision)
+    finally:
+        # Leave the connection outside an open transaction so Alembic manages
+        # its own transaction lifecycle (required by autocommit_block migrations).
+        if started_tx and connection.in_transaction():
+            connection.commit()
 
 
 def _do_stamp(connection: Connection, revision: str = 'head') -> None:
@@ -100,6 +109,13 @@ def get_alembic_head() -> str:
     if head is None:
         raise RuntimeError('Alembic has no migration head')
     return head
+
+
+def pending_revisions(current: str, target: str) -> set[str]:
+    """Resolve migration boundaries without relying on revision name ordering."""
+    cfg = Config()
+    cfg.set_main_option('script_location', _ALEMBIC_DIR)
+    return {step.revision for step in ScriptDirectory.from_config(cfg).iterate_revisions(target, current)}
 
 
 def _do_autogenerate(connection: Connection, message: str = 'auto migration') -> None:

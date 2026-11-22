@@ -10,7 +10,7 @@ from langbot.libs.official_account_api.api import OAClient, OAClientForLongerRes
 from langbot.libs.official_account_api.oaevent import OAEvent
 from langbot.pkg.platform.adapters.officialaccount.api_impl import OfficialAccountAPIMixin
 from langbot.pkg.platform.adapters.officialaccount.event_converter import OfficialAccountEventConverter
-from langbot.pkg.platform.adapters.officialaccount.errors import NotSupportedError
+from langbot.pkg.platform.adapters.officialaccount.errors import NotSupportedError, OfficialAccountSendError
 from langbot.pkg.platform.adapters.officialaccount.message_converter import OfficialAccountMessageConverter
 from langbot.pkg.platform.adapters.officialaccount.platform_api import PLATFORM_API_MAP
 import langbot_plugin.api.definition.abstract.platform.adapter as abstract_platform_adapter
@@ -56,13 +56,14 @@ class OfficialAccountAdapter(OfficialAccountAPIMixin, abstract_platform_adapter.
         }
         if mode == 'drop':
             bot = OAClient(**common_kwargs)
-        elif mode == 'passive':
+        elif mode in ('passive', 'auto'):
             bot = OAClientForLongerResponse(
                 **common_kwargs,
                 LoadingMessage=config.get('LoadingMessage', ''),
+                customer_service=mode == 'auto',
             )
         else:
-            raise KeyError('OfficialAccount Mode must be "drop" or "passive"')
+            raise KeyError('OfficialAccount Mode must be "drop", "passive" or "auto"')
 
         super().__init__(
             config=config,
@@ -86,13 +87,16 @@ class OfficialAccountAdapter(OfficialAccountAPIMixin, abstract_platform_adapter.
         ]
 
     def get_supported_apis(self) -> list[str]:
-        return [
+        apis = [
             'reply_message',
             'get_message',
             'get_user_info',
             'get_friend_list',
             'call_platform_api',
         ]
+        if self.config['Mode'] == 'auto':
+            apis.append('send_message')
+        return apis
 
     async def send_message(
         self,
@@ -100,7 +104,24 @@ class OfficialAccountAdapter(OfficialAccountAPIMixin, abstract_platform_adapter.
         target_id: str,
         message: platform_message.MessageChain,
     ) -> platform_events.MessageResult:
-        raise NotSupportedError('send_message:official_account_requires_inbound_webhook_reply')
+        if self.config['Mode'] != 'auto':
+            raise NotSupportedError(
+                'send_message: switch OfficialAccount Mode to auto to enable customer service sends'
+            )
+        if target_type not in ('person', 'friend', 'private'):
+            raise NotSupportedError('send_message: OfficialAccount only supports person, friend or private targets')
+        if any(not isinstance(component, platform_message.Plain) for component in message):
+            raise ValueError('OfficialAccount send_message only supports Plain text components')
+        content = ''.join(component.text for component in message)
+        if not content.strip():
+            raise ValueError('OfficialAccount send_message requires non-empty text')
+        try:
+            errcode = await self.bot.customer_service.send(target_id, content)
+        except Exception as exc:
+            raise RuntimeError(f'OfficialAccount customer message failed ({type(exc).__name__})') from None
+        if errcode != 0:
+            raise OfficialAccountSendError(errcode)
+        return platform_events.MessageResult(raw={'errcode': errcode})
 
     async def reply_message(
         self,
@@ -112,11 +133,12 @@ class OfficialAccountAdapter(OfficialAccountAPIMixin, abstract_platform_adapter.
         if not isinstance(source, OAEvent):
             raise ValueError('OfficialAccount reply_message requires an OAEvent source object')
         content = await OfficialAccountMessageConverter.yiri2target(message)
-        if self.config.get('Mode') == 'passive':
-            await self.bot.set_message(source.user_id, source.message_id, content)
+        if self.config.get('Mode') in ('passive', 'auto'):
+            queued = await self.bot.set_message(source.user_id, source.message_id, content)
         else:
             await self.bot.set_message(source.message_id, content)
-        return platform_events.MessageResult(message_id=source.message_id, raw={'queued': True})
+            queued = True
+        return platform_events.MessageResult(message_id=source.message_id, raw={'queued': queued})
 
     async def call_platform_api(self, action: str, params: dict = {}) -> dict:
         handler = PLATFORM_API_MAP.get(action)

@@ -6,6 +6,7 @@ on:
 
 jobs:
   publish-docker-image:
+    if: ${{ !startsWith(github.event.release.tag_name, 'plugins/') && startsWith(github.event.release.tag_name, 'v') }}
     runs-on: ubuntu-latest
     name: Build image
     env:
@@ -15,7 +16,6 @@ jobs:
         uses: actions/checkout@v2
         with:
           persist-credentials: false
-
       - name: Prepare GITHUB_REF
         run: |
           if [ -z "$GITHUB_REF" ]; then
@@ -40,16 +40,42 @@ jobs:
       - name: Create Buildx
         run: docker buildx create --name mybuilder --use
 
+      # Every release publishes the default image plus one variant per optional
+      # vector-store extra, all from the same Dockerfile:
+      #   ${IMAGE_REPO}:<tag>           default image
+      #   ${IMAGE_REPO}:<tag>-<extra>   default image + that extra (seekdb, milvus, valkey)
+      # Each variant is one extra layer on top of the default image.
       - name: Build for Release
         if: ${{ github.event.release.prerelease == false }}
-        run: docker buildx build --build-arg LANGBOT_BUILD_REVISION=${{ github.sha }} --platform linux/arm64,linux/amd64 -t ${IMAGE_REPO}:${{ steps.check_version.outputs.version }} -t ${IMAGE_REPO}:latest . --push
-      - name: Build for Pre-release # no update for latest tag
+        env:
+          RELEASE_VERSION: ${{ steps.check_version.outputs.version }}
+        run: |
+          for extra in "" seekdb milvus valkey; do
+            if [ -z "$extra" ]; then
+              suffix=""; target=(--target langbot)
+            else
+              suffix="-$extra"; target=(--target langbot-extra --build-arg "LANGBOT_EXTRA=$extra")
+            fi
+            docker buildx build --build-arg LANGBOT_BUILD_REVISION=${{ github.sha }} --platform linux/arm64,linux/amd64 \
+              "${target[@]}" \
+              -t "${IMAGE_REPO}:${RELEASE_VERSION}${suffix}" -t "${IMAGE_REPO}:latest${suffix}" . --push
+          done
+
+      - name: Build for Pre-release
         if: ${{ github.event.release.prerelease == true }}
         env:
           RELEASE_VERSION: ${{ steps.check_version.outputs.version }}
         run: |
-          tags=(-t "${IMAGE_REPO}:$RELEASE_VERSION")
-          if [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
-            tags+=(-t ${IMAGE_REPO}:beta)
-          fi
-          docker buildx build --build-arg LANGBOT_BUILD_REVISION=${{ github.sha }} --platform linux/arm64,linux/amd64 "${tags[@]}" . --push
+          for extra in "" seekdb milvus valkey; do
+            if [ -z "$extra" ]; then
+              suffix=""; target=(--target langbot)
+            else
+              suffix="-$extra"; target=(--target langbot-extra --build-arg "LANGBOT_EXTRA=$extra")
+            fi
+            tags=(-t "${IMAGE_REPO}:${RELEASE_VERSION}${suffix}")
+            if [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+              tags+=(-t "${IMAGE_REPO}:beta${suffix}")
+            fi
+            docker buildx build --build-arg LANGBOT_BUILD_REVISION=${{ github.sha }} --platform linux/arm64,linux/amd64 \
+              "${target[@]}" "${tags[@]}" . --push
+          done

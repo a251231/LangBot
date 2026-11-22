@@ -25,6 +25,7 @@ import {
   TestResult,
 } from '../types';
 import ExtraArgsEditor from './ExtraArgsEditor';
+import ModelStar from './ModelStar';
 import { userInfo } from '@/app/infra/http';
 import LangBotModelMetadata from '../../model-availability/LangBotModelMetadata';
 
@@ -197,20 +198,24 @@ export default function ModelItem({
     >
       <PopoverTrigger asChild>
         <div
-          className={`flex items-center justify-between py-2 px-3 rounded-md border bg-background ${
+          className={`flex items-center gap-3 py-2 px-3 rounded-md border bg-background ${
             isPopoverDisabled
               ? 'cursor-not-allowed opacity-60'
               : 'hover:bg-accent cursor-pointer'
           }`}
         >
-          <div className="flex min-w-0 items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium">{model.name}</span>
+          <div className="flex min-w-0 flex-1 items-center gap-2 flex-wrap">
+            <span className="break-all text-sm font-medium">{model.name}</span>
             <Badge variant="secondary" className="text-xs">
               {modelType === 'llm'
                 ? t('models.chat')
                 : modelType === 'embedding'
                   ? t('models.embedding')
-                  : t('models.rerank')}
+                  : modelType === 'rerank'
+                    ? t('models.rerank')
+                    : modelType === 'asr'
+                      ? t('models.asr')
+                      : t('models.tts')}
             </Badge>
             {modelType === 'llm' &&
               (model as LLMModel).abilities?.includes('vision') && (
@@ -238,6 +243,12 @@ export default function ModelItem({
             <LangBotModelMetadata
               metadata={metadata}
               loaded={availabilityLoaded}
+            />
+          )}
+          {modelType === 'llm' && (
+            <ModelStar
+              uuid={model.uuid}
+              disabled={!canManage || isPopoverDisabled}
             />
           )}
           {canManage && !isLangBotModels && (

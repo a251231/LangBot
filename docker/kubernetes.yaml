@@ -82,6 +82,25 @@ spec:
   # storageClassName: your-storage-class
 
 ---
+# PersistentVolumeClaim for the v4 Plugin Runtime state
+# Holds the plugin artifact cache, per-plugin dependency environments, and
+# per-installation data. It must survive Pod restarts: rebuilding it forces
+# every installed plugin to be re-downloaded and its environment rebuilt.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langbot-plugin-runtime-state
+  namespace: langbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # Uncomment and modify if you have a specific StorageClass
+  # storageClassName: your-storage-class
+
+---
 # ConfigMap for environment configuration
 apiVersion: v1
 kind: ConfigMap
@@ -126,7 +145,7 @@ spec:
       - name: langbot-plugin-runtime
         image: rockchin/langbot:latest
         imagePullPolicy: Always
-        command: ["uv", "run", "-m", "langbot_plugin.cli.__init__", "rt"]
+        command: ["uv", "run", "--no-sync", "-m", "langbot_plugin.cli.__init__", "rt"]
         ports:
         - containerPort: 5400
           name: runtime
@@ -160,6 +179,8 @@ spec:
         volumeMounts:
         - name: plugin-data
           mountPath: /app/data/plugins
+        - name: plugin-runtime-state
+          mountPath: /app/data/plugin-runtime
         resources:
           requests:
             memory: "512Mi"
@@ -189,6 +210,9 @@ spec:
       - name: plugin-data
         persistentVolumeClaim:
           claimName: langbot-plugin-runtime-data
+      - name: plugin-runtime-state
+        persistentVolumeClaim:
+          claimName: langbot-plugin-runtime-state
       restartPolicy: Always
 
 ---
@@ -214,15 +238,16 @@ spec:
 # Deployment for LangBot Box (sandbox) runtime
 #
 # The Box runtime backs LangBot's sandbox tools (exec / read / write / edit /
-# glob / grep), the `activate` skill tool, skill add/edit, and stdio-mode MCP
-# servers. It is OPTIONAL: if you do not deploy it, set `BOX__ENABLED=false` on
+# glob / grep), Skill script execution, and stdio-mode MCP servers. Skill
+# activation, resources, and management remain Core-owned without Box. Box is
+# OPTIONAL: if you do not deploy it, set `BOX__ENABLED=false` on
 # the langbot Deployment (or `box.enabled: false` in config.yaml) so the
 # dashboard renders cleanly with sandbox features disabled.
 #
 # IMPORTANT — how the sandbox actually runs:
-#   The bundled image ships only the Docker CLI (no dockerd, no nsjail). The Box
-#   runtime therefore creates sandbox containers by talking to a Docker daemon
-#   over the mounted socket (`/var/run/docker.sock`). Because that daemon
+#   The bundled image ships nsjail and the Docker CLI, but no dockerd. The
+#   Docker backend creates sandbox containers through the mounted Docker daemon
+#   socket (`/var/run/docker.sock`). Because that daemon
 #   resolves bind-mount paths on the NODE filesystem, the Box workspace root
 #   must be the SAME absolute path inside the box container, inside every
 #   sandbox container it spawns, AND on the node. That is why this manifest uses
@@ -245,6 +270,8 @@ metadata:
     app: langbot-box
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: langbot-box
@@ -273,6 +300,12 @@ spec:
           name: box-rpc
           protocol: TCP
         env:
+        - name: LANGBOT_BOX_DATA_DIR
+          value: /app/data/box/runtime
+        # Network INIT does not accept Core filesystem roots. Keep Docker
+        # artifact projections on Box's node-visible mount as well.
+        - name: LANGBOT_BOX_CONFIG
+          value: '{"local":{"host_root":"/app/data/box","allowed_mount_roots":["/app/data/box"]}}'
         - name: TZ
           valueFrom:
             configMapKeyRef:
@@ -298,8 +331,8 @@ spec:
             configMapKeyRef:
               name: langbot-config
               key: LANGBOT_BLOCKING_EXECUTOR_MAX_INFLIGHT_PER_SCOPE
-        # The Box runtime does NOT read box.local.* / BOX__* from its own env;
-        # it receives its functional configuration from LangBot via INIT.
+        # Runtime roots come from LANGBOT_BOX_CONFIG; other settings arrive
+        # through Core's INIT RPC. BOX__* variables here are not interpreted.
         volumeMounts:
         # Box workspace root — identical path on node, box, and sandbox
         # containers (see the IMPORTANT note above).
@@ -448,14 +481,15 @@ spec:
               key: token
         # box.local.* config — forwarded to the Box runtime via INIT RPC. The
         # host_root MUST match the box-root hostPath mountPath below AND the box
-        # Deployment's box-root mountPath, so that skill package paths resolve
-        # identically on both sides and on the node's Docker daemon.
+        # Deployment's box-root mountPath, so generic package mount paths
+        # resolve identically on both sides and on the node's Docker daemon.
         - name: BOX__LOCAL__HOST_ROOT
           value: "/app/data/box"
         - name: BOX__LOCAL__DEFAULT_WORKSPACE
           value: "default"
-        - name: BOX__LOCAL__SKILLS_ROOT
-          value: "skills"
+        - name: SKILLS__ROOT
+          # TODO(next-major): use /app/data/skills after the legacy path window.
+          value: "/app/data/box/skills"
         - name: BOX__LOCAL__ALLOWED_MOUNT_ROOTS
           value: "/app/data/box"
         volumeMounts:
@@ -475,6 +509,15 @@ spec:
           limits:
             memory: "4Gi"
             cpu: "2000m"
+        # Startup imports legacy content before opening HTTP. Allow 30 minutes;
+        # size this deadline for the deployment's retained data.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 5300
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 180
         # Liveness probe to restart container if it becomes unresponsive
         livenessProbe:
           httpGet:

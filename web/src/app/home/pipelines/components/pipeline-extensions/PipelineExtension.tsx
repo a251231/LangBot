@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { backendClient } from '@/app/infra/http';
 import { Button } from '@/components/ui/button';
@@ -12,7 +12,16 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
-import { CircleHelp, Plus, X, Server, Wrench, Sparkles } from 'lucide-react';
+import {
+  CircleHelp,
+  Plus,
+  X,
+  Server,
+  Wrench,
+  Sparkles,
+  Puzzle,
+  Loader2,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
@@ -21,11 +30,49 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Plugin } from '@/app/infra/entities/plugin';
-import { MCPServer, Skill } from '@/app/infra/entities/api';
+import {
+  MCPServer,
+  Skill,
+  WorkspaceOperationItem,
+  DomainMeta,
+  AgentPlatformTool,
+} from '@/app/infra/entities/api';
 import PluginComponentList from '@/app/home/plugins/components/plugin-installed/PluginComponentList';
-import { BoxUnavailableNotice } from '@/app/home/components/BoxUnavailableNotice';
-import { useBoxStatus } from '@/app/infra/hooks/useBoxStatus';
+import { useInstalledPluginIcon } from '@/app/infra/hooks/useInstalledPluginIcon';
+import WorkspaceOperationsPicker from '@/app/home/components/workspace-operations/WorkspaceOperationsPicker';
+import AgentApiToolPicker from '@/app/home/agents/components/AgentApiToolPicker';
+import { collectSensitiveTools } from '@/app/home/components/sensitive-tools/SensitiveToolsWarning';
+
+function PluginThumbnail({ author, name }: { author: string; name: string }) {
+  const iconURL = useInstalledPluginIcon(author, name);
+
+  if (!iconURL) {
+    return (
+      <div className="w-10 h-10 rounded-lg border bg-muted flex items-center justify-center flex-shrink-0">
+        <Puzzle className="size-5 text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={iconURL}
+      alt={name}
+      className="w-10 h-10 rounded-lg border bg-muted object-cover flex-shrink-0"
+    />
+  );
+}
 
 function InfoTooltip({ label }: { label: string }) {
   return (
@@ -48,15 +95,12 @@ function InfoTooltip({ label }: { label: string }) {
 
 export default function PipelineExtension({
   pipelineId,
+  onSensitiveToolsChange,
 }: {
   pipelineId: string;
+  onSensitiveToolsChange?: (tools: string[]) => void;
 }) {
   const { t } = useTranslation();
-  const {
-    available: boxAvailable,
-    hint: boxHint,
-    reason: boxReason,
-  } = useBoxStatus();
   const [loading, setLoading] = useState(true);
   const [enableAllPlugins, setEnableAllPlugins] = useState(true);
   const [enableAllMCPServers, setEnableAllMCPServers] = useState(true);
@@ -77,6 +121,55 @@ export default function PipelineExtension({
   const [tempSelectedSkillIds, setTempSelectedSkillIds] = useState<string[]>(
     [],
   );
+  const [workspaceOperations, setWorkspaceOperations] = useState<string[]>([]);
+  const [platformTools, setPlatformTools] = useState<AgentPlatformTool[]>([]);
+  const [allowedPlatformTools, setAllowedPlatformTools] = useState<string[]>(
+    [],
+  );
+  const savedPlatformToolsRef = useRef<string[]>([]);
+  const savedWorkspaceOperationsRef = useRef<string[]>([]);
+  const [availableWorkspaceOperations, setAvailableWorkspaceOperations] =
+    useState<WorkspaceOperationItem[]>([]);
+  const [domains, setDomains] = useState<DomainMeta[]>([]);
+  const [isSavingOperations, setIsSavingOperations] = useState(false);
+  const [dangerousModalOpen, setDangerousModalOpen] = useState(false);
+  const pendingOperationsRef = useRef<string[] | null>(null);
+
+  useEffect(() => {
+    if (loading) return;
+    onSensitiveToolsChange?.(
+      collectSensitiveTools(
+        platformTools,
+        allowedPlatformTools,
+        availableWorkspaceOperations,
+        workspaceOperations,
+      ),
+    );
+  }, [
+    loading,
+    onSensitiveToolsChange,
+    platformTools,
+    allowedPlatformTools,
+    availableWorkspaceOperations,
+    workspaceOperations,
+  ]);
+
+  const isOperationsDirty = (() => {
+    const savedTools = new Set(savedPlatformToolsRef.current);
+    if (
+      allowedPlatformTools.length !== savedTools.size ||
+      allowedPlatformTools.some((tool) => !savedTools.has(tool))
+    )
+      return true;
+    const saved = new Set(savedWorkspaceOperationsRef.current);
+    if (workspaceOperations.length !== saved.size) return true;
+    return workspaceOperations.some((op) => !saved.has(op));
+  })();
+
+  const handleResetWorkspaceOperations = () => {
+    setWorkspaceOperations([...savedWorkspaceOperationsRef.current]);
+    setAllowedPlatformTools([...savedPlatformToolsRef.current]);
+  };
 
   useEffect(() => {
     loadExtensions();
@@ -125,6 +218,18 @@ export default function PipelineExtension({
 
       setSelectedSkills(selectedSkill);
       setAllSkills(data.available_skills || []);
+
+      // Load Workspace Operations
+      const loadedOps = data.workspace_operations || [];
+      setPlatformTools(data.available_platform_tools || []);
+      setAllowedPlatformTools(data.allowed_platform_tools || []);
+      savedPlatformToolsRef.current = data.allowed_platform_tools || [];
+      setWorkspaceOperations(loadedOps);
+      savedWorkspaceOperationsRef.current = loadedOps;
+      setAvailableWorkspaceOperations(
+        data.available_workspace_operations || [],
+      );
+      setDomains(data.domains || []);
     } catch (error) {
       console.error('Failed to load extensions:', error);
       toast.error(t('pipelines.extensions.loadError'));
@@ -161,6 +266,10 @@ export default function PipelineExtension({
         newEnableAllMCPServers ?? enableAllMCPServers,
         boundSkillIds,
         newEnableAllSkills ?? enableAllSkills,
+        undefined,
+        undefined,
+        savedWorkspaceOperationsRef.current,
+        savedPlatformToolsRef.current,
       );
       toast.success(t('pipelines.extensions.saveSuccess'));
     } catch (error) {
@@ -169,6 +278,73 @@ export default function PipelineExtension({
       // Reload on error to restore correct state
       loadExtensions();
     }
+  };
+
+  const executeSaveWorkspaceOperations = async (opsToSave: string[]) => {
+    setIsSavingOperations(true);
+    try {
+      const boundPluginsArray = selectedPlugins.map((plugin) => {
+        const metadata = plugin.manifest.manifest.metadata;
+        return {
+          author: metadata.author || '',
+          name: metadata.name,
+        };
+      });
+      const boundMCPServerIds = selectedMCPServers.map(
+        (server) => server.uuid || '',
+      );
+      const boundSkillIds = selectedSkills.map((skill) => skill.name);
+
+      await backendClient.updatePipelineExtensions(
+        pipelineId,
+        boundPluginsArray,
+        boundMCPServerIds,
+        enableAllPlugins,
+        enableAllMCPServers,
+        boundSkillIds,
+        enableAllSkills,
+        undefined,
+        undefined,
+        opsToSave,
+        allowedPlatformTools,
+      );
+      savedWorkspaceOperationsRef.current = opsToSave;
+      savedPlatformToolsRef.current = allowedPlatformTools;
+      setWorkspaceOperations(opsToSave);
+      toast.success(t('workspaceOperations.saveSuccess'));
+    } catch (error) {
+      console.error('Failed to save workspace operations:', error);
+      const message =
+        typeof error === 'object' && error && 'msg' in error
+          ? String((error as { msg?: string }).msg || '')
+          : '';
+      toast.error(
+        t('workspaceOperations.saveFailed') + (message ? `: ${message}` : ''),
+      );
+    } finally {
+      setIsSavingOperations(false);
+    }
+  };
+
+  const handleSaveWorkspaceOperations = async (opsToSave: string[]) => {
+    const hasDangerous =
+      opsToSave.some((opId) => {
+        const op = availableWorkspaceOperations.find(
+          (item) => item.id === opId,
+        );
+        return op?.risk === 'dangerous';
+      }) ||
+      platformTools.some(
+        (tool) =>
+          allowedPlatformTools.includes(tool.name) &&
+          (tool.risk === 'dangerous' || tool.api === 'bot.message.send'),
+      );
+    if (hasDangerous) {
+      pendingOperationsRef.current = opsToSave;
+      setDangerousModalOpen(true);
+      return;
+    }
+    await executeSaveWorkspaceOperations(opsToSave);
   };
 
   const handleRemovePlugin = async (pluginId: string) => {
@@ -331,6 +507,9 @@ export default function PipelineExtension({
     <div className="space-y-6">
       {/* Plugins Section */}
       <div className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          {t('pipelines.extensions.pluginScopeHint')}
+        </p>
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-foreground">
             {t('pipelines.extensions.pluginsTitle')}
@@ -373,13 +552,9 @@ export default function PipelineExtension({
                     className="flex items-center justify-between rounded-lg border p-3 hover:bg-accent"
                   >
                     <div className="flex-1 flex items-center gap-3">
-                      <img
-                        src={backendClient.getPluginIconURL(
-                          metadata.author || '',
-                          metadata.name,
-                        )}
-                        alt={metadata.name}
-                        className="w-10 h-10 rounded-lg border bg-muted object-cover flex-shrink-0"
+                      <PluginThumbnail
+                        author={metadata.author || ''}
+                        name={metadata.name}
                       />
                       <div className="flex-1">
                         <div className="font-medium">{metadata.name}</div>
@@ -558,13 +733,9 @@ export default function PipelineExtension({
               id="enable-all-skills"
               checked={enableAllSkills}
               onCheckedChange={handleToggleEnableAllSkills}
-              disabled={!boxAvailable}
             />
           </div>
         </div>
-        {!boxAvailable && (
-          <BoxUnavailableNotice hint={boxHint} reason={boxReason} />
-        )}
         <div className="space-y-2">
           {enableAllSkills ? (
             <div className="flex h-32 items-center justify-center rounded-lg border-2 border-dashed border-border bg-muted/30">
@@ -602,7 +773,6 @@ export default function PipelineExtension({
                     variant="ghost"
                     size="icon"
                     onClick={() => handleRemoveSkill(skill.name)}
-                    disabled={!boxAvailable}
                   >
                     <X className="h-4 w-4" />
                   </Button>
@@ -616,12 +786,115 @@ export default function PipelineExtension({
           onClick={handleOpenSkillDialog}
           variant="outline"
           className="w-full"
-          disabled={enableAllSkills || !boxAvailable}
+          disabled={enableAllSkills}
         >
           <Plus className="mr-2 h-4 w-4" />
           {t('pipelines.extensions.addSkill')}
         </Button>
       </div>
+
+      {/* Agent Tools Section: event tools, bot tools and workspace operations */}
+      <div className="space-y-3 border-t pt-6">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-0.5">
+            <h3 className="text-sm font-semibold text-foreground">
+              {t('agents.apiTools')}
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              {t('pipelines.extensions.toolsDescription')}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {isOperationsDirty && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleResetWorkspaceOperations}
+                disabled={isSavingOperations}
+              >
+                {t('common.cancel')}
+              </Button>
+            )}
+            <Button
+              size="sm"
+              onClick={() => handleSaveWorkspaceOperations(workspaceOperations)}
+              disabled={isSavingOperations || !isOperationsDirty}
+            >
+              {isSavingOperations ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              {t('pipelines.extensions.saveTools')}
+            </Button>
+          </div>
+        </div>
+
+        <AgentApiToolPicker
+          platformTools={platformTools}
+          platformValue={allowedPlatformTools}
+          onPlatformChange={setAllowedPlatformTools}
+          hostTools={[]}
+          hostValue={[]}
+          onHostChange={() => {}}
+          scopes={['event', 'platform']}
+          workspaceTools={{
+            count: availableWorkspaceOperations.length,
+            selectedCount: workspaceOperations.length,
+            content: (
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  {t('workspaceOperations.scopeHint')}
+                </p>
+                <WorkspaceOperationsPicker
+                  operations={availableWorkspaceOperations}
+                  domains={domains}
+                  value={workspaceOperations}
+                  onChange={setWorkspaceOperations}
+                  disabled={isSavingOperations}
+                />
+              </div>
+            ),
+          }}
+        />
+      </div>
+
+      {/* Dangerous Operations Confirmation Dialog */}
+      <AlertDialog
+        open={dangerousModalOpen}
+        onOpenChange={setDangerousModalOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t('workspaceOperations.dangerousConfirmTitle')}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('workspaceOperations.dangerousConfirmDescription')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => {
+                setDangerousModalOpen(false);
+                pendingOperationsRef.current = null;
+              }}
+            >
+              {t('workspaceOperations.dangerousConfirmCancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async () => {
+                setDangerousModalOpen(false);
+                if (pendingOperationsRef.current) {
+                  const ops = pendingOperationsRef.current;
+                  pendingOperationsRef.current = null;
+                  await executeSaveWorkspaceOperations(ops);
+                }
+              }}
+            >
+              {t('workspaceOperations.dangerousConfirmAction')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Plugin Selection Dialog */}
       <Dialog open={pluginDialogOpen} onOpenChange={setPluginDialogOpen}>
@@ -665,13 +938,9 @@ export default function PipelineExtension({
                     onClick={() => handleTogglePlugin(pluginId)}
                   >
                     <Checkbox checked={isSelected} />
-                    <img
-                      src={backendClient.getPluginIconURL(
-                        metadata.author || '',
-                        metadata.name,
-                      )}
-                      alt={metadata.name}
-                      className="w-10 h-10 rounded-lg border bg-muted object-cover flex-shrink-0"
+                    <PluginThumbnail
+                      author={metadata.author || ''}
+                      name={metadata.name}
                     />
                     <div className="flex-1">
                       <div className="font-medium">{metadata.name}</div>

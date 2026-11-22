@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  BellRing,
   HardDrive,
   History,
   KeyRound,
@@ -30,6 +31,7 @@ import ApiIntegrationPanel from '@/app/home/components/api-integration-dialog/Ap
 import ModelsPanel from '@/app/home/components/models-dialog/ModelsPanel';
 import StorageAnalysisPanel from '@/app/home/components/storage-analysis-dialog/StorageAnalysisPanel';
 import WorkspaceSettingsPanel from '@/app/home/components/workspace-settings/WorkspaceSettingsPanel';
+import AlertsPanel from '@/app/home/components/alerts/AlertsPanel';
 import OperationTracePanel from '@/app/home/components/workspace-settings/OperationTracePanel';
 import { useCurrentWorkspace } from '@/app/infra/http';
 
@@ -38,6 +40,7 @@ import { useCurrentWorkspace } from '@/app/infra/http';
 export type SettingsSection =
   | 'workspace'
   | 'operationTrace'
+  | 'alerts'
   | 'account'
   | 'apiIntegration'
   | 'models'
@@ -49,6 +52,7 @@ export type SettingsSection =
 export const SETTINGS_ACTION_BY_SECTION: Record<SettingsSection, string> = {
   workspace: 'showWorkspaceSettings',
   operationTrace: 'showOperationTrace',
+  alerts: 'showAlerts',
   account: 'showAccountSettings',
   apiIntegration: 'showApiIntegrationSettings',
   models: 'showModelSettings',
@@ -120,6 +124,13 @@ export default function SettingsDialog({
       icon: <KeyRound className="size-4" />,
     },
     {
+      id: 'alerts',
+      label: t('settingsDialog.nav.alerts'),
+      title: t('alerts.title'),
+      description: t('alerts.description'),
+      icon: <BellRing className="size-4" />,
+    },
+    {
       id: 'storageAnalysis',
       label: t('settingsDialog.nav.storage'),
       title: t('storageAnalysis.title'),
@@ -159,6 +170,9 @@ export default function SettingsDialog({
     if (item.id === 'operationTrace') {
       return canViewOperationTrace;
     }
+    if (item.id === 'alerts') {
+      return canViewAudit;
+    }
     return true;
   });
 
@@ -166,7 +180,8 @@ export default function SettingsDialog({
     const forbiddenSection =
       (section === 'apiIntegration' && !canManageApiKeys) ||
       (section === 'storageAnalysis' && !canViewStorageAnalysis) ||
-      (section === 'operationTrace' && !canViewOperationTrace);
+      (section === 'operationTrace' && !canViewOperationTrace) ||
+      (section === 'alerts' && !canViewAudit);
     if (open && forbiddenSection) {
       onSectionChange('workspace');
     }
@@ -174,6 +189,7 @@ export default function SettingsDialog({
     canManageApiKeys,
     canViewStorageAnalysis,
     canViewOperationTrace,
+    canViewAudit,
     open,
     section,
     onSectionChange,
@@ -191,7 +207,7 @@ export default function SettingsDialog({
       }}
     >
       <DialogContent
-        className="h-[80vh] max-h-[800px] overflow-hidden p-0 sm:max-w-[52rem] [&>button:last-child]:z-20"
+        className="flex h-[80dvh] max-h-[800px] min-h-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-[52rem] [&>button:last-child]:z-20"
         // Fixed height so switching sections never resizes the dialog; each
         // panel scrolls its own content internally.
       >
@@ -202,7 +218,7 @@ export default function SettingsDialog({
 
         {/* Override the SidebarProvider wrapper's default h-svh so the two
             columns fill the dialog's fixed height instead of the viewport. */}
-        <SidebarProvider className="!min-h-0 h-full">
+        <SidebarProvider className="!min-h-0 flex-1 overflow-hidden">
           <Sidebar
             collapsible="none"
             className="hidden h-full w-44 shrink-0 border-r md:flex"
@@ -231,7 +247,7 @@ export default function SettingsDialog({
             </SidebarContent>
           </Sidebar>
 
-          <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
             {/* Mobile section switcher (sidebar is hidden on small screens) */}
             <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b px-3 py-2 md:hidden">
               {navItems.map((item) => (
@@ -287,6 +303,9 @@ export default function SettingsDialog({
                 <ApiIntegrationPanel
                   active={open && section === 'apiIntegration'}
                 />
+              )}
+              {section === 'alerts' && canViewAudit && (
+                <AlertsPanel active={open && section === 'alerts'} />
               )}
               {section === 'storageAnalysis' && canViewStorageAnalysis && (
                 <StorageAnalysisPanel

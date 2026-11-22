@@ -12,8 +12,15 @@ from langbot.pkg.agent.runner.descriptor import RunnerDescriptor
 from langbot.pkg.agent.runner.binding_resolver import AgentBindingResolver
 from langbot.pkg.agent.runner.query_entry_adapter import QueryEntryAdapter
 from langbot.pkg.agent.runner.resource_builder import AgentResourceBuilder
-from langbot.pkg.agent.runner.host_models import AgentBinding, AgentEventEnvelope, BindingScope, ResourcePolicy
+from langbot.pkg.agent.runner.host_models import (
+    AgentBinding,
+    AgentEventEnvelope,
+    BindingScope,
+    DeliveryPolicy,
+    ResourcePolicy,
+)
 from langbot.pkg.api.http.context import ExecutionContext
+from langbot.pkg.provider.tools.toolmgr import ToolManager
 
 
 RUNNER_ID = 'plugin:test/runner/default'
@@ -100,6 +107,7 @@ async def build_resources(app, query, descriptor):
         event=event,
         binding=binding,
         descriptor=descriptor,
+        tool_catalog=getattr(query, '_host_tool_catalog', None),
     )
 
 
@@ -236,6 +244,65 @@ async def test_platform_tools_are_not_claimed_when_runner_disables_tool_calling(
     assert resources['platform_capabilities']['unavailable_tools'] == [
         {'name': 'event_reply', 'reason': 'runner_call_permission_missing'}
     ]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_receives_interactive_card_tool_for_supported_adapter(app):
+    query = make_query({})
+    query.adapter = SimpleNamespace(
+        get_supported_apis=lambda: ['send_interaction'],
+        get_interaction_capabilities=lambda: {
+            'field_types': ['select'],
+            'action_styles': ['default', 'primary', 'danger'],
+            'supports_updates': True,
+            'max_fields': 10,
+        },
+    )
+
+    resources = await build_resources(
+        app,
+        query,
+        make_descriptor(
+            capabilities={'tool_calling': True, 'interactions': True},
+            permissions={**FULL_PERMISSIONS, 'interactions': ['request']},
+        ),
+    )
+
+    assert [tool['tool_name'] for tool in resources['tools']] == ['request_interaction']
+    assert resources['platform_capabilities']['authorized_tools'] == ['request_interaction']
+
+
+@pytest.mark.asyncio
+async def test_event_processor_cannot_receive_interactive_card_tool(app):
+    event = AgentEventEnvelope(
+        event_id='event-processor-card',
+        event_type='message.received',
+        source='platform',
+        bot_id='bot-1',
+        input=AgentInput(text='hello'),
+        delivery=DeliveryContext(
+            surface='platform',
+            reply_target={'target_type': 'person', 'target_id': 'user-1'},
+            platform_capabilities={'supported_apis': ['send_interaction']},
+        ),
+    )
+    binding = AgentBinding(
+        binding_id='event-processor-binding',
+        scope=BindingScope(scope_type='global'),
+        runner_id=RUNNER_ID,
+        processor_type='event_processor',
+        resource_policy=ResourcePolicy(allowed_platform_tool_names=['request_interaction']),
+        delivery_policy=DeliveryPolicy(enable_interactions=True),
+    )
+
+    resources = await AgentResourceBuilder(app).build_resources_from_binding(
+        execution_context=TEST_CONTEXT,
+        event=event,
+        binding=binding,
+        descriptor=make_descriptor(capabilities={'tool_calling': True}),
+    )
+
+    assert resources['tools'] == []
 
 
 @pytest.mark.asyncio
@@ -420,6 +487,38 @@ async def test_build_tools_authorizes_query_declared_tools(app):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('catalog_source', ['builtin', 'plugin'])
+async def test_build_tools_reuses_only_matching_host_catalog_schema(app, catalog_source):
+    query = make_query({}, use_funcs=[{'name': 'exec'}])
+    ToolManager.bind_query_tool_sources(
+        query,
+        [
+            {
+                'name': 'exec',
+                'source': catalog_source,
+                'description': 'Catalog command',
+                'parameters': {'type': 'object', 'properties': {'command': {'type': 'string'}}},
+            }
+        ],
+    )
+    query.variables['_host_tool_source_refs'] = {'exec': {'source': 'builtin', 'source_id': None}}
+    app.tool_mgr.get_tool_schema.return_value = ('Live command', {'type': 'object'})
+
+    resources = await build_resources(app, query, make_descriptor(capabilities={'tool_calling': True}))
+    tool = next(tool for tool in resources['tools'] if tool['tool_name'] == 'exec')
+    if catalog_source == 'builtin':
+        assert tool['description'] == 'Catalog command'
+        assert tool['parameters'] == {'type': 'object', 'properties': {'command': {'type': 'string'}}}
+        app.tool_mgr.get_tool_schema.assert_not_awaited()
+    else:
+        assert tool['description'] == 'Live command'
+        assert tool['parameters'] == {'type': 'object'}
+        app.tool_mgr.get_tool_schema.assert_awaited_once_with(
+            TEST_CONTEXT, 'exec', source_ref={'source': 'builtin', 'source_id': None}
+        )
+
+
+@pytest.mark.asyncio
 async def test_build_tools_manifest_permission_denies_binding_tools(app):
     """Binding tool grants should be removed when manifest does not request tools."""
     descriptor = make_descriptor(
@@ -446,8 +545,19 @@ async def test_build_tools_materializes_independent_agent_all_tools_policy(app):
     """Independent Agents resolve an all-tools grant against the live Host catalog."""
     app.tool_mgr.get_resolved_tool_catalog = AsyncMock(
         return_value=[
-            {'name': 'exec', 'source': 'builtin'},
-            {'name': 'plugin_tool', 'source': 'plugin', 'source_id': 'test/plugin'},
+            {
+                'name': 'exec',
+                'source': 'builtin',
+                'description': 'Execute a command',
+                'parameters': {'type': 'object', 'properties': {'command': {'type': 'string'}}},
+            },
+            {
+                'name': 'plugin_tool',
+                'source': 'plugin',
+                'source_id': 'test/plugin',
+                'description': 'Plugin tool',
+                'parameters': {},
+            },
         ]
     )
     descriptor = make_descriptor(capabilities={'tool_calling': True})
@@ -467,6 +577,10 @@ async def test_build_tools_materializes_independent_agent_all_tools_policy(app):
     )
 
     assert [tool['tool_name'] for tool in resources['tools']] == ['exec', 'plugin_tool']
+    assert resources['tools'][0]['description'] == 'Execute a command'
+    assert resources['tools'][0]['parameters'] == {'type': 'object', 'properties': {'command': {'type': 'string'}}}
+    assert resources['tools'][1]['parameters'] is None
+    app.tool_mgr.get_tool_schema.assert_not_awaited()
     app.tool_mgr.get_resolved_tool_catalog.assert_awaited_once_with(
         TEST_CONTEXT,
         include_skill_authoring=True,

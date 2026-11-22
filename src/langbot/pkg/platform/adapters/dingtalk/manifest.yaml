@@ -15,6 +15,7 @@ metadata:
 
 spec:
   categories:
+    - popular
     - china
   help_links:
     zh: https://langbot.app/docs/zh/usage/platforms/dingtalk
@@ -27,36 +28,12 @@ spec:
         zh_Hans: 一键创建应用
         zh_Hant: 一鍵建立應用
       description:
-        en_US: 'Scan QR code with DingTalk to automatically create an app and fill in credentials. Note: Robot Code cannot be
-          obtained automatically, you need to copy it from the DingTalk Developer Backend manually.'
-        zh_Hans: 使用钉钉扫码自动创建应用并填写凭据。注意：机器人代码无法自动获取，需前往钉钉开发者后台手动复制。
-        zh_Hant: 使用釘釘掃碼自動建立應用並填寫憑證。注意：機器人代碼無法自動取得，需前往釘釘開發者後台手動複製。
+        en_US: Scan with DingTalk to create an app and automatically fill in credentials. The bot identity is resolved automatically.
+        zh_Hans: 使用钉钉扫码创建应用并自动填写凭据，机器人身份会自动识别。
+        zh_Hant: 使用釘釘掃碼建立應用並自動填寫憑證，機器人身分會自動識別。
       type: qr-code-login
       login_platform: dingtalk
       required: false
-    - name: human_input_card_template_download
-      label:
-        en_US: Download Human Input Card Template
-        zh_Hans: 下载人工输入卡片模板
-        zh_Hant: 下載人工輸入卡片範本
-      description:
-        en_US: Download the template, import it in DingTalk Card Platform, then enter its template ID below to enable native interactions.
-        zh_Hans: 下载模板并导入钉钉卡片平台，再将模板 ID 填入下方以启用原生交互。
-        zh_Hant: 下載範本並匯入釘釘卡片平台，再將範本 ID 填入下方以啟用原生互動。
-      type: download-link
-      required: false
-      default: ''
-      url: /api/v1/platform/adapters/dingtalk/human-input-card-template
-      download_filename: dingtalk_human_input_card.json
-      help_links:
-        zh: https://open-dev.dingtalk.com/fe/card
-        en: https://open-dev.dingtalk.com/fe/card
-        ja: https://open-dev.dingtalk.com/fe/card
-      help_label:
-        en_US: Import Guide
-        zh_Hans: 导入指引
-        zh_Hant: 匯入指引
-        ja_JP: インポート手順
     - name: client_id
       label:
         en_US: Client ID
@@ -73,76 +50,28 @@ spec:
       type: string
       required: true
       default: ""
-    - name: robot_code
-      label:
-        en_US: Robot Code
-        zh_Hans: 机器人代码
-        zh_Hant: 機器人代碼
-      type: string
-      required: true
-      default: ""
-    - name: robot_name
-      label:
-        en_US: Robot Name
-        zh_Hans: 机器人名称
-        zh_Hant: 機器人名稱
-      type: string
-      required: true
-      default: ""
     - name: markdown_card
       label:
-        en_US: Markdown Card
-        zh_Hans: 是否使用 Markdown 卡片
-        zh_Hant: 是否使用 Markdown 卡片
+        en_US: Use Card Replies
+        zh_Hans: 使用卡片回复
+        zh_Hant: 使用卡片回覆
+      description:
+        en_US: Uses built-in A2UI cards for Markdown, streaming replies, and interactions. No card template is required. The app must have AICard.Instance.Write permission.
+        zh_Hans: 使用内置 A2UI 卡片提供 Markdown、流式回复和交互能力，无需配置卡片模板。应用必须开通 AICard.Instance.Write 权限。
+        zh_Hant: 使用內建 A2UI 卡片提供 Markdown、串流回覆和互動能力，無需設定卡片範本。應用必須開通 AICard.Instance.Write 權限。
       type: boolean
       required: false
       default: true
-    - name: enable-stream-reply
-      label:
-        en_US: Enable Stream Reply Mode
-        zh_Hans: 启用钉钉卡片流式回复模式
-        zh_Hant: 啟用釘釘卡片串流回覆模式
-      description:
-        en_US: Used for streaming replies from pipelines or plugins. If enabled, the bot will use DingTalk card streaming replies.
-        zh_Hans: 用于流水线和插件主动发起的流式回复。如果启用，将使用钉钉卡片流式方式来回复内容
-        zh_Hant: 用於流水線和插件主動發起的串流回覆。如果啟用，將使用釘釘卡片串流方式來回覆內容
-      type: boolean
-      required: true
-      default: false
-    - name: card_auto_layout
-      label:
-        en_US: Card Auto Layout
-        zh_Hans: 卡片宽屏自动布局
-        zh_Hant: 卡片寬螢幕自動佈局
-      type: boolean
-      required: false
-      default: false
-    - name: card_template_id
-      label:
-        en_US: Card Template ID
-        zh_Hans: 卡片模板ID
-        zh_Hant: 卡片範本ID
-      type: string
-      required: true
-      default: "填写你的卡片template_id"
-
-    - name: human_input_card_template_id
-      label:
-        en_US: Human Input Card Template ID
-        zh_Hans: 人工输入卡片模板 ID
-        zh_Hant: 人工輸入卡片範本 ID
-      description:
-        en_US: Import the bundled `src/langbot/templates/dingtalk_human_input_card.json`, then enter its DingTalk template ID here. It contains the `content`, `btns`, `input_*`, `select_*`, and `index_o` variables required for native interactions.
-        zh_Hans: 可选。模板需包含 `content`、`btns`、`input_*`、`select_*` 和 `index_o` 变量以支持原生交互。
-        zh_Hant: 可選。範本需包含 `content`、`btns`、`input_*`、`select_*` 和 `index_o` 變數以支援原生互動。
-      type: string
-      required: false
-      default: ""
 
   supported_events:
     - message.received
     - feedback.received
+    - group.member_joined
+    - group.member_left
+    - group.info_updated
+    - dingtalk.card_action
     - platform.specific
+    - interaction.callback
 
   supported_apis:
     required:
@@ -157,7 +86,9 @@ spec:
       - get_friend_list
       - get_file_url
       - call_platform_api
-      - interaction.request
+      - send_interaction
+      - get_interaction_capabilities
+      - update_interaction
 
   platform_specific_apis:
     - action: check_access_token

@@ -19,6 +19,7 @@ from langbot.libs.qq_official_api.api import (
     resolve_select_button_action,
 )
 from langbot.libs.qq_official_api.qqofficialevent import QQOfficialEvent
+from langbot.pkg.platform.qqofficial_faces import parse_qqofficial_face_components
 from ...utils import image
 from ..logger import EventLogger
 
@@ -104,7 +105,7 @@ class QQOfficialMessageConverter(abstract_platform_adapter.AbstractMessageConver
             base64_url = await image.get_qq_official_image_base64(pic_url=pic_url, content_type=content_type)
             yiri_msg_list.append(platform_message.Image(url=pic_url, base64=base64_url))
 
-        yiri_msg_list.append(platform_message.Plain(text=message))
+        yiri_msg_list.extend(parse_qqofficial_face_components(message))
         chain = platform_message.MessageChain(yiri_msg_list)
         return chain
 
@@ -146,11 +147,12 @@ class QQOfficialEventConverter(abstract_platform_adapter.AbstractEventConverter)
                 remark='',
             )
             return platform_events.FriendMessage(sender=friend, message_chain=yiri_chain, source_platform_object=event)
-        if event.t == 'GROUP_AT_MESSAGE_CREATE':
-            yiri_chain.insert(0, platform_message.At(target='justbot'))
+        if event.t in {'GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE'}:
+            if event.is_at_bot:
+                yiri_chain.insert(0, platform_message.At(target='justbot'))
 
             sender = platform_entities.GroupMember(
-                id=event.group_openid,
+                id=event.member_openid,
                 member_name=event.t,
                 permission='MEMBER',
                 group=platform_entities.Group(
@@ -300,7 +302,7 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
         if qq_official_event.t == 'C2C_MESSAGE_CREATE':
             target_type = 'c2c'
             target_id = qq_official_event.user_openid
-        elif qq_official_event.t == 'GROUP_AT_MESSAGE_CREATE':
+        elif qq_official_event.t in {'GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE'}:
             target_type = 'group'
             target_id = qq_official_event.group_openid
         elif qq_official_event.t == 'AT_MESSAGE_CREATE':
@@ -386,7 +388,7 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
         *,
         msg_id: typing.Optional[str] = None,
         event_id: typing.Optional[str] = None,
-        msg_seq: int = 1,
+        msg_seq: typing.Optional[int] = None,
     ) -> None:
         """Send a text reply using the configured C2C/group render mode."""
         use_markdown = self.config.get('enable-markdown-rendering', False)
@@ -430,6 +432,7 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
             self.bot.on_message('C2C_MESSAGE_CREATE')(on_message)
         elif event_type == platform_events.GroupMessage:
             self.bot.on_message('GROUP_AT_MESSAGE_CREATE')(on_message)
+            self.bot.on_message('GROUP_MESSAGE_CREATE')(on_message)
             self.bot.on_message('AT_MESSAGE_CREATE')(on_message)
 
     def set_bot_uuid(self, bot_uuid: str):
@@ -476,6 +479,7 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
                 'C2C_MESSAGE_CREATE',
                 'DIRECT_MESSAGE_CREATE',
                 'GROUP_AT_MESSAGE_CREATE',
+                'GROUP_MESSAGE_CREATE',
                 'AT_MESSAGE_CREATE',
             }
             if event_type not in message_event_types:
@@ -823,7 +827,7 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
             return None
         if source.t == 'C2C_MESSAGE_CREATE':
             return 'c2c', source.user_openid
-        if source.t == 'GROUP_AT_MESSAGE_CREATE':
+        if source.t in {'GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE'}:
             return 'group', source.group_openid
         if source.t == 'AT_MESSAGE_CREATE':
             return 'channel', source.channel_id

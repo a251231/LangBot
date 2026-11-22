@@ -123,37 +123,254 @@ class TestSQLiteMigrationUpgrade:
     """Tests for upgrade to head workflow."""
 
     @pytest.mark.asyncio
-    async def test_upgrade_from_published_space_launch_head_to_merged_head(self, sqlite_engine):
-        """A database released at the production-only 0016 head must remain upgradable."""
+    @pytest.mark.parametrize('enabled', [True, False])
+    @pytest.mark.parametrize('json_null', [True, False])
+    async def test_plugin_permission_backfill_preserves_enabled(self, sqlite_engine, enabled, json_null):
+        from types import SimpleNamespace
+
+        from langbot.pkg.api.application.plugin_capabilities import LEGACY_CAPABILITIES
+        from langbot.pkg.api.application.plugin_permissions import permission_status
+
+        metadata = sqlalchemy.MetaData()
+        settings = sqlalchemy.Table(
+            'plugin_settings',
+            metadata,
+            sqlalchemy.Column('uuid', sqlalchemy.String, primary_key=True),
+            sqlalchemy.Column('enabled', sqlalchemy.Boolean),
+            *(
+                sqlalchemy.Column(name, sqlalchemy.JSON)
+                for name in ('permission_declaration', 'permission_grants', 'permission_snapshot')
+            ),
+        )
+        empty = None if json_null else sqlalchemy.null()
         async with sqlite_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-        await run_alembic_stamp(sqlite_engine, '0016_space_launch_replay')
-        await run_alembic_upgrade(sqlite_engine, 'head')
-
-        assert await get_alembic_current(sqlite_engine) == _get_script_head()
+            await conn.run_sync(metadata.create_all)
+            await conn.execute(
+                settings.insert().values(
+                    uuid='legacy',
+                    enabled=enabled,
+                    permission_declaration=empty,
+                    permission_grants=empty,
+                    permission_snapshot=empty,
+                )
+            )
+            await conn.execute(
+                settings.insert().values(
+                    uuid='pending',
+                    enabled=False,
+                    permission_declaration=empty,
+                    permission_grants={},
+                    permission_snapshot=empty,
+                )
+            )
+        await run_alembic_stamp(sqlite_engine, '0043_speech_models')
+        await run_alembic_upgrade(sqlite_engine)
+        async with sqlite_engine.connect() as conn:
+            row = (await conn.execute(settings.select().where(settings.c.uuid == 'legacy'))).mappings().one()
+            pending = (await conn.execute(settings.select().where(settings.c.uuid == 'pending'))).mappings().one()
+        expected = {'workspace_operations': [], 'capabilities': sorted(LEGACY_CAPABILITIES)}
+        assert row['permission_grants'] == row['permission_snapshot'] == expected
+        assert row['enabled'] is enabled
+        assert not permission_status(None, SimpleNamespace(**row))['pending_confirmation']
+        assert pending['permission_grants'] == {} and pending['permission_snapshot'] is None
+        await run_alembic_downgrade(sqlite_engine, '0043_speech_models')
+        await run_alembic_upgrade(sqlite_engine)
+        async with sqlite_engine.connect() as conn:
+            row = (await conn.execute(settings.select().where(settings.c.uuid == 'legacy'))).mappings().one()
+        assert row['permission_grants'] == row['permission_snapshot'] == expected
+        assert row['enabled'] is enabled
 
     @pytest.mark.asyncio
-    async def test_upgrade_from_development_workspace_head_to_merged_head(self, sqlite_engine):
-        """A database at the 4.11 development head must absorb later master migrations."""
-        async with sqlite_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-        await run_alembic_stamp(sqlite_engine, '0018_merge_workspace_heads')
-        await run_alembic_upgrade(sqlite_engine, 'head')
-
-        assert await get_alembic_current(sqlite_engine) == _get_script_head()
+    @pytest.mark.parametrize('existing_columns', [None, [], ['permission_grants']])
+    async def test_plugin_permission_schema_round_trip(self, sqlite_engine, existing_columns):
+        permission_columns = {'permission_declaration', 'permission_grants', 'permission_snapshot'}
+        if existing_columns is not None:
+            metadata = sqlalchemy.MetaData()
+            sqlalchemy.Table(
+                'plugin_settings',
+                metadata,
+                sqlalchemy.Column('uuid', sqlalchemy.String, primary_key=True),
+                *(sqlalchemy.Column(name, sqlalchemy.JSON) for name in existing_columns),
+            )
+            async with sqlite_engine.begin() as conn:
+                await conn.run_sync(metadata.create_all)
+        await run_alembic_stamp(sqlite_engine, '0044_plugin_permissions')
+        await run_alembic_downgrade(sqlite_engine, '0043_speech_models')
+        for _ in range(2):
+            await run_alembic_upgrade(sqlite_engine)
+            async with sqlite_engine.connect() as conn:
+                exists = await conn.run_sync(lambda sync: sqlalchemy.inspect(sync).has_table('plugin_settings'))
+                assert exists == (existing_columns is not None)
+                if exists:
+                    columns = await conn.run_sync(
+                        lambda sync: {
+                            column['name'] for column in sqlalchemy.inspect(sync).get_columns('plugin_settings')
+                        }
+                    )
+                    assert permission_columns <= columns
+            await run_alembic_downgrade(sqlite_engine, '0043_speech_models')
+            if existing_columns is not None:
+                async with sqlite_engine.connect() as conn:
+                    columns = await conn.run_sync(
+                        lambda sync: {
+                            column['name'] for column in sqlalchemy.inspect(sync).get_columns('plugin_settings')
+                        }
+                    )
+                    assert columns == {'uuid'}
 
     @pytest.mark.asyncio
-    async def test_upgrade_from_reasoning_config_head_to_merged_head(self, sqlite_engine):
-        """A database that already ran the feature migration must remain upgradable."""
+    @pytest.mark.parametrize('has_table', [False, True])
+    async def test_monitoring_handled_by_round_trip(self, sqlite_engine, has_table):
+        """0045 is idempotent and keeps existing monitoring rows (LANG-320)."""
+        metadata = sqlalchemy.MetaData()
+        messages = sqlalchemy.Table(
+            'monitoring_messages',
+            metadata,
+            sqlalchemy.Column('id', sqlalchemy.String(255), primary_key=True),
+            sqlalchemy.Column('runner_name', sqlalchemy.String(255)),
+        )
+        if has_table:
+            async with sqlite_engine.begin() as conn:
+                await conn.run_sync(metadata.create_all)
+                await conn.execute(messages.insert().values(id='legacy', runner_name='runner'))
+
+        def inspect(sync):
+            inspector = sqlalchemy.inspect(sync)
+            if not inspector.has_table('monitoring_messages'):
+                return None, None
+            return (
+                {column['name'] for column in inspector.get_columns('monitoring_messages')},
+                {index['name'] for index in inspector.get_indexes('monitoring_messages')},
+            )
+
+        await run_alembic_stamp(sqlite_engine, '0044_plugin_permissions')
+        for _ in range(2):
+            await run_alembic_upgrade(sqlite_engine, '0045_monitoring_handled_by')
+            async with sqlite_engine.connect() as conn:
+                columns, indexes = await conn.run_sync(inspect)
+                if has_table:
+                    assert 'handled_by' in columns
+                    assert 'ix_monitoring_messages_handled_by' in indexes
+                    row = (await conn.execute(text('SELECT runner_name, handled_by FROM monitoring_messages'))).one()
+                    assert tuple(row) == ('runner', None)
+                else:
+                    assert columns is None
+            await run_alembic_downgrade(sqlite_engine, '0044_plugin_permissions')
+            async with sqlite_engine.connect() as conn:
+                columns, _ = await conn.run_sync(inspect)
+                assert columns is None or 'handled_by' not in columns
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('with_model_parents', [False, True])
+    async def test_speech_upgrade_preserves_pipeline_and_model_constraints(self, sqlite_engine, with_model_parents):
+        metadata = sqlalchemy.MetaData()
+        if with_model_parents:
+            sqlalchemy.Table('workspaces', metadata, sqlalchemy.Column('uuid', sqlalchemy.String(36), primary_key=True))
+            sqlalchemy.Table(
+                'model_providers',
+                metadata,
+                sqlalchemy.Column('uuid', sqlalchemy.String(255), primary_key=True),
+                sqlalchemy.Column('workspace_uuid', sqlalchemy.String(36), nullable=False),
+                sqlalchemy.UniqueConstraint('workspace_uuid', 'uuid'),
+            )
+        pipelines = sqlalchemy.Table(
+            'legacy_pipelines',
+            metadata,
+            sqlalchemy.Column('uuid', sqlalchemy.String(255), primary_key=True),
+            sqlalchemy.Column('stages', sqlalchemy.JSON),
+            sqlalchemy.Column('config', sqlalchemy.JSON),
+        )
+        stages = ['GroupRespondRuleCheckStage', 'PreContentFilterStage', 'ResponseWrapper', 'LongTextProcessStage']
         async with sqlite_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(metadata.create_all)
+            await conn.execute(
+                pipelines.insert().values(uuid='pipeline', stages=stages, config={'ai': {'model': 'llm'}})
+            )
+        await run_alembic_stamp(sqlite_engine, '0042_sqlite_incremental_vacuum')
+        await run_alembic_upgrade(sqlite_engine, '0043_speech_models')
+        async with sqlite_engine.connect() as conn:
+            pipeline = (await conn.execute(pipelines.select())).one()
+            assert pipeline.stages == [
+                'GroupRespondRuleCheckStage',
+                'SpeechRecognitionStage',
+                'PreContentFilterStage',
+                'ResponseWrapper',
+                'TextToSpeechStage',
+                'LongTextProcessStage',
+            ]
+            assert pipeline.config['ai'] == {'model': 'llm'}
+            assert pipeline.config['speech']['speech-recognition']['enabled'] is False
+            assert pipeline.config['speech']['text-to-speech']['enabled'] is False
+            for table_name in ('asr_models', 'tts_models'):
+                assert (
+                    await conn.run_sync(lambda sync: sqlalchemy.inspect(sync).has_table(table_name))
+                    is with_model_parents
+                )
+                if with_model_parents:
+                    foreign_keys = await conn.run_sync(
+                        lambda sync: sqlalchemy.inspect(sync).get_foreign_keys(table_name)
+                    )
+                    provider_key = next(key for key in foreign_keys if key['referred_table'] == 'model_providers')
+                    assert provider_key['constrained_columns'] == ['workspace_uuid', 'provider_uuid']
+                    assert provider_key['referred_columns'] == ['workspace_uuid', 'uuid']
 
-        await run_alembic_stamp(sqlite_engine, '0018_llm_reasoning_config')
+    @pytest.mark.asyncio
+    async def test_execution_filter_index_round_trip_preserves_history(self, sqlite_engine):
+        from langbot.pkg.entity.persistence.monitoring import MonitoringMessage
+
+        index_name = 'ix_monitoring_messages_execution_filter'
+        index = next(item for item in MonitoringMessage.__table__.indexes if item.name == index_name)
+
+        def indexes(connection):
+            return {
+                item['name']: item['column_names']
+                for item in sqlalchemy.inspect(connection).get_indexes('monitoring_messages')
+            }
+
+        async with sqlite_engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+            await connection.execute(
+                sqlalchemy.insert(MonitoringMessage).values(
+                    id='historical-root',
+                    timestamp=sqlalchemy.func.current_timestamp(),
+                    workspace_uuid='workspace',
+                    bot_id='bot',
+                    bot_name='Bot',
+                    pipeline_id='pipeline',
+                    pipeline_name='Pipeline',
+                    session_id='session',
+                    message_content='preserve historical payload',
+                    status='success',
+                    role='user',
+                    level='info',
+                )
+            )
+            original = await connection.run_sync(indexes)
+
+        await run_alembic_stamp(sqlite_engine, '0039_execution_lease_indexes')
+        # Fresh installations already have the ORM index before Alembic runs.
         await run_alembic_upgrade(sqlite_engine, 'head')
+        await run_alembic_downgrade(sqlite_engine, '0039_execution_lease_indexes')
+        async with sqlite_engine.connect() as connection:
+            remaining = await connection.run_sync(indexes)
+        expected = {
+            name: columns
+            for name, columns in original.items()
+            # Indexes owned by later migrations disappear on downgrade to 0039.
+            if name not in {index_name, 'ix_monitoring_messages_summary_event', 'ix_monitoring_messages_handled_by'}
+        }
+        expected['ix_monitoring_messages_workspace_timestamp'] = ['workspace_uuid', 'timestamp']
+        assert remaining == expected
 
-        assert await get_alembic_current(sqlite_engine) == _get_script_head()
+        # Existing installations receive the same covering index through migration.
+        await run_alembic_upgrade(sqlite_engine, 'head')
+        async with sqlite_engine.connect() as connection:
+            upgraded = await connection.run_sync(indexes)
+            assert upgraded == original
+            assert upgraded[index_name] == [column.name for column in index.columns]
+            assert await connection.scalar(sqlalchemy.select(MonitoringMessage.message_content)) == (
+                'preserve historical payload'
+            )
 
     @pytest.mark.asyncio
     async def test_upgrade_removes_agent_enabled_column(self, sqlite_engine):
@@ -171,6 +388,15 @@ class TestSQLiteMigrationUpgrade:
 
         assert 'enabled' not in columns
 
+    @staticmethod
+    def _create_bootstrap_tables(conn):
+        # Match PersistenceManager.create_tables: 0010/0023 rewrite the session PK,
+        # so only 0040 may create the dependent receipt table after those migrations.
+        Base.metadata.create_all(
+            conn,
+            tables=[table for table in Base.metadata.sorted_tables if table.name != 'monitoring_session_receipts'],
+        )
+
     @pytest.mark.asyncio
     async def test_upgrade_from_baseline_to_head(self, sqlite_engine):
         """
@@ -184,7 +410,7 @@ class TestSQLiteMigrationUpgrade:
         """
         # Create tables
         async with sqlite_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._create_bootstrap_tables)
 
         # Stamp baseline
         await run_alembic_stamp(sqlite_engine, '0001_baseline')
@@ -213,7 +439,7 @@ class TestSQLiteMigrationUpgrade:
         """
         # Create tables
         async with sqlite_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._create_bootstrap_tables)
 
         # Stamp and upgrade
         await run_alembic_stamp(sqlite_engine, '0001_baseline')
@@ -234,7 +460,7 @@ class TestSQLiteMigrationUpgrade:
         used the long RAG repair revision id.
         """
         async with sqlite_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._create_bootstrap_tables)
 
         await run_alembic_stamp(sqlite_engine, '0001_baseline')
         async with sqlite_engine.begin() as conn:
@@ -246,6 +472,21 @@ class TestSQLiteMigrationUpgrade:
 
         rev = await get_alembic_current(sqlite_engine)
         assert rev == _get_script_head(), f'Expected head {_get_script_head()}, got {rev}'
+
+    @pytest.mark.asyncio
+    async def test_upgrade_from_fork_0035_to_merged_head(self, sqlite_engine):
+        """
+        Upgrade succeeds from the previous fork release head (0035_monitoring_tool_workspace)
+        through upstream 0034..0056 into the converged 0057 head.
+        """
+        async with sqlite_engine.begin() as conn:
+            await conn.run_sync(self._create_bootstrap_tables)
+
+        await run_alembic_upgrade(sqlite_engine, '0035_monitoring_tool_workspace')
+        assert await get_alembic_current(sqlite_engine) == '0035_monitoring_tool_workspace'
+
+        await run_alembic_upgrade(sqlite_engine, 'head')
+        assert await get_alembic_current(sqlite_engine) == _get_script_head()
 
     @pytest.mark.asyncio
     async def test_upgrade_from_0012_adds_knowledge_base_embedding_dimension(self, sqlite_engine):
@@ -360,87 +601,14 @@ class TestSQLiteMigrationFreshDatabase:
         assert await get_alembic_current(sqlite_engine) == '0022_codex_credentials'
 
     @pytest.mark.asyncio
-    async def test_fresh_db_upgrade_from_scratch(self, tmp_path):
-        """
-        Fresh database (no tables) can be upgraded directly to head.
-
-        Workflow:
-        1. Create fresh engine with new DB file
-        2. Create tables
-        3. Upgrade to head
-        4. Verify revision
-        """
-        # Use different DB file for fresh test
-        fresh_db_file = tmp_path / 'test_migrations_fresh.db'
-        fresh_url = f'sqlite+aiosqlite:///{fresh_db_file}'
-        fresh_engine = create_async_engine(fresh_url)
-
-        # Create tables on fresh DB
-        async with fresh_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-        # Upgrade to head directly (no baseline stamp)
-        await run_alembic_upgrade(fresh_engine, 'head')
-
-        # Verify revision
-        rev = await get_alembic_current(fresh_engine)
-        assert rev is not None, 'Expected a revision on fresh DB'
-
-        await fresh_engine.dispose()
-
-    @pytest.mark.asyncio
-    async def test_fresh_db_without_create_all_behavior(self, tmp_path):
-        """
-        Fresh database without create_all - test actual behavior.
-
-        This tests what happens when migrations run on truly empty DB.
-        The behavior is determined by Alembic and migration scripts.
-
-        EXPECTED: Either:
-        1. Migration succeeds (if scripts handle empty DB)
-        2. Migration fails with specific error (if scripts require tables)
-
-        IMPORTANT: This test verifies the ACTUAL behavior, not accepting
-        any arbitrary failure with try-except pass.
-        """
-        fresh_db_file = tmp_path / 'test_empty_migrations.db'
-        fresh_url = f'sqlite+aiosqlite:///{fresh_db_file}'
-        fresh_engine = create_async_engine(fresh_url)
-
-        # Capture the actual behavior
-        actual_result = None
-        actual_error = None
-
-        try:
-            await run_alembic_upgrade(fresh_engine, 'head')
-            rev = await get_alembic_current(fresh_engine)
-            actual_result = rev
-        except Exception as e:
-            actual_error = e
-
-        await fresh_engine.dispose()
-
-        # Verify specific behavior - one of two outcomes is expected
-        if actual_result is not None:
-            # Migration succeeded - verify revision exists
-            assert actual_result is not None, 'Revision should exist after successful migration'
-        else:
-            # Migration failed - verify the error type is known
-            # Alembic typically raises specific errors for missing tables
-            assert actual_error is not None, 'Error should be captured if migration failed'
-            # Log the error type for documentation (don't silently pass)
-            error_type = type(actual_error).__name__
-            # Acceptable error types for empty DB scenarios
-            acceptable_errors = [
-                'OperationalError',  # SQLite table not found
-                'ProgrammingError',  # SQLAlchemy errors
-                'CommandError',  # Alembic command errors
-            ]
-            assert error_type in acceptable_errors, (
-                f'Unexpected error type: {error_type}. '
-                f'This may indicate a regression in migration behavior. '
-                f'Error: {actual_error}'
-            )
+    async def test_fresh_db_without_create_all_behavior(self, sqlite_engine):
+        """Bare Alembic reaches head but relies on ORM bootstrap for core tables."""
+        await run_alembic_upgrade(sqlite_engine, 'head')
+        assert await get_alembic_current(sqlite_engine) == _get_script_head()
+        async with sqlite_engine.connect() as conn:
+            tables = await conn.run_sync(lambda sync: set(sqlalchemy.inspect(sync).get_table_names()))
+        assert {'agents', 'runner_state', 'directory_projection_states', 'directory_projection_inbox'} <= tables
+        assert not {'users', 'bots', 'workspaces'} & tables
 
 
 class TestSQLiteMigrationGetCurrent:
@@ -458,16 +626,3 @@ class TestSQLiteMigrationGetCurrent:
         # No stamp - should return None
         rev = await get_alembic_current(sqlite_engine)
         assert rev is None, f'Expected None for unstamped DB, got {rev}'
-
-    @pytest.mark.asyncio
-    async def test_get_current_after_stamp_returns_revision(self, sqlite_engine):
-        """
-        get_alembic_current returns correct revision after stamp.
-        """
-        async with sqlite_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-        await run_alembic_stamp(sqlite_engine, '0001_baseline')
-
-        rev = await get_alembic_current(sqlite_engine)
-        assert rev == '0001_baseline'

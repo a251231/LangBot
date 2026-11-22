@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import asyncio
+import json
 
 import pytest
 import sqlalchemy
@@ -10,19 +12,34 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 
-from langbot.pkg.agent.runner.run_ledger_store import RunLedgerStore
+from langbot.pkg.agent.runner.run_ledger_store import RunLedgerStore, _epoch_to_datetime
 from langbot.pkg.entity.persistence.agent_run import AgentRun
 from langbot.pkg.entity.persistence.base import Base
+from langbot.pkg.persistence.write_admission import enable_sqlite_write_queue
 
 
 UTC = datetime.timezone.utc
 
 
-@pytest.fixture
-async def db_engine(tmp_path):
+@pytest.mark.parametrize('scale', [1, 1000])
+def test_epoch_to_datetime_accepts_seconds_and_milliseconds(scale):
+    assert _epoch_to_datetime(1_790_000_000.125 * scale) == datetime.datetime.fromtimestamp(
+        1_790_000_000.125, UTC
+    ).replace(tzinfo=None)
+
+
+@pytest.mark.parametrize('value', [None, float('nan'), float('inf'), -float('inf'), 10**400, 'invalid', []])
+def test_epoch_to_datetime_ignores_invalid_timestamp(value):
+    assert _epoch_to_datetime(value) is None
+
+
+@pytest.fixture(params=[False, True], ids=['unqueued', 'queued'])
+async def db_engine(tmp_path, request):
     db_path = tmp_path / 'run_ledger_store.db'
     engine = create_async_engine(f'sqlite+aiosqlite:///{db_path}', echo=False)
 
+    if request.param:
+        enable_sqlite_write_queue(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -34,6 +51,111 @@ async def db_engine(tmp_path):
 @pytest.fixture
 def store(db_engine):
     return RunLedgerStore(db_engine)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scale', [1, 1000])
+async def test_create_run_persists_normalized_deadline(store, scale):
+    record = await store.create_run(
+        run_id='run-timestamp',
+        event_id='event',
+        binding_id='binding',
+        runner_id='runner',
+        deadline_at=1_790_000_000 * scale,
+    )
+    assert record['deadline_at'] == 1_790_000_000
+
+
+@pytest.fixture
+async def legacy_run(store, db_engine):
+    await store.create_run(
+        run_id='legacy',
+        event_id='event',
+        binding_id='binding',
+        runner_id='runner',
+        workspace_id='ws',
+    )
+    metadata = {
+        'input': [
+            {'type': 'Image', 'base64': 'eA=='},
+            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,eA==', 'detail': 'low'}},
+            {'type': 'image_url', 'image_url': {'url': 'https://example.com/image.png'}},
+            {'type': 'text', 'text': 'keep this'},
+        ],
+        'attempt': 0,
+        'activated_skills': {'existing': 'v1'},
+    }
+    async with db_engine.begin() as conn:
+        # Explicit TEXT binding simulates data persisted before the media contract.
+        await conn.execute(
+            sqlalchemy.update(AgentRun)
+            .where(AgentRun.run_id == 'legacy')
+            .values(
+                metadata_json=sqlalchemy.bindparam('legacy_metadata', json.dumps(metadata), type_=sqlalchemy.Text())
+            )
+        )
+    return metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['pin', 'finalize'])
+async def test_metadata_update_redacts_legacy_images(store, legacy_run, operation):
+    if operation == 'pin':
+        assert await store.pin_skill_revision('legacy', 'ws', 'demo', 'v2') == 'v2'
+    else:
+        await store.finalize_run(run_id='legacy', status='completed', metadata={'note': 'done'})
+
+    run = await store.get_run('legacy')
+    expected = {
+        **legacy_run,
+        'input': [
+            {'type': 'Image', 'base64': None},
+            {'type': 'image_url', 'image_url': {'url': None, 'detail': 'low'}},
+            *legacy_run['input'][2:],
+        ],
+    }
+    if operation == 'pin':
+        expected['activated_skills'] = {'existing': 'v1', 'demo': 'v2'}
+        assert run['status'] == 'running'
+    else:
+        expected['note'] = 'done'
+        assert run['status'] == 'completed'
+    assert run['metadata'] == expected
+
+
+@pytest.mark.asyncio
+async def test_finalize_without_metadata_preserves_legacy_snapshot(store, legacy_run):
+    run = await store.finalize_run(run_id='legacy', status='completed')
+    assert run['status'] == 'completed'
+    assert run['metadata'] == legacy_run
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_does_not_mutate_terminal_run(store):
+    await store.create_run(
+        run_id='already-completed',
+        event_id='event',
+        binding_id='binding',
+        runner_id='runner',
+    )
+    completed = await store.finalize_run(run_id='already-completed', status='completed')
+
+    assert await store.request_cancel(run_id='already-completed', status_reason='late stop') is None
+    current = await store.get_run('already-completed')
+    assert current['status'] == 'completed'
+    assert current['cancel_requested_at'] is None
+    assert current['status_reason'] == completed['status_reason']
+
+
+@pytest.mark.asyncio
+async def test_metadata_update_still_rejects_new_inline_images(store, legacy_run):
+    with pytest.raises(sqlalchemy.exc.StatementError, match='Inline images cannot be persisted'):
+        await store.finalize_run(
+            run_id='legacy', status='completed', metadata={'new_image': {'type': 'Image', 'base64': 'eQ=='}}
+        )
+    run = await store.get_run('legacy')
+    assert run['status'] == 'running'
+    assert run['metadata'] == legacy_run
 
 
 @pytest.mark.asyncio
@@ -343,6 +465,190 @@ async def test_append_audit_event_uses_next_sequence(store):
 
 
 @pytest.mark.asyncio
+async def test_retry_resume_and_cancel_ack_persist_lifecycle_metadata(store):
+    await store.create_run(
+        run_id='run-retry-contract',
+        event_id='evt-retry',
+        binding_id='binding-1',
+        runner_id='runner-a',
+    )
+    await store.finalize_run(run_id='run-retry-contract', status='failed', status_reason='upstream')
+
+    retried = await store.retry_run(run_id='run-retry-contract', status_reason='retry once')
+    assert retried is not None
+    assert retried['status'] == 'queued'
+    assert retried['metadata']['retry_count'] == 1
+    assert retried['metadata']['retry_reason'] == 'retry once'
+
+    await store.finalize_run(run_id='run-retry-contract', status='timeout')
+    resumed = await store.retry_run(
+        run_id='run-retry-contract',
+        status_reason='resume from last event',
+        resume_from_sequence=7,
+    )
+    assert resumed is not None
+    assert resumed['status'] == 'queued'
+    assert resumed['metadata']['retry_count'] == 2
+    assert resumed['metadata']['resume_from_sequence'] == 7
+
+    acknowledged = await store.acknowledge_cancel(
+        run_id='run-retry-contract',
+        reason='cleanup complete',
+        cleanup_confirmed=True,
+    )
+    assert acknowledged is not None
+    assert acknowledged['metadata']['cancel_ack']['cleanup_confirmed'] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_ack_is_monotonic_and_concurrent_across_stores(store, db_engine):
+    run_id = 'cancel-ack'
+    await store.create_run(run_id=run_id, event_id=None, binding_id=None, runner_id='runner', queue_name='external')
+    other_engine = create_async_engine(db_engine.url)
+    try:
+        other = RunLedgerStore(other_engine)
+        pending = await store.acknowledge_cancel(run_id=run_id, reason='working', cleanup_confirmed=False)
+        repeated = await other.acknowledge_cancel(run_id=run_id, reason='retry', cleanup_confirmed=False)
+        assert repeated['metadata'] == pending['metadata']
+        confirmed, concurrent = await asyncio.gather(
+            store.acknowledge_cancel(run_id=run_id, reason='complete'),
+            other.acknowledge_cancel(run_id=run_id, reason='complete'),
+        )
+        assert confirmed['metadata'] == concurrent['metadata']
+        stale = await other.acknowledge_cancel(run_id=run_id, reason='working', cleanup_confirmed=False)
+        assert stale['metadata'] == confirmed['metadata']
+        assert confirmed['metadata']['cancel_ack']['reason'] == 'complete'
+        assert confirmed['metadata']['cancel_ack']['cleanup_confirmed'] is True
+        events, *_ = await store.page_run_events(run_id=run_id)
+        assert [(e['type'], e['data']['reason']) for e in events] == [
+            ('run.cancel_ack', 'working'),
+            ('run.cancel_ack', 'complete'),
+        ]
+        await store.finalize_run(run_id=run_id, status='cancelled')
+        next_attempt = await store.retry_run(run_id=run_id)
+        assert 'cancel_ack' not in next_attempt['metadata']
+        await store.finalize_run(
+            run_id=run_id,
+            status='queued',
+            metadata={'retry_count': 0, 'cancel_ack': pending['metadata']['cancel_ack'], 'user_note': 'keep'},
+        )
+        current = await store.get_run(run_id)
+        assert current['metadata']['retry_count'] == 1 and current['metadata']['user_note'] == 'keep'
+        assert 'cancel_ack' not in current['metadata']
+        with pytest.raises(ValueError, match='does not match'):
+            await other.acknowledge_cancel(run_id=run_id, expected_retry_count=0)
+        await store.acknowledge_cancel(run_id=run_id, reason='second attempt', expected_retry_count=1)
+        events, *_ = await store.page_run_events(run_id=run_id)
+        assert [e['sequence'] for e in events] == [1, 2, 3]
+    finally:
+        await other_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_run_finalizer_cannot_restore_stale_cleanup_state(store):
+    await store.create_run(run_id='ordinary', event_id=None, binding_id=None, runner_id='runner')
+    pending = await store.acknowledge_cancel(run_id='ordinary', reason='in progress', cleanup_confirmed=False)
+    confirmed = await store.acknowledge_cancel(run_id='ordinary', reason='done')
+    metadata = {**pending['metadata'], 'result': 'delivered', 'retry_count': 12}
+    final = await store.finalize_run(run_id='ordinary', status='cancelled', metadata=metadata)
+    assert final['metadata'] == {
+        'cancel_ack': confirmed['metadata']['cancel_ack'],
+        'result': 'delivered',
+        'retry_count': 12,
+    }
+    await store.acknowledge_cancel(run_id='ordinary', reason='done')
+    history, *_ = await store.page_run_events(run_id='ordinary')
+    assert [(row['type'], row['data']['cleanup_confirmed']) for row in history] == [
+        ('run.cancel_ack', False),
+        ('run.cancel_ack', True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_ack_replay_preserves_legacy_metadata_and_records_missing_audit(store):
+    legacy = {'acknowledged_at': 12345, 'reason': 'original', 'cleanup_confirmed': True}
+    await store.create_run(
+        run_id='old', event_id=None, binding_id=None, runner_id='runner', metadata={'cancel_ack': legacy}
+    )
+    for _ in range(2):
+        got = await store.acknowledge_cancel(run_id='old', reason='current retry')
+        assert got['metadata']['cancel_ack'] == legacy
+    events, *_ = await store.page_run_events(run_id='old')
+    assert [(e['source'], e['type'], e['data']['reason']) for e in events] == [
+        ('host', 'run.cancel_ack', 'current retry')
+    ]
+    assert events[0]['created_at'] > legacy['acknowledged_at']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('first_state', [False, True])
+async def test_legacy_external_ack_has_no_claim_on_new_attempt(store, first_state):
+    original = {'acknowledged_at': 12345, 'reason': 'old cleanup', 'cleanup_confirmed': True}
+    await store.create_run(
+        run_id='upgraded',
+        runner_id='runner',
+        binding_id=None,
+        event_id=None,
+        queue_name='ext',
+        metadata={'retry_count': 1, 'retry_requested_at': 12345, 'cancel_ack': original},
+    )
+    assert 'cancel_ack' not in (await store.get_run('upgraded'))['metadata']
+    old_event = await store.append_audit_event(
+        run_id='upgraded', event_type='run.cancel_ack', data={'reason': 'old cleanup', 'cleanup_confirmed': True}
+    )
+    for state in (first_state, first_state, True, True):
+        got = await store.acknowledge_cancel(
+            run_id='upgraded', cleanup_confirmed=state, expected_retry_count=1, reason='new cleanup'
+        )
+        receipt = got['metadata']['cancel_ack']
+        assert (receipt['retry_count'], receipt['reason'], receipt['cleanup_confirmed']) == (1, 'new cleanup', state)
+    events, *_ = await store.page_run_events(run_id='upgraded')
+    assert events[0] == old_event
+    assert [(e['data']['retry_count'], e['data']['cleanup_confirmed']) for e in events[1:]] == (
+        [(1, True)] if first_state else [(1, False), (1, True)]
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_ack_audit_failure_rolls_back_metadata(store, db_engine):
+    await store.create_run(run_id='failure', event_id=None, binding_id=None, runner_id='runner')
+
+    def refuse_event(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith('INSERT INTO agent_run_event'):
+            raise RuntimeError('injected audit write failure')
+
+    sqlalchemy.event.listen(db_engine.sync_engine, 'before_cursor_execute', refuse_event)
+    try:
+        with pytest.raises(RuntimeError, match='injected audit write failure'):
+            await store.acknowledge_cancel(run_id='failure')
+    finally:
+        sqlalchemy.event.remove(db_engine.sync_engine, 'before_cursor_execute', refuse_event)
+    assert 'cancel_ack' not in (await store.get_run('failure'))['metadata']
+    assert (await store.page_run_events(run_id='failure'))[0] == []
+    await store.acknowledge_cancel(run_id='failure')
+    assert len((await store.page_run_events(run_id='failure'))[0]) == 1
+
+
+@pytest.mark.asyncio
+async def test_host_events_allocate_sequences_across_stores(store, db_engine):
+    await store.create_run(run_id='concurrent-host', event_id=None, binding_id=None, runner_id='runner')
+    other = RunLedgerStore(db_engine)
+    events = await asyncio.gather(
+        store.append_audit_event(run_id='concurrent-host', event_type='admin.run_cancel'),
+        other.append_event(
+            run_id='concurrent-host',
+            sequence=None,
+            event_type='run.failed',
+            data={'code': 'cancelled'},
+            source='host',
+        ),
+    )
+    assert sorted(event['sequence'] for event in events) == [1, 2]
+    persisted, *_ = await store.page_run_events(run_id='concurrent-host', limit=10)
+    assert {event['type'] for event in persisted} == {'admin.run_cancel', 'run.failed'}
+
+
+@pytest.mark.asyncio
 async def test_runtime_register_heartbeat_list_and_mark_stale(store):
     registered = await store.register_runtime(
         runtime_id='runtime-a',
@@ -499,3 +805,91 @@ async def test_agent_run_pages_include_old_bindings_without_leaking_other_agents
     page, cursor, more, total = await store.list_runs(agent_id='one', workspace_id='w', before_id=cursor, limit=2)
     assert [run['run_id'] for run in page] == ['old']
     assert not more and total == 3
+
+
+@pytest.mark.asyncio
+async def test_skill_pins_belong_to_run_and_survive_store_restart(store, db_engine):
+    for run_id in ('old', 'new'):
+        await store.create_run(
+            run_id=run_id,
+            event_id=run_id,
+            binding_id='binding',
+            runner_id='runner',
+            workspace_id='ws',
+            conversation_id='same',
+            status='running',
+        )
+    assert await store.pin_skill_revision('old', 'ws', 'demo', 'v1') == 'v1'
+    restarted = RunLedgerStore(db_engine)
+    assert await restarted.pin_skill_revision('old', 'ws', 'demo', 'v2') == 'v1'
+    assert await restarted.pin_skill_revision('new', 'ws', 'demo', 'v2') == 'v2'
+    assert (await restarted.get_run('old'))['metadata']['activated_skills'] == {'demo': 'v1'}
+    with pytest.raises(ValueError, match='current Workspace'):
+        await restarted.pin_skill_revision('old', 'other', 'demo', 'v2')
+    await store.finalize_run(run_id='old', status='completed')
+    with pytest.raises(ValueError, match='active run'):
+        await restarted.pin_skill_revision('old', 'ws', 'demo', 'v2')
+
+
+@pytest.mark.asyncio
+async def test_activation_uses_new_revision_only_for_new_run(store, db_engine, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from langbot.pkg.api.http.context import ExecutionContext
+    from langbot.pkg.skill.repository import SkillRepository
+    from langbot.pkg.skill.manager import SkillManager
+    from langbot.pkg.provider.tools.loaders.skill_authoring import SkillToolLoader
+
+    context = ExecutionContext(instance_uuid='instance', workspace_uuid='ws', placement_generation=1)
+
+    async def binding(workspace_uuid, **kwargs):
+        return context
+
+    app = SimpleNamespace(
+        logger=Mock(),
+        instance_config=SimpleNamespace(data={'skills': {'root': str(tmp_path / 'skills')}}),
+        workspace_service=SimpleNamespace(get_execution_binding=binding),
+        persistence_mgr=SimpleNamespace(get_db_engine=lambda: db_engine),
+    )
+    app.skill_repository = SkillRepository(app)
+    app.skill_mgr = SkillManager(app)
+    loader = SkillToolLoader(app)
+    first = await app.skill_repository.create_skill(context, {'name': 'demo', 'instructions': 'version one'})
+    await app.skill_mgr.reload_skills(context)
+
+    def query(run_id):
+        return SimpleNamespace(
+            instance_uuid='instance',
+            workspace_uuid='ws',
+            placement_generation=1,
+            variables={'_pipeline_bound_skills': ['demo']},
+            _execution_context=context,
+            _agent_run_session={'run_id': run_id},
+        )
+
+    for name in ('old', 'new'):
+        await store.create_run(
+            run_id=name,
+            event_id=name,
+            binding_id='binding',
+            runner_id='runner',
+            workspace_id='ws',
+            conversation_id='same',
+            status='running',
+        )
+    old = query('old')
+    assert 'version one' in (await loader._invoke_activate_skill({'skill_name': 'demo'}, old))['content']
+    second = await app.skill_repository.update_skill(
+        context, 'demo', {'instructions': 'version two'}, base_revision=first['revision']
+    )
+    await app.skill_mgr.reload_skills(context)
+    assert 'version two' in (await loader._invoke_activate_skill({'skill_name': 'demo'}, query('new')))['content']
+    assert 'version one' in (await loader._invoke_activate_skill({'skill_name': 'demo'}, old))['content']
+    await app.skill_repository.delete_skill(context, 'demo')
+    await app.skill_mgr.reload_skills(context)
+    assert 'version one' in (await loader._invoke_activate_skill({'skill_name': 'demo'}, query('old')))['content']
+    assert (await store.get_run('new'))['metadata']['activated_skills']['demo'] == second['revision']
+    revoked = query('old')
+    revoked.variables['_pipeline_bound_skills'] = []
+    with pytest.raises(ValueError, match='not authorized'):
+        await loader._invoke_activate_skill({'skill_name': 'demo'}, revoked)

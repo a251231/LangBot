@@ -14,6 +14,7 @@ import sqlalchemy.ext.asyncio as sqlalchemy_asyncio
 import sqlalchemy
 
 from . import database, sqlite_migration_backup
+from .write_admission import write_slot
 from ..entity.persistence import base, metadata, model as persistence_model
 from ..entity.persistence import workspace as persistence_workspace
 from ..entity import persistence
@@ -31,6 +32,8 @@ from .tenant_uow import (
     TENANT_POLICY_NAME,
     TENANT_SETTING,
     TENANT_TABLE_COLUMNS,
+    PUBLIC_MEDIA_KEY_SETTING,
+    PUBLIC_MEDIA_POLICY_NAME,
     CrossScopeTransactionError,
     DIRECTORY_INSTANCE_SETTING,
     DIRECTORY_PROJECTED_TENANT_TABLES,
@@ -61,6 +64,13 @@ _ALEMBIC_TENANT_TABLES = {
     'bots',
     'bot_admins',
     'binary_storages',
+    'content_objects',
+    'content_aliases',
+    'artifacts',
+    'artifact_references',
+    'artifact_publications',
+    'skill_registry',
+    'skill_versions',
     'mcp_servers',
     'model_providers',
     'codex_credentials',
@@ -70,6 +80,8 @@ _ALEMBIC_TENANT_TABLES = {
     'llm_models',
     'embedding_models',
     'rerank_models',
+    'asr_models',
+    'tts_models',
     'legacy_pipelines',
     'pipeline_run_records',
     'pipeline_migration_snapshots',
@@ -82,10 +94,15 @@ _ALEMBIC_TENANT_TABLES = {
     'monitoring_llm_calls',
     'monitoring_tool_calls',
     'monitoring_sessions',
+    'monitoring_session_receipts',
     'monitoring_errors',
     'monitoring_embedding_calls',
     'monitoring_feedback',
     'workspace_operation_logs',
+    'alert_settings',
+    'alert_incidents',
+    'alert_deliveries',
+    'workspace_message_usage_daily',
     'langbot_vectors',
     'directory_projection_states',
     'directory_projection_inbox',
@@ -105,7 +122,7 @@ _WORKSPACE_ALEMBIC_REVISION = '0009_workspace_tenancy'
 _RESOURCE_SCOPE_ALEMBIC_REVISION = '0010_scope_resources'
 _OSS_WORKSPACE_METADATA_KEY = 'oss_workspace_uuid'
 _RELEASE_MIGRATION_ADVISORY_LOCK_ID = 0x4C414E47424F5432
-_PGVECTOR_ALLOWED_DIMENSIONS = (384, 512, 768, 1024, 1536, 3072)
+_PGVECTOR_ALLOWED_DIMENSIONS = (384, 512, 768, 1024, 1536, 2048, 3072)
 _RUNTIME_SCHEMA = 'public'
 _ALEMBIC_RUNTIME_TABLE = 'alembic_version'
 _RUNTIME_TABLE_PRIVILEGES = frozenset({'SELECT', 'INSERT', 'UPDATE', 'DELETE'})
@@ -185,16 +202,31 @@ class PersistenceManager:
 
         if self.mode == PersistenceMode.CLOUD_RUNTIME:
             await self._validate_cloud_runtime()
+            from .resource_urls import install
+
+            install(engine.sync_engine)
             return
 
         if self.mode == PersistenceMode.RELEASE_MIGRATION:
             async with self._release_migration_lock():
                 await self._initialize_managed_schema()
                 await self._validate_release_schema()
+            from .resource_urls import install
+
+            install(engine.sync_engine)
             return
 
         await self._initialize_managed_schema()
+        from .sqlite_startup import checkpoint_after_migration
+
+        if engine.dialect.name == 'sqlite':
+            self.ap.logger.info('Completing SQLite startup WAL checkpoint before starting producers...')
+            await checkpoint_after_migration(engine)
+            self.ap.logger.info('SQLite startup WAL checkpoint completed.')
         await self._enable_sqlite_foreign_keys_after_migration()
+        from .resource_urls import install
+
+        install(engine.sync_engine)
 
         if self.mode == PersistenceMode.OSS_COMPAT:
             await self.write_space_model_providers()
@@ -276,6 +308,16 @@ class PersistenceManager:
             if self.mode == PersistenceMode.OSS_COMPAT:
                 await self._install_oss_postgres_tenant_scope()
         else:
+            current_revision = await alembic_runner.get_alembic_current(engine)
+            if (
+                current_revision is None
+                or current_revision in _PRE_WORKSPACE_ALEMBIC_REVISIONS
+                or current_revision == _WORKSPACE_ALEMBIC_REVISION
+            ):
+                await self._run_alembic_migrations(_RESOURCE_SCOPE_ALEMBIC_REVISION)
+                # Deferred parent tables must exist before later migrations
+                # create dependent tables such as session summary receipts.
+                await self.create_tables()
             await self._run_alembic_migrations()
 
             # SQLite keeps the historical post-migration create_all pass. New
@@ -297,7 +339,10 @@ class PersistenceManager:
                 # without workspace_uuid and Workspace itself references the
                 # account UUID introduced by 0009.  Alembic must expand those
                 # tables before SQLAlchemy may create any new tenant table.
-                excluded_tables = _ALEMBIC_TENANT_TABLES if legacy_users else set()
+                excluded_tables = set(_ALEMBIC_TENANT_TABLES) if legacy_users else set()
+                # 0010 and 0023 rewrite the session primary key on an OSS bootstrap.
+                # Only 0040 may create its dependent composite receipt foreign key.
+                excluded_tables.add('monitoring_session_receipts')
                 tables_to_create = [table for table in self.meta.sorted_tables if table.name not in excluded_tables]
                 self.meta.create_all(sync_conn, tables=tables_to_create)
 
@@ -1553,6 +1598,14 @@ class PersistenceManager:
             'check_expression': None,
         }
 
+        policies['content_objects'][PUBLIC_MEDIA_POLICY_NAME] = {
+            'command': 'r',
+            'using_expression': (
+                f'((public_media = true) AND ((public_key)::text = {setting(PUBLIC_MEDIA_KEY_SETTING)}))'
+            ),
+            'check_expression': None,
+        }
+
         directory_setting = setting(DIRECTORY_INSTANCE_SETTING)
         workspace_expression = (
             f"(((instance_uuid)::text = {directory_setting}) AND ((source)::text = 'cloud_projection'::text))"
@@ -1597,7 +1650,14 @@ class PersistenceManager:
         return policies
 
     async def write_space_model_providers(self):
-        if constants.edition != 'community':
+        # Only a single-Workspace deployment may own the process-level
+        # compatibility provider. Genuine multi-tenant Cloud runs in CLOUD_RUNTIME
+        # persistence mode and never reaches this method, but a dedicated
+        # environment is `edition=cloud` on top of OSS persistence, so gating on
+        # the edition alone left it without the provider row -- and the Space OAuth
+        # callback then failed with "Provider not found" on every login.
+        deployment = getattr(self.ap, 'deployment', None)
+        if deployment is not None and getattr(deployment, 'multi_workspace_enabled', False):
             # SaaS Workspace/provider linkage is explicit control-plane state;
             # a process-level compatibility provider must never be projected
             # into an arbitrary cloud Workspace.
@@ -1688,9 +1748,23 @@ class PersistenceManager:
                         target_revision=_RESOURCE_SCOPE_ALEMBIC_REVISION,
                     )
 
-            # PostgreSQL has transactional DDL. SQLite has already crossed the
-            # two destructive tenancy boundaries under verified backups; this
-            # final call is a no-op today and applies future migrations.
+            if engine.dialect.name == 'sqlite':
+                current_rev = await alembic_runner.get_alembic_current(engine)
+                conversion = '0042_sqlite_incremental_vacuum'
+                if conversion in alembic_runner.pending_revisions(current_rev, target_revision):
+                    await alembic_runner.run_alembic_upgrade(engine, '0041_resource_urls')
+                    async with engine.connect() as connection:
+                        vacuum_mode = (await connection.exec_driver_sql('PRAGMA auto_vacuum')).scalar_one()
+                    if vacuum_mode == 0:
+                        await self._run_verified_sqlite_migration(
+                            engine,
+                            source_revision='0041_resource_urls',
+                            target_revision=conversion,
+                        )
+                    else:
+                        await alembic_runner.run_alembic_upgrade(engine, conversion)
+
+            # Apply any remaining release migrations after verified boundaries.
             await alembic_runner.run_alembic_upgrade(engine, target_revision)
             self.ap.logger.info(f'Alembic migrations completed at {target_revision}.')
         except Exception as e:
@@ -1797,6 +1871,15 @@ class PersistenceManager:
     def tenant_uow(self, workspace_uuid: str) -> TenantUnitOfWork:
         return self._scoped_uow(PersistenceScope.workspace(workspace_uuid))
 
+    @contextlib.asynccontextmanager
+    async def tenant_write_uow(self, workspace_uuid: str, *, operation: str = 'artifact'):
+        # An already-owned transaction cannot wait behind a writer that needs it to finish.
+        active = self._active_transaction.get()
+        joined = active is not None and active.owner_task is asyncio.current_task()
+        slot = contextlib.nullcontext() if joined else write_slot(self.get_db_engine(), operation)
+        async with slot, self.tenant_uow(workspace_uuid) as uow:
+            yield uow
+
     def tenant_scope(self, workspace_uuid: str) -> PersistenceScopeBoundary:
         """Bind a Workspace without holding a database session between calls."""
 
@@ -1823,6 +1906,10 @@ class PersistenceManager:
 
     def identity_discovery_uow(self, identity_digest: str) -> TenantUnitOfWork:
         return self._scoped_uow(PersistenceScope.identity(identity_digest))
+
+    def public_media_uow(self, key: str) -> TenantUnitOfWork:
+        """Read only the exact, explicitly published media object requested by its URL."""
+        return self._scoped_uow(PersistenceScope.public_media(key))
 
     def current_session(self) -> sqlalchemy_asyncio.AsyncSession | None:
         """Return the transaction-bound session for the current task, if any."""

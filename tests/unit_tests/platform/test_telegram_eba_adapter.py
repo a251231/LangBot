@@ -23,6 +23,7 @@ from langbot_plugin.api.definition.abstract.platform.event_logger import Abstrac
 from langbot_plugin.api.entities.builtin.platform import entities as platform_entities
 from langbot_plugin.api.entities.builtin.platform import events as platform_events
 from langbot_plugin.api.entities.builtin.platform import message as platform_message
+from langbot_plugin.api.entities.builtin.runner.interaction import InteractionRequest, InteractionHandle
 from langbot_plugin.api.entities import events as plugin_events
 
 
@@ -185,12 +186,11 @@ async def test_telegram_interaction_request_renders_action_buttons_and_thread_ta
     bot = SimpleNamespace(send_message=AsyncMock(return_value=sent))
     object.__setattr__(adapter, 'bot', bot)
 
-    result = await adapter.call_platform_api(
-        'interaction.request',
-        {
-            'callback_token': 'callback-token',
-            'reply_target': {'target_type': 'group', 'target_id': '-1001#7'},
-            'request': {
+    result = await adapter.send_interaction(
+        'group',
+        '-1001#7',
+        InteractionRequest.model_validate(
+            {
                 'interaction_id': 'form-1',
                 'kind': 'choice',
                 'title': 'Approve?',
@@ -199,11 +199,13 @@ async def test_telegram_interaction_request_renders_action_buttons_and_thread_ta
                     {'id': 'reject', 'label': 'Reject', 'style': 'danger'},
                 ],
                 'fallback_text': 'Reply approve or reject.',
-            },
-        },
+            }
+        ),
+        'callback-token',
     )
 
-    assert result == {'ok': True, 'message_id': 321, 'rich': True}
+    assert isinstance(result, InteractionHandle)
+    assert result.message_id == 321 and result.rich is True
     kwargs = bot.send_message.await_args.kwargs
     assert kwargs['chat_id'] == -1001
     assert kwargs['message_thread_id'] == 7
@@ -235,17 +237,45 @@ async def test_telegram_interaction_request_renders_select_or_falls_back():
         },
     }
 
-    result = await adapter.call_platform_api('interaction.request', base_params)
-    assert result['rich'] is True
+    result = await adapter.send_interaction(
+        'person', '123', InteractionRequest.model_validate(base_params['request']), 'callback-token'
+    )
+    assert result.rich is True
     button = bot.send_message.await_args.kwargs['reply_markup'].inline_keyboard[0][0]
     assert button.callback_data == 'lbi:callback-token:f:0:0'
 
     base_params['request']['fields'][0]['type'] = 'text'
-    result = await adapter.call_platform_api('interaction.request', base_params)
-    assert result['rich'] is False
+    result = await adapter.send_interaction(
+        'person', '123', InteractionRequest.model_validate(base_params['request']), 'callback-token'
+    )
+    assert result.rich is False
     kwargs = bot.send_message.await_args.kwargs
     assert 'reply_markup' not in kwargs
     assert 'Reply with a priority.' in kwargs['text']
+
+
+@pytest.mark.asyncio
+async def test_telegram_update_interaction_removes_buttons():
+    adapter = make_adapter()
+    bot = SimpleNamespace(edit_message_text=AsyncMock())
+    object.__setattr__(adapter, 'bot', bot)
+    handle = InteractionHandle(
+        message_id=321,
+        context={
+            'target_id': '-1001#7',
+            'request': {'title': 'Approve?'},
+        },
+    )
+
+    assert 'update_interaction' in adapter.get_supported_apis()
+    await adapter.update_interaction(handle, 'expired')
+
+    bot.edit_message_text.assert_awaited_once_with(
+        chat_id=-1001,
+        message_id=321,
+        text='Approve?\n\nExpired',
+        reply_markup=None,
+    )
 
 
 def test_telegram_interaction_callback_builds_scoped_host_event():
@@ -264,12 +294,12 @@ def test_telegram_interaction_callback_builds_scoped_host_event():
         {'callback_token': 'callback-token', 'action_ref': 1},
     )
 
-    assert event.action == 'interaction.submitted'
-    assert event.data['callback_token'] == 'callback-token'
-    assert event.data['action_ref'] == 1
-    assert event.data['actor_id'] == '456'
-    assert event.data['target_type'] == 'group'
-    assert event.data['target_id'] == '-1001#7'
+    assert isinstance(event, platform_events.InteractionCallbackEvent)
+    assert event.callback_token == 'callback-token'
+    assert event.raw_submission['action_ref'] == 1
+    assert event.actor_id == '456'
+    assert event.target_type == 'group'
+    assert event.target_id == '-1001#7'
 
 
 @pytest.mark.asyncio
@@ -305,13 +335,19 @@ async def test_telegram_interaction_callback_answers_and_dispatches_once():
     query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
     listener.assert_awaited_once()
     event = listener.await_args.args[0]
-    assert event.action == 'interaction.submitted'
-    assert event.data['action_ref'] == 0
+    assert isinstance(event, platform_events.InteractionCallbackEvent)
+    assert event.raw_submission['action_ref'] == 0
 
 
 @pytest.mark.asyncio
 async def test_telegram_converter_maps_message_and_edited_message_events():
-    update = make_update({'message': base_message_payload(text='hello @test_bot')})
+    update = make_update(
+        {
+            'message': base_message_payload(
+                text='hello @test_bot', entities=[{'type': 'mention', 'offset': 6, 'length': 9}]
+            )
+        }
+    )
     event = await TelegramEventConverter.target2yiri(update, make_adapter().bot, 'test_bot')
 
     assert isinstance(event, platform_events.MessageReceivedEvent)
@@ -402,7 +438,10 @@ async def test_telegram_converter_maps_non_message_updates():
             }
         }
     )
-    reaction_event = await TelegramEventConverter.target2yiri(reaction, make_adapter().bot, 'test_bot')
+    adapter = make_adapter()
+    reaction_handler = next(h for h in adapter.application.handlers[0] if isinstance(h, MessageReactionHandler))
+    assert reaction_handler.check_update(reaction) is True
+    reaction_event = await TelegramEventConverter.target2yiri(reaction, adapter.bot, 'test_bot')
     assert isinstance(reaction_event, platform_events.MessageReactionEvent)
     assert reaction_event.reaction == '👍'
     assert reaction_event.is_add is True
@@ -471,6 +510,7 @@ async def test_telegram_converter_maps_bot_status_events():
     )
     muted_event = await TelegramEventConverter.target2yiri(muted, make_adapter().bot, 'test_bot')
     assert isinstance(muted_event, platform_events.BotMutedEvent)
+    assert muted_event.duration is None
 
     unmuted = make_update(
         {
@@ -489,6 +529,30 @@ async def test_telegram_converter_maps_bot_status_events():
     unmuted_event = await TelegramEventConverter.target2yiri(unmuted, make_adapter().bot, 'test_bot')
     assert isinstance(unmuted_event, platform_events.BotUnmutedEvent)
 
+    partial_unmute = make_update(
+        {
+            'my_chat_member': {
+                **base_member,
+                'old_chat_member': restricted_member,
+                'new_chat_member': {**restricted_member, 'can_send_messages': True},
+            }
+        }
+    )
+    partial_event = await TelegramEventConverter.target2yiri(partial_unmute, make_adapter().bot, 'test_bot')
+    assert isinstance(partial_event, platform_events.BotUnmutedEvent)
+
+    removed = make_update(
+        {
+            'my_chat_member': {
+                **base_member,
+                'old_chat_member': restricted_member,
+                'new_chat_member': {'user': restricted_member['user'], 'status': 'kicked', 'until_date': 0},
+            }
+        }
+    )
+    removed_event = await TelegramEventConverter.target2yiri(removed, make_adapter().bot, 'test_bot')
+    assert isinstance(removed_event, platform_events.BotRemovedFromGroupEvent)
+
 
 @pytest.mark.asyncio
 async def test_telegram_reply_message_sends_text_image_and_file_components():
@@ -497,6 +561,7 @@ async def test_telegram_reply_message_sends_text_image_and_file_components():
         send_message=AsyncMock(),
         send_photo=AsyncMock(),
         send_document=AsyncMock(),
+        send_voice=AsyncMock(),
     )
     object.__setattr__(adapter, 'bot', bot)
     update = make_update({'message': base_message_payload(message_id=88)})
@@ -518,6 +583,10 @@ async def test_telegram_reply_message_sends_text_image_and_file_components():
                     size=4,
                     base64='data:text/plain;base64,' + base64.b64encode(b'test').decode('utf-8'),
                 ),
+                platform_message.Voice(
+                    base64='data:audio/ogg;base64,' + base64.b64encode(b'OggS-voice').decode('utf-8'),
+                    length=5,
+                ),
             ]
         ),
         quote_origin=True,
@@ -526,11 +595,15 @@ async def test_telegram_reply_message_sends_text_image_and_file_components():
     bot.send_message.assert_awaited_once()
     bot.send_photo.assert_awaited_once()
     bot.send_document.assert_awaited_once()
+    bot.send_voice.assert_awaited_once()
     assert bot.send_message.await_args.kwargs['reply_to_message_id'] == 88
     assert bot.send_photo.await_args.kwargs['reply_to_message_id'] == 88
     assert bot.send_photo.await_args.kwargs['photo'].input_file_content == b'image-bytes'
     assert bot.send_document.await_args.kwargs['document'].filename == 'test.txt'
     assert bot.send_document.await_args.kwargs['document'].input_file_content == b'test'
+    assert bot.send_voice.await_args.kwargs['reply_to_message_id'] == 88
+    assert bot.send_voice.await_args.kwargs['duration'] == 5
+    assert bot.send_voice.await_args.kwargs['voice'].filename == 'voice.ogg'
 
 
 @pytest.mark.asyncio
@@ -575,6 +648,17 @@ async def test_telegram_platform_apis_call_underlying_bot_methods():
     invite = await PLATFORM_API_MAP['create_chat_invite_link'](bot, {'chat_id': 1, 'name': 'invite'})
     assert invite['invite_link'] == 'https://t.me/+abc'
     assert await PLATFORM_API_MAP['answer_callback_query'](bot, {'callback_query_id': 'cb'}) == {'ok': True}
+
+    bot.pin_chat_message.assert_awaited_once_with(chat_id=1, message_id=2, disable_notification=False)
+    bot.unpin_chat_message.assert_awaited_once_with(chat_id=1, message_id=2)
+    bot.unpin_all_chat_messages.assert_awaited_once_with(chat_id=1)
+    bot.get_chat_administrators.assert_awaited_once_with(chat_id=1)
+    bot.set_chat_title.assert_awaited_once_with(chat_id=1, title='New')
+    bot.set_chat_description.assert_awaited_once_with(chat_id=1, description='Desc')
+    bot.get_chat_member_count.assert_awaited_once_with(chat_id=1)
+    bot.send_chat_action.assert_awaited_once_with(chat_id=1, action='typing')
+    bot.create_chat_invite_link.assert_awaited_once_with(chat_id=1, name='invite', expire_date=None, member_limit=None)
+    bot.answer_callback_query.assert_awaited_once_with(callback_query_id='cb', text=None, show_alert=False, url=None)
 
 
 @pytest.mark.asyncio
@@ -627,3 +711,253 @@ def test_runtime_bot_maps_telegram_eba_events_to_plugin_events():
         plugin_event = RuntimeBot._eba_event_to_plugin_event(platform_event)
         assert isinstance(plugin_event, plugin_event_type)
         assert plugin_event.model_dump()['event_name'] == plugin_event_type.__name__
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('with_text', [True, False])
+async def test_stream_completion_delivers_attachments_once(with_text):
+    adapter = make_adapter()
+    bot = SimpleNamespace(
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=900)),
+        edit_message_text=AsyncMock(),
+        send_photo=AsyncMock(return_value=SimpleNamespace(message_id=901)),
+        send_document=AsyncMock(return_value=SimpleNamespace(message_id=902)),
+        send_voice=AsyncMock(return_value=SimpleNamespace(message_id=903)),
+    )
+    object.__setattr__(adapter, 'bot', bot)
+    adapter.msg_stream_id['stream'] = ('message', 999, True)
+    source = platform_events.MessageReceivedEvent(
+        message_id=88, source_platform_object=make_update({'message': base_message_payload(message_id=88)})
+    )
+    parts = [platform_message.Plain(text='done')] if with_text else []
+    parts.extend(
+        [
+            platform_message.Image(base64='data:image/png;base64,' + base64.b64encode(b'image').decode()),
+            platform_message.File(
+                name='result.txt', base64='data:text/plain;base64,' + base64.b64encode(b'result').decode()
+            ),
+            platform_message.Voice(
+                base64='data:audio/ogg;base64,' + base64.b64encode(b'OggS-voice').decode(),
+                length=3,
+            ),
+        ]
+    )
+    chunk = SimpleNamespace(resp_message_id='stream', msg_sequence=2, tool_calls=None)
+    chain = platform_message.MessageChain(parts)
+    await adapter.reply_message_chunk(source, chunk, chain, is_final=False)
+    bot.send_photo.assert_not_awaited()
+    bot.send_document.assert_not_awaited()
+    bot.send_voice.assert_not_awaited()
+    await adapter.reply_message_chunk(source, chunk, chain, quote_origin=True, is_final=True)
+    await adapter.reply_message_chunk(source, chunk, chain, quote_origin=True, is_final=True)
+    bot.send_photo.assert_awaited_once()
+    bot.send_document.assert_awaited_once()
+    bot.send_voice.assert_awaited_once()
+    assert bot.send_document.await_args.kwargs['document'].filename == 'result.txt'
+    assert bot.send_photo.await_args.kwargs['reply_to_message_id'] == 88
+    assert bot.send_voice.await_args.kwargs['reply_to_message_id'] == 88
+    assert bot.send_voice.await_args.kwargs['duration'] == 3
+    assert 'stream' not in adapter.msg_stream_id
+
+
+@pytest.mark.asyncio
+async def test_stream_final_edit_ignores_message_not_modified():
+    adapter = make_adapter()
+    bot = SimpleNamespace(
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=900)),
+        edit_message_text=AsyncMock(
+            side_effect=telegram.error.BadRequest(
+                'Message is not modified: specified new message content and reply markup are exactly '
+                'the same as a current content and reply markup of the message'
+            )
+        ),
+    )
+    object.__setattr__(adapter, 'bot', bot)
+    adapter.msg_stream_id['stream'] = ('message', 999, True)
+    source = platform_events.MessageReceivedEvent(
+        message_id=88, source_platform_object=make_update({'message': base_message_payload(message_id=88)})
+    )
+    chunk = SimpleNamespace(resp_message_id='stream', msg_sequence=2, tool_calls=None)
+    chain = platform_message.MessageChain([platform_message.Plain(text='same answer')])
+
+    await adapter.reply_message_chunk(source, chunk, chain, is_final=True)
+
+    bot.edit_message_text.assert_awaited_once()
+    assert 'stream' not in adapter.msg_stream_id
+
+
+@pytest.mark.asyncio
+async def test_stream_edit_still_raises_other_bad_requests():
+    adapter = make_adapter()
+    bot = SimpleNamespace(
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=900)),
+        edit_message_text=AsyncMock(side_effect=telegram.error.BadRequest('Message to edit not found')),
+    )
+    object.__setattr__(adapter, 'bot', bot)
+    adapter.msg_stream_id['stream'] = ('message', 999, True)
+    source = platform_events.MessageReceivedEvent(
+        message_id=88, source_platform_object=make_update({'message': base_message_payload(message_id=88)})
+    )
+    chunk = SimpleNamespace(resp_message_id='stream', msg_sequence=2, tool_calls=None)
+    chain = platform_message.MessageChain([platform_message.Plain(text='answer')])
+
+    with pytest.raises(telegram.error.BadRequest, match='not found'):
+        await adapter.reply_message_chunk(source, chunk, chain, is_final=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply', [False, True])
+async def test_telegram_send_returns_message_result(reply):
+    adapter = make_adapter()
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=901)))
+    object.__setattr__(adapter, 'bot', bot)
+    chain = platform_message.MessageChain([platform_message.Plain(text='hello')])
+    if reply:
+        source = platform_events.MessageReceivedEvent(
+            message_id=88, source_platform_object=make_update({'message': base_message_payload(message_id=88)})
+        )
+        result = await adapter.reply_message(source, chain, quote_origin=True)
+        assert bot.send_message.await_args.kwargs['reply_to_message_id'] == 88
+    else:
+        result = await adapter.send_message('group', '-100123#7', chain)
+        assert bot.send_message.await_args.kwargs['message_thread_id'] == 7
+    assert isinstance(result, platform_events.MessageResult)
+    assert result.message_id == 901
+    assert result.raw == {'message_ids': [901]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('quote', [None, False, True])
+@pytest.mark.parametrize('topic', [None, 7])
+async def test_telegram_recovered_reply_preserves_target_quote_and_file(quote, topic):
+    adapter = make_adapter()
+    bot = SimpleNamespace(
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=901)),
+        send_document=AsyncMock(return_value=SimpleNamespace(message_id=902)),
+    )
+    object.__setattr__(adapter, 'bot', bot)
+    target_id = '-100123' + (f'#{topic}' if topic else '')
+    context = {'delivery': {'reply_target': {'target_type': 'group', 'target_id': target_id, 'message_id': '88'}}}
+    if quote is not None:
+        context['quote_origin'] = quote
+    chain = platform_message.MessageChain(
+        [
+            platform_message.Plain(text='recovered'),
+            platform_message.File(name='result.txt', base64=base64.b64encode(b'evidence').decode()),
+        ]
+    )
+    result = await adapter.reply_to_event(context=context, target_type='group', target_id=target_id, message=chain)
+    for call in (bot.send_message.await_args, bot.send_document.await_args):
+        assert call.kwargs['chat_id'] == -100123
+        assert call.kwargs.get('message_thread_id') == topic
+        assert call.kwargs.get('reply_to_message_id') == (88 if quote else None)
+    assert bot.send_message.await_args.kwargs['text'] == 'recovered'
+    document = bot.send_document.await_args.kwargs['document']
+    assert document.filename == 'result.txt'
+    assert document.input_file_content == b'evidence'
+    assert result.message_id == 902
+
+
+@pytest.mark.asyncio
+async def test_telegram_recovered_quote_requires_original_message():
+    adapter = make_adapter()
+    bot = SimpleNamespace(send_message=AsyncMock())
+    object.__setattr__(adapter, 'bot', bot)
+    with pytest.raises(ValueError, match='message ID is required'):
+        await adapter.reply_to_event(
+            context={'quote_origin': True, 'delivery': {'reply_target': {'target_id': '-100123#7'}}},
+            target_type='group',
+            target_id='-100123#7',
+            message=platform_message.MessageChain([platform_message.Plain(text='recovered')]),
+        )
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize('until, expected', [(0, None), (1060, 60), (900, 0)])
+def test_restriction_duration_uses_event_time(until, expected):
+    from langbot.pkg.platform.adapters.telegram.event_converter import _restriction_duration
+
+    assert (
+        _restriction_duration(
+            datetime.datetime.fromtimestamp(until, datetime.UTC),
+            datetime.datetime.fromtimestamp(1000, datetime.UTC),
+        )
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('new_reaction', [[], [{'type': 'emoji', 'emoji': '❤'}]])
+async def test_reaction_removal_keeps_removed_emoji(new_reaction):
+    update = make_update(
+        {
+            'message_reaction': {
+                'chat': {'id': -1001, 'type': 'supergroup', 'title': 'Group'},
+                'message_id': 77,
+                'date': 1000,
+                'user': {'id': 3, 'is_bot': False, 'first_name': 'Reactor'},
+                'old_reaction': [{'type': 'emoji', 'emoji': '👍'}, *new_reaction],
+                'new_reaction': new_reaction,
+            }
+        }
+    )
+    event = await TelegramEventConverter.target2yiri(update, make_adapter().bot, 'test_bot')
+    assert event.reaction == '👍'
+    assert event.is_add is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply', [False, True])
+async def test_rejected_photo_falls_back_without_resending_other_attachments(reply):
+    adapter = make_adapter()
+    bot = SimpleNamespace(
+        send_photo=AsyncMock(side_effect=telegram.error.BadRequest('Image_process_failed')),
+        send_document=AsyncMock(return_value=SimpleNamespace(message_id=902)),
+    )
+    object.__setattr__(adapter, 'bot', bot)
+    chain = platform_message.MessageChain(
+        [
+            platform_message.File(name='result.txt', base64='data:text/plain;base64,cmVzdWx0'),
+            platform_message.Image(base64='data:image/png;base64,aW1hZ2U='),
+        ]
+    )
+    if reply:
+        source = platform_events.MessageReceivedEvent(
+            message_id=88, source_platform_object=make_update({'message': base_message_payload(message_id=88)})
+        )
+        result = await adapter.reply_message(source, chain, quote_origin=True)
+    else:
+        result = await adapter.send_message('private', '123', chain)
+    assert result.message_id == 902
+    assert bot.send_document.await_count == 2
+    assert [call.kwargs['document'].filename for call in bot.send_document.await_args_list] == ['result.txt', 'image']
+    assert bot.send_document.await_args.kwargs['document'].input_file_content == b'image'
+    if reply:
+        assert bot.send_document.await_args.kwargs['reply_to_message_id'] == 88
+
+
+@pytest.mark.asyncio
+async def test_attachment_only_completion_removes_thinking_placeholder():
+    adapter = make_adapter()
+    object.__setattr__(
+        adapter,
+        'bot',
+        SimpleNamespace(
+            send_document=AsyncMock(return_value=SimpleNamespace(message_id=902)),
+            delete_message=AsyncMock(),
+        ),
+    )
+    adapter.msg_stream_id['stream'] = ('message', 999, False)
+    source = platform_events.MessageReceivedEvent(
+        message_id=88, source_platform_object=make_update({'message': base_message_payload(message_id=88)})
+    )
+    await adapter.reply_message_chunk(
+        source,
+        SimpleNamespace(resp_message_id='stream', msg_sequence=1, tool_calls=None),
+        platform_message.MessageChain(
+            [platform_message.File(name='result.txt', base64='data:text/plain;base64,cmVzdWx0')]
+        ),
+        is_final=True,
+    )
+    adapter.bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=999)
+    assert 'stream' not in adapter.msg_stream_id

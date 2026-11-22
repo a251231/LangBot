@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import typing
 import enum
 import quart
+import sqlalchemy.exc
 import time
 import traceback
 import inspect
@@ -11,12 +13,16 @@ import uuid
 from quart.typing import RouteCallable
 
 from ....utils import constants
+from ....telemetry import usage
 from ....utils import bounded_executor
 from ....workspace.collaboration import MembershipPermissionError, WorkspaceCollaborationError
 from ....workspace.errors import WorkspaceNotFoundError
 from ....cloud.entitlements import EntitlementUnavailableError
 from ....core.errors import TaskCapacityError
+from ...application.contracts import ApplicationAPIException
 from ....provider.modelmgr.codex_errors import CodexProviderError
+from ....i18n import DEFAULT_LANGUAGE, language, language_scope, t, error_text
+from ....i18n.workspace import get_workspace_language
 from ..authz import (
     AuthenticationDeniedError,
     AuthorizationError,
@@ -45,6 +51,7 @@ def group_class(name: str, path: str) -> typing.Callable[[typing.Type[RouterGrou
 
     def decorator(cls: typing.Type[RouterGroup]) -> typing.Type[RouterGroup]:
         cls.name = name
+        usage.GROUPS.add(name)
         cls.path = path
         preregistered_groups.append(cls)
         return cls
@@ -137,7 +144,7 @@ class RouterGroup(abc.ABC):
                         # receive RequestContext or enforce Workspace permissions.
                         self._inject_handler_context(f, kwargs, user_email, None, account)
                     except Exception as e:
-                        return self._auth_error_response(e)
+                        return await self._localized_auth_error_response(e)
 
                 elif auth_type == AuthType.USER_TOKEN:
                     # get token from Authorization header
@@ -160,7 +167,7 @@ class RouterGroup(abc.ABC):
                             require_permission(request_context, permission)
                         self._inject_handler_context(f, kwargs, user_email, request_context)
                     except Exception as e:
-                        return self._auth_error_response(e)
+                        return await self._localized_auth_error_response(e)
 
                 elif auth_type == AuthType.API_KEY:
                     # get API key from Authorization header or X-API-Key header
@@ -179,7 +186,7 @@ class RouterGroup(abc.ABC):
                             require_permission(request_context, permission)
                         self._inject_handler_context(f, kwargs, None, request_context)
                     except Exception as e:
-                        return self._auth_error_response(e)
+                        return await self._localized_auth_error_response(e)
 
                 elif auth_type == AuthType.USER_TOKEN_OR_API_KEY:
                     token = quart.request.headers.get('Authorization', '').replace('Bearer ', '')
@@ -193,7 +200,7 @@ class RouterGroup(abc.ABC):
                                 require_permission(request_context, permission)
                             self._inject_handler_context(f, kwargs, None, request_context)
                         except Exception as e:
-                            return self._auth_error_response(e)
+                            return await self._localized_auth_error_response(e)
                     # Try API key first (check X-API-Key header)
                     elif api_key := quart.request.headers.get('X-API-Key', ''):
                         # API key authentication
@@ -203,7 +210,7 @@ class RouterGroup(abc.ABC):
                                 require_permission(request_context, permission)
                             self._inject_handler_context(f, kwargs, None, request_context)
                         except Exception as e:
-                            return self._auth_error_response(e)
+                            return await self._localized_auth_error_response(e)
                     else:
                         # Try user token authentication (Authorization header)
                         if not token:
@@ -223,7 +230,7 @@ class RouterGroup(abc.ABC):
                             # Authentication succeeded and authorization was
                             # evaluated. Do not reinterpret a denied user token
                             # as an API key, which would mask the stable 403/404.
-                            return self._auth_error_response(e)
+                            return await self._localized_auth_error_response(e)
                         except Exception:
                             # If user token fails, maybe it's an API key in Authorization header
                             try:
@@ -232,10 +239,13 @@ class RouterGroup(abc.ABC):
                                     require_permission(request_context, permission)
                                 self._inject_handler_context(f, kwargs, None, request_context)
                             except Exception as e:
-                                return self._auth_error_response(e)
+                                return await self._localized_auth_error_response(e)
 
+                quart.g.request_context = request_context
                 observed_at = time.monotonic()
                 try:
+                    if request_context is not None:
+                        language.set(await get_workspace_language(self.ap, request_context.workspace_uuid))
                     if request_context is not None:
                         with bounded_executor.blocking_work_scope(request_context.workspace_uuid):
                             persistence_mgr = getattr(
@@ -292,6 +302,8 @@ class RouterGroup(abc.ABC):
                         )
                     if isinstance(e, CodexProviderError):
                         return self.http_status(e.status_code, e.error_code, str(e))
+                    if isinstance(e, EntitlementUnavailableError):
+                        return self.http_status(403, 'entitlement_unavailable', str(e))
                     if isinstance(e, AuthorizationError):
                         return self.http_status(e.status_code, e.error_code, str(e))
                     if isinstance(e, WorkspaceNotFoundError):
@@ -302,6 +314,11 @@ class RouterGroup(abc.ABC):
                         return self.http_status(400, e.code, str(e))
                     if isinstance(e, TaskCapacityError):
                         return self.http_status(429, 'task_capacity_exceeded', str(e))
+                    if isinstance(e, ApplicationAPIException) and 400 <= e.error.status_code < 500:
+                        # Application operations carry their own client-facing
+                        # status (e.g. a disabled plugin is 403 permission_denied).
+                        # Surfacing them as 500 hid the reason and paged as faults.
+                        return self.http_status(e.error.status_code, e.error.code, e.error.message)
                     if isinstance(
                         e,
                         bounded_executor.BlockingWorkCapacityError,
@@ -319,7 +336,25 @@ class RouterGroup(abc.ABC):
                     )
                     return self.internal_error_response(request_id)
 
-            new_f = handler_error
+            async def new_f(*args, **kwargs):
+                # Reset even on errors; child tasks inherit this request's locale.
+                with language_scope(quart.request.headers.get('X-LangBot-Language', DEFAULT_LANGUAGE)):
+                    status = 500
+                    try:
+                        response = await handler_error(*args, **kwargs)
+                        status = response[1] if isinstance(response, tuple) else getattr(response, 'status_code', 200)
+                        return response
+                    finally:
+                        usage.record_http(
+                            self.ap,
+                            getattr(quart.g, 'request_context', None),
+                            quart.request.headers,
+                            self.name,
+                            quart.request.method,
+                            status,
+                            api_key_auth=auth_type == AuthType.API_KEY or getattr(quart.g, 'usage_api_key_auth', False),
+                        )
+
             # Quart/Flask requires a unique endpoint name even when the same URL
             # intentionally has separate handlers for different HTTP methods.
             # Include the method set so CRUD routes can declare distinct
@@ -583,6 +618,7 @@ class RouterGroup(abc.ABC):
         return request_context
 
     async def _authenticate_api_key(self, api_key: str, auth_type: AuthType) -> RequestContext:
+        quart.g.usage_api_key_auth = True
         authenticator = getattr(self.ap.apikey_service, 'authenticate_api_key', None)
         if callable(authenticator):
             authenticated = authenticator(api_key)
@@ -669,7 +705,49 @@ class RouterGroup(abc.ABC):
             elif 'ctx' in parameters:
                 kwargs['ctx'] = request_context
 
+    @staticmethod
+    def _is_transient_auth_failure(error: Exception) -> bool:
+        """Infrastructure failures while authenticating, not bad credentials.
+
+        Answering these with 401 made the WebUI tear down perfectly valid
+        sessions whenever the resolver/blocking pools were saturated or DNS
+        and the database blipped (LANG-439: Cloud users bounced to /login).
+        """
+
+        if isinstance(error, PermissionError):
+            return False
+        if isinstance(
+            error,
+            (
+                bounded_executor.BlockingWorkCapacityError,
+                TaskCapacityError,
+                OSError,  # includes socket.gaierror, ConnectionError, TimeoutError
+                asyncio.TimeoutError,
+                sqlalchemy.exc.OperationalError,
+                sqlalchemy.exc.InterfaceError,
+                sqlalchemy.exc.TimeoutError,
+            ),
+        ):
+            return True
+        return False
+
     def _auth_error_response(self, error: Exception) -> typing.Any:
+        if self._is_transient_auth_failure(error):
+            request_id = self.request_id()
+            logger = getattr(self.ap, 'logger', self.quart_app.logger)
+            logger.warning(
+                f'Authentication temporarily unavailable request_id={request_id} '
+                f'error_type={type(error).__name__}: {error}'
+            )
+            response = quart.jsonify(
+                {
+                    'code': 'authentication_unavailable',
+                    'msg': 'Authentication is temporarily unavailable, please retry',
+                    'request_id': request_id,
+                }
+            )
+            response.headers['Retry-After'] = '1'
+            return response, 503
         if isinstance(error, AuthorizationError):
             return self.http_status(error.status_code, error.error_code, str(error))
         if isinstance(error, WorkspaceNotFoundError):
@@ -686,6 +764,14 @@ class RouterGroup(abc.ABC):
             'invalid_authentication',
             'Invalid authentication credentials',
         )
+
+    async def _localized_auth_error_response(self, error: Exception):
+        # A resolved context is trusted even when its permissions deny this
+        # operation. Never look up a language using the unverified selector.
+        context = getattr(quart.g, 'request_context', None)
+        if context is not None:
+            language.set(await get_workspace_language(self.ap, context.workspace_uuid))
+        return self._auth_error_response(error)
 
     def request_id(self) -> str:
         """Return one stable request ID for authentication, logs, and errors."""
@@ -707,7 +793,7 @@ class RouterGroup(abc.ABC):
         response = quart.jsonify(
             {
                 'code': 'internal_error',
-                'msg': 'Internal server error',
+                'msg': t('Internal server error'),
                 'request_id': resolved_request_id,
             }
         )
@@ -729,7 +815,7 @@ class RouterGroup(abc.ABC):
         return quart.jsonify(
             {
                 'code': code,
-                'msg': msg,
+                'msg': error_text(code, msg),
             }
         )
 

@@ -1,4 +1,13 @@
 export default {
+  networkDiagnostics: {
+    timeout:
+      'La descarga agotó el tiempo de espera. Revisa la red o el proxy y reintenta.',
+    connection: 'No se pudo conectar al mercado. Revisa la red o el proxy.',
+    incomplete: 'La descarga se interrumpió. Vuelve a intentarlo.',
+    http: 'El mercado rechazó la descarga. Revisa el estado e inténtalo más tarde.',
+    network:
+      'Un error de red interrumpió la instalación. Revisa la conexión y reintenta.',
+  },
   complete: 'Finalizar',
   checkingPlugin: 'Comprobar plugin',
   preparingPlugin: 'Preparar instalación',
@@ -7,6 +16,8 @@ export default {
   downloaded: 'Descargado {{size}}',
   processed: 'Procesados {{completed}} / {{total}} pipelines',
   installErrors: {
+    plugin_permission_confirmation_required:
+      'No se pudieron confirmar los permisos del plugin. Pide a un miembro con los permisos necesarios que los revise y vuelve a intentarlo.',
     plugin_version_unavailable:
       'La versión requerida aún no está disponible en el mercado. Reintenta tras su publicación o migra solo los datos.',
     plugin_download_timeout:
@@ -36,6 +47,20 @@ export default {
     'Tras comprobar el entorno, actualiza, selecciona esta canalización y confirma para reintentar solo la activación. No se volverá a migrar la configuración guardada.',
   details: 'Detalles de migración',
   notices: {
+    customRunner:
+      'Los runners personalizados antiguos deben reescribirse como runners de plugin antes de vincularlos. Consulta la documentación de plugins: https://langbot.app/docs/en/plugin/dev/tutor',
+    fieldDropped:
+      'Los campos o secciones antiguos no reconocidos se eliminaron de la configuración activa; los valores originales se conservan en la copia de seguridad.',
+    valueRepaired:
+      'Los valores mal formados o ausentes se repararon con los valores predeterminados de 4.10. Revísalos tras la migración.',
+    mixedRunner:
+      'Existen una selección de runner nueva y otra antigua; se conservó la utilizable.',
+    runnerConfigReplaced:
+      'La configuración de runner nueva existente se reemplaza por el resultado de la migración; la original se conserva en la copia de seguridad.',
+    runnerAdded:
+      'Se añadió el plugin de runner necesario a la lista de extensiones de esta pipeline.',
+    extensionPrefs:
+      'Se ignoraron entradas no válidas de la configuración de extensiones.',
     runtimeUnavailable:
       'El entorno de plugins está desconectado. Restablece la conexión y reintenta, o migra solo los datos.',
     executionFailed:
@@ -124,6 +149,7 @@ export default {
     blocked: 'Bloqueado',
     already_current: 'Ya actualizado',
     not_legacy: 'No es antiguo',
+    unsupported_runner: 'Runner no compatible',
     activation_pending: 'Activación pendiente',
     pending: 'Pendiente',
     migrated: 'Migrado',

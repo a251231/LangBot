@@ -3,6 +3,7 @@ from __future__ import annotations
 from langbot.pkg.platform.sources.wecombot import WecomBotAdapter as LegacyWecomBotAdapter
 
 import asyncio
+import base64
 import time
 import traceback
 import typing
@@ -17,6 +18,7 @@ from langbot.pkg.platform.adapters.wecombot.event_converter import WecomBotEvent
 from langbot.pkg.platform.adapters.wecombot.message_converter import WecomBotMessageConverter
 from langbot.pkg.platform.adapters.wecombot.platform_api import PLATFORM_API_MAP
 from langbot.pkg.platform.adapters.wecombot.interaction import (
+    acknowledge_interaction,
     interaction_delivery_capabilities,
     interaction_event_from_native,
     send_interaction,
@@ -27,6 +29,11 @@ from langbot_plugin.api.entities.builtin.platform import entities as platform_en
 from langbot_plugin.api.entities.builtin.platform import events as platform_events
 from langbot_plugin.api.entities.builtin.platform import message as platform_message
 from langbot_plugin.api.entities.builtin.platform.errors import NotSupportedError
+from langbot_plugin.api.entities.builtin.runner.interaction import (
+    InteractionHandle,
+    InteractionRequest,
+    InteractionSubmission,
+)
 
 
 class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatformAdapter):
@@ -47,6 +54,7 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
     _group_cache: dict[str, platform_entities.UserGroup] = {}
     _member_cache: dict[tuple[str, str], platform_entities.UserGroupMember] = {}
     _stream_to_monitoring_msg: dict[str, tuple[str, float]] = {}
+    _business_event_ids: dict[tuple[str, str], float] = {}
     _STREAM_MAPPING_TTL: int = 600
 
     class Config:
@@ -103,7 +111,10 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
         return [
             'message.received',
             'feedback.received',
+            'wecombot.enter_chat',
+            'wecombot.template_card_event',
             'platform.specific',
+            'interaction.callback',
         ]
 
     def get_supported_apis(self) -> list[str]:
@@ -119,11 +130,57 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
             'call_platform_api',
         ]
         if not self.config.get('enable-webhook', False) and hasattr(self.bot, 'send_template_card'):
-            apis.append('interaction.request')
+            apis.extend(
+                [
+                    'send_interaction',
+                    'update_interaction',
+                    'get_interaction_capabilities',
+                ]
+            )
         return apis
 
     def get_interaction_capabilities(self) -> dict[str, typing.Any]:
         return interaction_delivery_capabilities()
+
+    async def send_interaction(
+        self,
+        target_type: str,
+        target_id: str,
+        request: InteractionRequest,
+        callback_token: str,
+        reply_to: str | None = None,
+    ) -> InteractionHandle:
+        result = await send_interaction(
+            self,
+            {
+                'request': request.model_dump(mode='json'),
+                'callback_token': callback_token,
+                'reply_target': {'target_type': target_type, 'target_id': target_id, 'message_id': reply_to},
+            },
+        )
+        handle = InteractionHandle.model_validate(result)
+        handle.context['request'] = request.model_dump(mode='json')
+        return handle
+
+    async def update_interaction(
+        self,
+        handle: InteractionHandle,
+        state: str,
+        submission: InteractionSubmission | None = None,
+    ) -> InteractionHandle:
+        result = await acknowledge_interaction(
+            self,
+            {
+                'update_target': handle.model_dump(mode='json'),
+                'request': handle.context['request'],
+                'submission': submission.model_dump(mode='json') if submission else {},
+                'callback_context': handle.context.get('callback_context') or {},
+                'state': state,
+            },
+        )
+        updated = InteractionHandle.model_validate(result)
+        updated.context.update(handle.context)
+        return updated
 
     @staticmethod
     def _plain_message(text: str) -> platform_message.MessageChain:
@@ -131,7 +188,91 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
 
     _join_text_components = staticmethod(LegacyWecomBotAdapter._join_text_components)
     _iter_media_components = staticmethod(LegacyWecomBotAdapter._iter_media_components)
-    _send_media = staticmethod(LegacyWecomBotAdapter._send_media)
+
+    @staticmethod
+    async def _send_media(bot, req_id: str, item: dict, config: dict | None = None) -> bool:
+        """Require upload and delivery acknowledgements instead of dropping attachments."""
+        kind = item['type']
+        payload = item.get('base64') or ''
+        data = b''
+        if payload:
+            if payload.startswith('data:'):
+                payload = payload.split(',', 1)[-1]
+            try:
+                data = base64.b64decode(payload, validate=False)
+            except Exception as exc:
+                raise ValueError(f'Invalid {kind} attachment data') from exc
+        elif item.get('path'):
+            with open(item['path'], 'rb') as f:
+                data = f.read()
+
+        if not data:
+            raise ValueError(f'{kind} attachment has no data to upload')
+
+        media_id = None
+        delivery_kind = kind
+        filename = item.get('name')
+        voice_mode = (config or {}).get('voice_delivery', 'voice')
+
+        if kind == 'voice':
+            from langbot.pkg.utils import audio as audio_utils
+
+            fmt = audio_utils.detect_audio_format(data)
+            duration = audio_utils.estimate_audio_duration(data, fmt) if data else 0
+
+            if voice_mode == 'file' or (duration and duration > 60):
+                delivery_kind = 'file'
+                if fmt in ('silk', 'amr') and audio_utils.is_ffmpeg_available():
+                    try:
+                        data = await audio_utils.transcode_audio(data, 'mp3', fmt)
+                        fmt = 'mp3'
+                    except Exception:
+                        pass
+                filename = filename or f'voice.{fmt if fmt != "unknown" else "mp3"}'
+            else:
+                # WeCom native voice message ONLY supports SILK or AMR format.
+                # If audio is MP3/WAV/etc. (e.g. from TTS), transcode it to SILK
+                # so the WeCom client can play the native voice bubble.
+                if fmt != 'silk' and fmt != 'amr':
+                    if audio_utils.is_silk_available() and audio_utils.is_ffmpeg_available():
+                        try:
+                            data = await audio_utils.transcode_audio(data, 'silk', fmt)
+                            fmt = 'silk'
+                        except Exception:
+                            pass
+
+                if fmt == 'silk':
+                    delivery_kind = 'voice'
+                    filename = filename or 'voice.silk'
+                elif fmt == 'amr':
+                    delivery_kind = 'voice'
+                    filename = filename or 'voice.amr'
+                elif fmt in ('mp3', 'wav', 'ogg', 'flac'):
+                    delivery_kind = 'file'
+                    filename = filename or f'voice.{fmt}'
+                else:
+                    delivery_kind = 'voice'
+                    filename = filename or 'voice.silk'
+        else:
+            filename = filename or f'attachment.{kind}'
+
+        result = await bot.upload_media(data, filename, media_type=delivery_kind)
+        if isinstance(result, dict):
+            media_id = result.get('media_id')
+        if not media_id and delivery_kind == 'voice':
+            # Fall back to uploading as audio file if voice-type upload is not accepted
+            delivery_kind = 'file'
+            fallback_filename = filename.rsplit('.', 1)[0] + '.mp3' if filename else 'voice.mp3'
+            result = await bot.upload_media(data, fallback_filename, media_type='file')
+            if isinstance(result, dict):
+                media_id = result.get('media_id')
+        if not media_id:
+            raise RuntimeError(f'WeCom {kind} upload failed: no media ID returned')
+        ack = await getattr(bot, f'reply_{delivery_kind}')(req_id, media_id)
+        if ack is None or ack.get('errcode', 0) != 0:
+            code = ack.get('errcode') if isinstance(ack, dict) else 'no acknowledgement'
+            raise RuntimeError(f'WeCom {delivery_kind} delivery failed: {code}')
+        return True
 
     async def send_message(
         self,
@@ -145,8 +286,39 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
             raise NotSupportedError(f'send_message:{target_type}')
         items = await WecomBotMessageConverter.yiri2target(message)
         content = self._join_text_components(items)
+        if list(self._iter_media_components(items)):
+            raise NotSupportedError('send_message:media requires an originating message callback')
         raw = await self.bot.send_message(str(target_id), content)
+        if not isinstance(raw, dict) or raw.get('errcode', 0) != 0:
+            detail = raw.get('errmsg', raw.get('errcode')) if isinstance(raw, dict) else 'no acknowledgement'
+            raise RuntimeError(f'WeCom message delivery failed: {detail}')
         return platform_events.MessageResult(raw={'result': raw})
+
+    async def reply_to_event(
+        self, *, context: dict, target_type: str, target_id: str, message: platform_message.MessageChain
+    ) -> platform_events.MessageResult:
+        """Bind Agent replies to the originating callback and its loading stream."""
+        message_id = ((context.get('delivery') or {}).get('reply_target') or {}).get('message_id')
+        if context.get('event_type') == 'message.received' and message_id:
+            source = await self.get_message(target_type, target_id, message_id)
+            return await self.reply_message(source, message)
+        if context.get('event_type') == 'wecombot.enter_chat':
+            data = context.get('data') or {}
+            raw_event = data.get('data') or {}
+            if time.time() - float(data.get('timestamp') or 0) >= 5:
+                raise ValueError('WeCom welcome replies must complete within 5 seconds of entering the chat')
+            items = await WecomBotMessageConverter.yiri2target(message)
+            if list(self._iter_media_components(items)):
+                raise NotSupportedError('welcome_reply:media')
+            content = self._join_text_components(items)
+            callback_id = data.get('message_id') if self.config.get('enable-webhook') else raw_event.get('req_id')
+            if not callback_id:
+                raise ValueError('WeCom welcome reply is missing its callback ID')
+            raw = await self.bot.reply_welcome(callback_id, content)
+            if raw is None:
+                raise RuntimeError('WeCom welcome reply was not acknowledged')
+            return platform_events.MessageResult(raw={'result': raw})
+        return await self.send_message(target_type, target_id, message)
 
     async def reply_message(
         self,
@@ -158,13 +330,20 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
         if not isinstance(event, WecomBotEvent):
             raise ValueError('WeComBot reply_message requires a WecomBotEvent source object')
         items = await WecomBotMessageConverter.yiri2target(message)
+        if self.config.get('enable-webhook') and list(self._iter_media_components(items)):
+            raise NotSupportedError('reply_media:webhook_mode; use WebSocket mode to deliver files')
         content = self._join_text_components(items)
         raw = None
+        from .stream_text import format_stream_text
+
+        content = format_stream_text(content)
         if not self.config.get('enable-webhook', False) and event.get('req_id'):
             if content:
-                raw = await self.bot.reply_text(event.get('req_id'), content)
+                finished = await self.bot.push_stream_chunk(event.message_id, content, is_final=True)
+                if not finished and content.strip(' \t\r\n\u200b\u200c\u200d\ufeff'):
+                    raw = await self.bot.send_message(str(event.get('chatid') or event.get('userid') or ''), content)
             for item in self._iter_media_components(items):
-                await self._send_media(self.bot, event.get('req_id'), item)
+                await self._send_media(self.bot, event.get('req_id'), item, self.config)
         else:
             raw = await self.bot.set_message(event.message_id, content)
         return platform_events.MessageResult(message_id=event.message_id, raw={'result': raw})
@@ -181,14 +360,24 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
         if not isinstance(event, WecomBotEvent):
             raise ValueError('WeComBot reply_message_chunk requires a WecomBotEvent source object')
         items = await WecomBotMessageConverter.yiri2target(message)
-        content = self._join_text_components(items)
+        if is_final and self.config.get('enable-webhook') and list(self._iter_media_components(items)):
+            raise NotSupportedError('reply_media:webhook_mode; use WebSocket mode to deliver files')
+        from .stream_text import format_stream_text
+
+        content = format_stream_text(self._join_text_components(items))
         success = await self.bot.push_stream_chunk(event.message_id, content, is_final=is_final)
-        if not success and is_final and not self.config.get('enable-webhook', False) and event.get('req_id'):
-            await self.bot.reply_text(event.get('req_id'), content)
+        if (
+            not success
+            and is_final
+            and content.strip(' \t\r\n\u200b\u200c\u200d\ufeff')
+            and not self.config.get('enable-webhook', False)
+            and event.get('req_id')
+        ):
+            await self.bot.send_message(str(event.get('chatid') or event.get('userid') or ''), content)
         if is_final:
             if not self.config.get('enable-webhook', False) and event.get('req_id'):
                 for item in self._iter_media_components(items):
-                    await self._send_media(self.bot, event.get('req_id'), item)
+                    await self._send_media(self.bot, event.get('req_id'), item, self.config)
             elif not success:
                 await self.bot.set_message(event.message_id, content)
         return {'stream': success}
@@ -196,9 +385,25 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
     async def is_stream_output_supported(self) -> bool:
         return self.config.get('enable-stream-reply', True)
 
+    async def begin_interaction_stream(self, source_message_id: str, target: dict) -> bool:
+        if self.config.get('enable-webhook', False):
+            return False
+        started = self.bot.begin_interaction_stream(
+            source_message_id,
+            str(target.get('target_type') or ''),
+            str(target.get('target_id') or ''),
+        )
+        if not started:
+            await self.logger.warning('WeCom interaction stream context unavailable; buffering final reply')
+        return started
+
+    async def reply_interaction_stream_chunk(self, *, source_message_id: str, content: str, is_final: bool) -> None:
+        from .stream_text import format_stream_text
+
+        if not await self.bot.push_interaction_stream_chunk(source_message_id, format_stream_text(content), is_final):
+            raise RuntimeError('WeCom rejected the new interaction reply stream')
+
     async def call_platform_api(self, action: str, params: dict = {}) -> dict:
-        if action == 'interaction.request' and 'interaction.request' in self.get_supported_apis():
-            return await send_interaction(self, params)
         handler = PLATFORM_API_MAP.get(action)
         if handler is None:
             raise NotSupportedError(f'call_platform_api:{action}')
@@ -276,10 +481,13 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
             interaction_event = interaction_event_from_native(event)
             if interaction_event is not None:
                 await self._dispatch_eba_event(interaction_event)
+            else:
+                await self._handle_native_event(event)
         except Exception:
             await self.logger.error(f'Error in WeComBot interaction callback: {traceback.format_exc()}')
 
     async def _handle_native_event(self, event: WecomBotEvent):
+        key = None
         try:
             if platform_events.FriendMessage in self.listeners or platform_events.GroupMessage in self.listeners:
                 legacy_event = await self.event_converter.target2legacy(event)
@@ -288,9 +496,24 @@ class WecomBotAdapter(WecomBotAPIMixin, abstract_platform_adapter.AbstractPlatfo
 
             eba_event = await self.event_converter.target2yiri(event)
             if eba_event:
+                if eba_event.type in {'wecombot.enter_chat', 'wecombot.template_card_event'}:
+                    message_id = eba_event.message_id
+                    now = time.monotonic()
+                    self._business_event_ids = {
+                        key: seen for key, seen in self._business_event_ids.items() if now - seen < 600
+                    }
+                    key = (eba_event.type, message_id)
+                    if message_id and key in self._business_event_ids:
+                        return
+                    if message_id:
+                        self._business_event_ids[key] = now
+                        if len(self._business_event_ids) > 2048:
+                            self._business_event_ids.pop(next(iter(self._business_event_ids)))
                 self._cache_event(eba_event)
                 await self._dispatch_eba_event(eba_event)
         except Exception:
+            if key is not None:
+                self._business_event_ids.pop(key, None)
             await self.logger.error(f'Error in wecombot native event: {traceback.format_exc()}')
 
     async def _handle_feedback(self, **kwargs):

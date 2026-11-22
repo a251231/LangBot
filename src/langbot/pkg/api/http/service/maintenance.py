@@ -10,6 +10,8 @@ from typing import Any
 
 import sqlalchemy
 
+from ....storage.media import DEFAULT_MAX_SIZE_MB
+
 from ....core import app
 from ....entity.persistence import bstorage as persistence_bstorage
 from ....entity.persistence import monitoring as persistence_monitoring
@@ -89,7 +91,7 @@ class MaintenanceService:
         )
         media_max_size_mb = self._non_negative_int(
             media_cfg.get('max_size_mb'),
-            0,
+            DEFAULT_MAX_SIZE_MB,
             'storage.media_cache.max_size_mb',
         )
         media_cache = getattr(getattr(self.ap, 'storage_mgr', None), 'media_cache', None)
@@ -114,6 +116,13 @@ class MaintenanceService:
         }
         if media_cache is not None and is_singleton:
             result['media_files'] = media_cleanup.get('expired_deleted', 0) + media_cleanup.get('size_deleted', 0)
+        if media_cache is not None:
+            from ....storage.inline_media_cleanup import cleanup_inline_media
+
+            result['inline_media_records'] = await cleanup_inline_media(self.ap, context, media_retention_days)
+        artifact_service = getattr(self.ap, 'artifact_service', None)
+        if artifact_service is not None:
+            result['artifacts'] = await artifact_service.collect_expired(context)
         return result
 
     async def get_storage_analysis(self, context: TenantContext) -> dict[str, Any]:
@@ -147,6 +156,10 @@ class MaintenanceService:
         else:
             scoped_storage_path = Path('data/storage') / self.ap.storage_mgr.scoped_prefix(context)
             roots = [('storage', scoped_storage_path)]
+
+        skill_repository = getattr(self.ap, 'skill_repository', None)
+        if skill_repository is not None:
+            roots.append(('skills', Path(skill_repository.storage_root(context))))
 
         sections = await asyncio.to_thread(self._collect_sections, roots)
         runtime_processes = await self._runtime_storage_processes(
@@ -322,6 +335,9 @@ class MaintenanceService:
         context: ExecutionContext,
         retention_days: int,
     ) -> int:
+        if getattr(self.ap.storage_mgr, 'persistent_content', False) is True:
+            # Persistent-content retention must not delete the old import source.
+            return 0
         provider = self.ap.storage_mgr.storage_provider
         provider_name = provider.__class__.__name__
         if provider_name == 'LocalStorageProvider':
@@ -617,6 +633,10 @@ class MaintenanceService:
         return count
 
     def _non_negative_int(self, value: Any, default: int, name: str) -> int:
+        if value is None:
+            # An empty YAML key means "use the default"; warning here would log
+            # once per Workspace on every maintenance pass.
+            return default
         try:
             parsed = int(value)
         except (TypeError, ValueError):
@@ -628,6 +648,10 @@ class MaintenanceService:
         return parsed
 
     def _positive_int(self, value: Any, default: int, name: str) -> int:
+        if value is None:
+            # An empty YAML key means "use the default"; warning here would log
+            # once per Workspace on every maintenance pass.
+            return default
         try:
             parsed = int(value)
         except (TypeError, ValueError):

@@ -9,6 +9,14 @@ from langbot_plugin.api.entities.builtin.resource.tool import LLMTool
 
 from ..authz import Permission, require_permission
 from ..context import ExecutionContext
+from .assistant_disclosure import (
+    WorkspaceCall,
+    WorkspaceDescribe,
+    WorkspaceSearch,
+    workspace_call,
+    workspace_describe,
+    workspace_search,
+)
 from .secrets import redact_secrets
 
 
@@ -213,6 +221,24 @@ TOOLS = {
         True,
         None,
     ),
+    'workspace_search': (
+        WorkspaceSearch,
+        'Search granted workspace operations by keyword or domain filter. Returns [{id, summary, risk}].',
+        False,
+        None,
+    ),
+    'workspace_describe': (
+        WorkspaceDescribe,
+        'Get documentation, risk level, and JSON input schema for an authorized operation. Returns {id, description, risk, input_schema}.',
+        False,
+        None,
+    ),
+    'workspace_call': (
+        WorkspaceCall,
+        'Execute an authorized workspace operation. Write and dangerous operations require user confirmation before execution.',
+        False,
+        None,
+    ),
 }
 
 
@@ -253,6 +279,27 @@ def tool_definitions(context) -> list[LLMTool]:
 
 async def execute_tool(ap, context, name: str, arguments: dict):
     args = validate_call(context, name, arguments).model_dump(mode='json')
+    if name == 'workspace_search':
+        return workspace_search(
+            ap,
+            context,
+            query=args.get('query'),
+            domain=args.get('domain'),
+            limit=args.get('limit', 10),
+        )
+    if name == 'workspace_describe':
+        return workspace_describe(
+            ap,
+            context,
+            operation_id=args['operation_id'],
+        )
+    if name == 'workspace_call':
+        return await workspace_call(
+            ap,
+            context,
+            operation_id=args['operation_id'],
+            arguments=args.get('arguments'),
+        )
     if name == 'list_resources':
         readers = {
             'models': ap.llm_model_service.get_llm_models,
@@ -312,12 +359,37 @@ async def execute_tool(ap, context, name: str, arguments: dict):
             if await ap.knowledge_service.get_knowledge_base(context, kb_id) is None:
                 raise ValueError('Knowledge base not found')
         config = copy.deepcopy(pipeline['config'])
-        config['ai']['runner']['runner'] = 'local-agent'
-        local = config['ai']['local-agent']
-        local['model']['primary'] = args['model_uuid']
+        runner_id = 'plugin:langbot-team/LocalAgent/default'
+        ai = config.get('ai') if isinstance(config.get('ai'), dict) else {}
+        runner = ai.get('runner') if isinstance(ai.get('runner'), dict) else {}
+        runner_configs = ai.get('runner_config') if isinstance(ai.get('runner_config'), dict) else {}
+        local = runner_configs.get(runner_id) if isinstance(runner_configs.get(runner_id), dict) else {}
+        model = local.get('model') if isinstance(local.get('model'), dict) else {}
+        local['model'] = {
+            'primary': args['model_uuid'],
+            'fallbacks': model.get('fallbacks') if isinstance(model.get('fallbacks'), list) else [],
+            'reasoning': model.get('reasoning') if isinstance(model.get('reasoning'), dict) else {},
+        }
         local['prompt'] = [{'role': 'system', 'content': args['system_prompt']}]
         local['knowledge-bases'] = args['knowledge_base_uuids']
-        await ap.pipeline_service.update_pipeline(context, args['pipeline_uuid'], {'config': config})
+        # 4.11 shape: ai.runner.id + ai.runner_config[id]; legacy keys are dropped.
+        ai['runner'] = {'id': runner_id, 'expire-time': runner.get('expire-time', 0)}
+        ai['runner_config'] = {**runner_configs, runner_id: local}
+        ai.pop('local-agent', None)
+        config['ai'] = ai
+        update = {'config': config}
+        prefs = pipeline.get('extensions_preferences')
+        if isinstance(prefs, dict) and prefs.get('enable_all_plugins') is False:
+            plugins = prefs.get('plugins') if isinstance(prefs.get('plugins'), list) else []
+            entry = {'author': 'langbot-team', 'name': 'LocalAgent'}
+            if not any(
+                isinstance(p, dict) and p.get('author') == entry['author'] and p.get('name') == entry['name']
+                for p in plugins
+            ):
+                update['extensions_preferences'] = {**prefs, 'plugins': [*plugins, entry]}
+        await ap.pipeline_service.update_pipeline(context, args['pipeline_uuid'], update)
         return {'uuid': args['pipeline_uuid'], 'url': f'/home/pipelines?id={args["pipeline_uuid"]}'}
-    resource_id = await ap.knowledge_service.create_knowledge_base(context, args)
-    return {'uuid': resource_id, 'url': f'/home/knowledge?id={resource_id}'}
+    if name == 'create_knowledge_base':
+        resource_id = await ap.knowledge_service.create_knowledge_base(context, args)
+        return {'uuid': resource_id, 'url': f'/home/knowledge?id={resource_id}'}
+    raise ValueError(f'Unknown management tool: {name}')

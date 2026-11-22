@@ -1,11 +1,11 @@
 import EntityLoadState from '@/components/EntityLoadState';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { AlertTriangle, Trash2 } from 'lucide-react';
 import { httpClient } from '@/app/infra/http/HttpClient';
-import { useCurrentWorkspace } from '@/app/infra/http';
+import { useCurrentWorkspace, userInfo } from '@/app/infra/http';
 import { Agent, AgentPlatformTool } from '@/app/infra/entities/api';
 import { useSidebarData } from '@/app/home/components/home-sidebar/SidebarDataContext';
 import ProcessorDetailWorkbench from '@/app/home/components/processor-detail/ProcessorDetailWorkbench';
@@ -26,12 +26,16 @@ import {
 import PipelineDetailContent from '@/app/home/pipelines/PipelineDetailContent';
 import PluginProcessorDetailContent from './PluginProcessorDetailContent';
 import AgentCreateContent from './components/AgentCreateContent';
+import SensitiveToolsWarning from '@/app/home/components/sensitive-tools/SensitiveToolsWarning';
 import AgentDebugPanel from './components/AgentDebugPanel';
 import AgentMonitoringTab from './components/AgentMonitoringTab';
 import AgentFormComponent, {
   AgentFormHandle,
   RunnerStatus,
 } from './components/AgentFormComponent';
+
+// Keep the last checked display state across navigation within this app session.
+const runnerStatusCache = new Map<string, RunnerStatus>();
 
 export default function AgentDetailContent({
   id,
@@ -42,7 +46,7 @@ export default function AgentDetailContent({
 }) {
   const isCreateMode = id === 'new';
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const currentWorkspace = useCurrentWorkspace();
   const canManage =
     currentWorkspace?.permissions.includes('resource.manage') ?? false;
@@ -51,6 +55,7 @@ export default function AgentDetailContent({
   const { refreshPipelines, pipelines, setDetailEntityName } = useSidebarData();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [platformTools, setPlatformTools] = useState<AgentPlatformTool[]>([]);
+  const [sensitiveTools, setSensitiveTools] = useState<string[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [loading, setLoading] = useState(!isCreateMode);
@@ -59,13 +64,52 @@ export default function AgentDetailContent({
   const [basicInfoOpen, setBasicInfoOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [runnerStatus, setRunnerStatus] = useState<RunnerStatus | null>(null);
+  const runnerStatusKey = JSON.stringify([
+    userInfo?.account_uuid,
+    currentWorkspace?.workspace.uuid,
+    id,
+    i18n.language,
+  ]);
+  const [runnerStatusState, setRunnerStatusState] = useState<{
+    key: string;
+    status: RunnerStatus;
+  } | null>(null);
+  const runnerStatus =
+    runnerStatusState?.key === runnerStatusKey
+      ? runnerStatusState.status
+      : (runnerStatusCache.get(runnerStatusKey) ?? null);
+  const updateRunnerStatus = useCallback(
+    (status: RunnerStatus) => {
+      setRunnerStatusState((previous) => {
+        if (status.tone === 'neutral') {
+          const cached =
+            previous?.key === runnerStatusKey
+              ? previous.status
+              : runnerStatusCache.get(runnerStatusKey);
+          if (cached) return { key: runnerStatusKey, status: cached };
+        }
+        return { key: runnerStatusKey, status };
+      });
+      if (status.tone !== 'neutral' && !formDirty) {
+        runnerStatusCache.delete(runnerStatusKey);
+        runnerStatusCache.set(runnerStatusKey, status);
+        if (runnerStatusCache.size > 100) {
+          const oldest = runnerStatusCache.keys().next().value;
+          if (oldest !== undefined) runnerStatusCache.delete(oldest);
+        }
+      }
+    },
+    [runnerStatusKey, formDirty],
+  );
   const [availableEventTypes, setAvailableEventTypes] = useState<string[]>([
     'message.received',
   ]);
   const [supportedEventPatterns, setSupportedEventPatterns] = useState<
     string[]
   >(['*']);
+  // Hint badges take the place of the "runner ready" badge.
+  const hasHints =
+    supportedEventPatterns.length === 0 || sensitiveTools.length > 0;
   const agentFormRef = useRef<AgentFormHandle>(null);
 
   useEffect(() => {
@@ -78,10 +122,6 @@ export default function AgentDetailContent({
     setDetailEntityName(sidebarItem?.name ?? id);
     return () => setDetailEntityName(null);
   }, [id, isCreateMode, pipelines, setDetailEntityName, t]);
-
-  useEffect(() => {
-    setRunnerStatus(null);
-  }, [id]);
 
   useEffect(() => {
     if (isCreateMode) return;
@@ -205,24 +245,32 @@ export default function AgentDetailContent({
         <ProcessorDetailWorkbench
           key={id}
           title={`${agent.emoji || '🤖'} ${agent.name}`}
-          titleBadge={
-            supportedEventPatterns.length === 0 ? (
-              <Badge
-                variant="outline"
-                role="status"
-                className="shrink-0 gap-1 rounded-full border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-              >
-                <AlertTriangle className="size-3" />
-                {t('agents.noEventsConfiguredBadge')}
-              </Badge>
-            ) : undefined
+          hints={
+            <>
+              {supportedEventPatterns.length === 0 && (
+                <Badge
+                  variant="outline"
+                  role="status"
+                  className="shrink-0 gap-1 rounded-full border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                >
+                  <AlertTriangle className="size-3" />
+                  {t('agents.noEventsConfiguredBadge')}
+                </Badge>
+              )}
+              <SensitiveToolsWarning
+                tools={sensitiveTools}
+                settingsPage={t('agents.eventsAndTools')}
+              />
+            </>
           }
           titleAction={
             canManage ? (
               <EntityTitleEditButton onClick={() => setBasicInfoOpen(true)} />
             ) : undefined
           }
-          status={runnerStatus}
+          status={
+            runnerStatus?.tone === 'success' && hasHints ? null : runnerStatus
+          }
           saveLabel={t('common.save')}
           saveFormId="agent-form"
           canSave={canManage}
@@ -258,9 +306,10 @@ export default function AgentDetailContent({
                 }}
                 onDirtyChange={setFormDirty}
                 onSavingChange={setFormSaving}
-                onRunnerStatusChange={setRunnerStatus}
+                onRunnerStatusChange={updateRunnerStatus}
                 onSupportedEventPatternsChange={setSupportedEventPatterns}
                 onPlatformToolsChange={setPlatformTools}
+                onSensitiveToolsChange={setSensitiveTools}
                 guideEnabled={canManage}
                 debugGuideEnabled={canOperate}
               />

@@ -1,4 +1,11 @@
 export default {
+  networkDiagnostics: {
+    timeout: '下载超时，请检查网络或代理后重试。',
+    connection: '无法连接插件市场，请检查网络或代理。',
+    incomplete: '下载意外中断，请重试。',
+    http: '插件市场拒绝了下载请求，请查看状态码并稍后重试。',
+    network: '网络错误导致安装中断，请检查连接后重试。',
+  },
   complete: '完成',
   checkingPlugin: '检查插件',
   preparingPlugin: '准备安装',
@@ -7,6 +14,8 @@ export default {
   downloaded: '已下载 {{size}}',
   processed: '已处理 {{completed}} / {{total}} 条流水线',
   installErrors: {
+    plugin_permission_confirmation_required:
+      '无法确认插件权限。请有相应权限的成员在插件设置中确认后重试。',
     plugin_version_unavailable:
       '扩展市场尚未提供所需插件版本，请等待上架后重试，或选择仅迁移数据。',
     plugin_download_timeout: '下载插件超时，请检查网络后重试。',
@@ -31,6 +40,17 @@ export default {
     '检查运行环境后刷新，选中此流水线并确认，即可仅重试激活，不会再次迁移已保存的配置。',
   details: '迁移详情',
   notices: {
+    customRunner:
+      '旧版自定义 Runner 需要改写为插件 Runner 后再绑定。参见插件开发文档：https://langbot.app/docs/zh/plugin/dev/tutor',
+    fieldDropped:
+      '未识别的旧字段或配置段已从活动配置中移除，原值保存在迁移备份中。',
+    valueRepaired:
+      '格式不正确或缺失的值已按 4.10 默认值自动修复，请在迁移后检查。',
+    mixedRunner: '同时存在新旧 Runner 选择，已采用可用的那一项。',
+    runnerConfigReplaced:
+      '已有的新版 Runner 配置会被迁移结果替换，原值保存在迁移备份中。',
+    runnerAdded: '已将所需 Runner 插件加入此流水线的扩展列表。',
+    extensionPrefs: '扩展设置中有无效项，已忽略。',
     runtimeUnavailable:
       '插件运行时未连接，请恢复连接后重试，或选择仅迁移数据。',
     executionFailed: '迁移执行失败，请查看服务日志后重试。',
@@ -96,6 +116,7 @@ export default {
     blocked: '已阻止',
     already_current: '已是新版',
     not_legacy: '非旧版',
+    unsupported_runner: '不支持的 Runner',
     activation_pending: '等待激活',
     pending: '等待中',
     migrated: '已迁移',

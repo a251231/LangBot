@@ -8,6 +8,7 @@ import pytest
 
 from langbot.pkg.agent.runner.descriptor import RunnerDescriptor
 from langbot.pkg.api.http.service.pipeline import PipelineService
+from langbot.pkg.api.http.service.model import LLMModelsService
 
 
 class FakeLogger:
@@ -21,6 +22,9 @@ class FakeRegistry:
 
     async def list_runners(self, context, bound_plugins=None):
         return self.runners
+
+    async def get(self, context, runner_id):
+        return next(runner for runner in self.runners if runner.id == runner_id)
 
 
 def make_runner(runner_id: str, config_schema: list[dict]):
@@ -54,6 +58,7 @@ async def test_default_pipeline_config_uses_first_installed_runner_schema():
         logger=FakeLogger(),
         runner_registry=FakeRegistry([custom_agent, local_agent]),
     )
+    ap.llm_model_service = LLMModelsService(ap)
 
     config = await PipelineService(ap).get_default_pipeline_config('workspace-test')
 
@@ -63,6 +68,28 @@ async def test_default_pipeline_config_uses_first_installed_runner_schema():
             'api-key': '',
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_default_pipeline_config_uses_requested_runner_schema():
+    first = make_runner(
+        'plugin:alice/custom-agent/default',
+        [{'name': 'api-key', 'type': 'string', 'default': ''}],
+    )
+    selected = make_runner(
+        'plugin:langbot-team/LocalAgent/default',
+        [{'name': 'temperature', 'type': 'number', 'default': 0.2}],
+    )
+    ap = SimpleNamespace(
+        logger=FakeLogger(),
+        runner_registry=FakeRegistry([first, selected]),
+    )
+    ap.llm_model_service = LLMModelsService(ap)
+
+    config = await PipelineService(ap).get_default_pipeline_config('workspace-test', selected.id)
+
+    assert config['ai']['runner']['id'] == selected.id
+    assert config['ai']['runner_config'] == {selected.id: {'temperature': 0.2}}
 
 
 @pytest.mark.asyncio

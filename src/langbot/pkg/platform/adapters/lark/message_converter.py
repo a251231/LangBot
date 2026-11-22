@@ -132,6 +132,13 @@ class LarkMessageConverter(abstract_platform_adapter.AbstractMessageConverter):
             elif isinstance(msg, platform_message.Voice):
                 data = await LarkMessageConverter._get_component_bytes(msg)
                 if data:
+                    from ....utils import audio as audio_utils
+
+                    if audio_utils.is_ffmpeg_available():
+                        try:
+                            data = await audio_utils.transcode_audio(data, 'opus')
+                        except Exception:
+                            pass
                     duration = int(msg.length * 1000) if msg.length else None
                     file_key = await LarkMessageConverter.upload_file_to_lark(
                         data, api_client, file_type='opus', file_name='voice.opus', duration=duration
@@ -184,7 +191,7 @@ class LarkMessageConverter(abstract_platform_adapter.AbstractMessageConverter):
         normalized = LarkMessageConverter._normalize_inbound_content(message, message_content)
         for ele in normalized:
             tag = ele.get('tag')
-            if tag in {'text', 'md'}:
+            if tag in {'text', 'md', 'code_block'}:
                 text = ele.get('text') or ''
                 if text:
                     components.append(platform_message.Plain(text=text))
@@ -241,6 +248,13 @@ class LarkMessageConverter(abstract_platform_adapter.AbstractMessageConverter):
                     flattened.append(ele)
                 elif isinstance(ele, list):
                     flattened.extend(item for item in ele if isinstance(item, dict))
+            for index, ele in enumerate(flattened):
+                if ele.get('tag') == 'at':
+                    mentions = LarkMessageConverter._split_text_mentions(
+                        ele.get('user_id') or '', getattr(message, 'mentions', []) or []
+                    )
+                    if len(mentions) == 1 and mentions[0].get('tag') == 'at':
+                        flattened[index] = {**ele, **mentions[0]}
             return flattened
         if message.message_type == 'image':
             return [{'tag': 'img', 'image_key': content.get('image_key', ''), 'style': []}]
@@ -275,10 +289,15 @@ class LarkMessageConverter(abstract_platform_adapter.AbstractMessageConverter):
                 result.append({'tag': 'text', 'text': text[pos : match.start()], 'style': []})
             mention = mention_by_key.get(match.group(0))
             if mention:
+                identity = getattr(mention, 'id', None)
+                if isinstance(identity, dict):
+                    identity = identity.get('open_id') or identity.get('user_id')
+                elif identity is not None and not isinstance(identity, str):
+                    identity = getattr(identity, 'open_id', None) or getattr(identity, 'user_id', None)
                 result.append(
                     {
                         'tag': 'at',
-                        'user_id': getattr(mention, 'id', None)
+                        'user_id': identity
                         or getattr(mention, 'open_id', None)
                         or getattr(mention, 'user_id', None)
                         or getattr(mention, 'key', match.group(0)),

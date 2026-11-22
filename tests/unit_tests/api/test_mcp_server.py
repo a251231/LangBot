@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
+from langbot.pkg.api.mcp import server as mcp_server
 from langbot.pkg.api.mcp.server import LangBotMCPServer
 
 
 def _make_app() -> SimpleNamespace:
     app = SimpleNamespace()
+    app.persistence_mgr = SimpleNamespace(tenant_scope=lambda workspace_uuid: nullcontext())
     app.instance_config = SimpleNamespace(data={'system': {'edition': 'community', 'instance_id': 'inst-1'}})
     app.ver_mgr = SimpleNamespace(get_current_version=lambda: 'test-version')
     app.bot_service = SimpleNamespace(
@@ -65,3 +69,62 @@ async def test_mcp_server_exposes_bot_event_route_tools():
     assert 'test_bot_event_route' not in tool_names
     assert 'list_processors' in tool_names
     assert 'list_agents' not in tool_names
+    assert 'get_workspace_message_language' in tool_names
+    language_tool = next(tool for tool in tools if tool.name == 'set_workspace_message_language')
+    assert set(language_tool.inputSchema['properties']['language']['enum']) == {
+        'en_US',
+        'zh_Hans',
+        'zh_Hant',
+        'ja_JP',
+        'es_ES',
+        'ru_RU',
+        'th_TH',
+        'vi_VN',
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'filters', [{}, {'bot_ids': ['bot-1'], 'user_query': 'Alice'}, {'mode': 'real'}, {'execution_statuses': ['failed']}]
+)
+async def test_monitoring_sessions_accept_only_conversation_filters(monkeypatch, filters):
+    app = _make_app()
+    app.monitoring_service = SimpleNamespace(
+        normalize_page_window=lambda limit, offset: (limit, offset),
+        get_sessions=AsyncMock(return_value=([], 0)),
+    )
+    context = SimpleNamespace(workspace_uuid='workspace-1')
+    monkeypatch.setattr(mcp_server, 'get_request_context', lambda: context)
+    monkeypatch.setattr(mcp_server, '_authorized', lambda permission: context)
+    monkeypatch.setattr(mcp_server, 'get_workspace_language', AsyncMock(return_value='en_US'))
+    server = LangBotMCPServer(app)
+
+    arguments = {'kind': 'sessions', 'filters': filters}
+    if set(filters) & {'mode', 'execution_statuses'}:
+        with pytest.raises(ToolError, match='Unsupported monitoring filter'):
+            await server.mcp.call_tool('get_monitoring_records', arguments)
+        app.monitoring_service.get_sessions.assert_not_awaited()
+    else:
+        await server.mcp.call_tool('get_monitoring_records', arguments)
+        app.monitoring_service.get_sessions.assert_awaited_once_with(context, limit=100, offset=0, **filters)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'tool,operation,args',
+    [
+        ('get_workspace_sandbox', 'get', {'refresh': True}),
+        ('set_workspace_sandbox', 'update', {'backend': 'docker', 'e2b': None, 'limits': None}),
+        ('check_workspace_sandbox', 'check', {'e2b': None}),
+        ('test_workspace_sandbox', 'test', {'e2b': None}),
+    ],
+)
+async def test_sandbox_mcp_uses_application_boundary(monkeypatch, tool, operation, args):
+    app = _make_app()
+    context = SimpleNamespace(workspace_uuid='workspace-1')
+    app.application_api = SimpleNamespace(execute=AsyncMock(return_value={'backend': 'docker'}))
+    monkeypatch.setattr(mcp_server, 'get_request_context', lambda: context)
+    monkeypatch.setattr(mcp_server, '_authorized', lambda permission: context)
+    monkeypatch.setattr(mcp_server, 'get_workspace_language', AsyncMock(return_value='en_US'))
+    await LangBotMCPServer(app).mcp.call_tool(tool, args)
+    app.application_api.execute.assert_awaited_once_with('workspace.sandbox.' + operation, context, args)

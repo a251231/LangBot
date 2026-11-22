@@ -18,6 +18,10 @@ from langbot.pkg.plugin.handler import RuntimeConnectionHandler
 from langbot.pkg.api.http.context import ExecutionContext
 from langbot.pkg.persistence.mgr import PersistenceManager, PersistenceMode
 
+from tests.utils.plugin_installations import install_legacy_plugin
+
+pytestmark = pytest.mark.usefixtures('installed_legacy_plugin')
+
 
 class EmptyResult:
     def first(self):
@@ -81,6 +85,7 @@ def make_handler(workspace_uuid: str = 'workspace-a'):
         plugin_author='author-a',
         plugin_name='plugin-a',
     )
+    install_legacy_plugin(app, installation_context, 'author-a', 'plugin-a')
     return runtime_handler, app, installation_context
 
 
@@ -467,7 +472,8 @@ async def test_plugin_vector_action_forwards_trusted_context_and_logical_collect
 
 
 @pytest.mark.asyncio
-async def test_host_to_runtime_action_carries_trusted_connector_context():
+@pytest.mark.parametrize('capability', [None, True, False, 1])
+async def test_host_to_runtime_action_carries_trusted_connector_context(capability):
     app = SimpleNamespace(logger=Mock())
     connection = RecordingConnection()
     runtime_handler = RuntimeConnectionHandler(
@@ -495,8 +501,11 @@ async def test_host_to_runtime_action_carries_trusted_connector_context():
             break
         await asyncio.sleep(0)
     request = json.loads(connection.sent[0])
-    runtime_handler.resp_waiters[request['seq_id']].set_result(ActionResponse.success({}))
+    runtime_handler.resp_waiters[request['seq_id']].set_result(
+        ActionResponse.success({} if capability is None else {'event_batch': capability})
+    )
     await task
+    assert runtime_handler.supports_event_batch is (capability is True)
 
     assert request['data']['runtime_identity'] == {
         'instance_uuid': 'instance-a',
@@ -523,3 +532,41 @@ async def test_get_debug_info_converts_execution_context_to_sdk_action_context()
         workspace_uuid='workspace-a',
         placement_generation=7,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['cancel', 'timeout'])
+async def test_event_batch_cancels_remote_dispatch_and_cleans_waiters(failure):
+    from langbot_plugin.entities.io.errors import ActionCallTimeoutError
+
+    runtime_handler, _, binding = make_handler()
+    connection = RecordingConnection()
+    runtime_handler.conn = connection
+    second = binding.model_copy(update={'installation_uuid': '00000000-0000-4000-8000-000000000002'})
+    call_action = runtime_handler.call_action
+
+    async def short_call(action, data, **kwargs):
+        if action.value == 'emit_event' and failure == 'timeout':
+            kwargs['timeout'] = 0.01
+        return await call_action(action, data, **kwargs)
+
+    runtime_handler.call_action = short_call
+    with runtime_handler.installation_scope(binding):
+        task = asyncio.create_task(runtime_handler.emit_event({}, installation_bindings=[binding, second]))
+    while not connection.sent:
+        await asyncio.sleep(0)
+    original = json.loads(connection.sent[0])
+    if failure == 'cancel':
+        task.cancel()
+    async with asyncio.timeout(2):
+        while len(connection.sent) < 2:
+            await asyncio.sleep(0)
+    cancellation = json.loads(connection.sent[1])
+    assert cancellation['action'] == '__cancel_action'
+    assert cancellation['data'] == {'seq_id': original['seq_id']}
+    assert cancellation['context'] == original['context'] == binding.model_dump()
+    runtime_handler.resp_waiters[cancellation['seq_id']].set_result(ActionResponse.success({'accepted': True}))
+    with pytest.raises(asyncio.CancelledError if failure == 'cancel' else ActionCallTimeoutError):
+        await task
+    assert runtime_handler.resp_waiters == {}
+    assert runtime_handler.resp_queues == {}

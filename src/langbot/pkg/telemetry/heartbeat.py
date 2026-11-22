@@ -13,12 +13,16 @@ credentials.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
+import time
 import typing
 from datetime import datetime, timezone
 
 import sqlalchemy
 
 from ..utils import constants, platform as platform_utils
+from . import usage
 
 if typing.TYPE_CHECKING:
     from ..core import app as core_app
@@ -36,8 +40,64 @@ class WorkspaceResourceSnapshot(typing.TypedDict):
     mcp_server_count: int
     extension_count: int
     skill_count: int
+    agent_count: int
+    event_processor_count: int
+    plugin_processor_count: int
+    event_binding_count: int
     adapters: list[str]
     execution_generation: int
+
+
+# Agent rows are configuration, not runtime registries, so a Workspace count
+# needs one scoped query. The heartbeat runs every five minutes on Cloud; a
+# one-hour cache keeps the cost at one bounded query per Workspace per hour
+# instead of one per cycle. Unavailable counts stay -1, never a fake zero.
+_AGENT_COUNT_CACHE_TTL_SECONDS = 3600
+_agent_count_cache: dict[str, tuple[float, dict[str, int]]] = {}
+
+
+async def _workspace_agent_kind_counts(ap: core_app.Application, workspace_uuid: str) -> dict[str, int]:
+    """Count one Workspace's Agents per ``kind``; empty when unavailable."""
+    if not workspace_uuid:
+        return {}
+    now = time.monotonic()
+    cached = _agent_count_cache.get(workspace_uuid)
+    if cached is not None and cached[0] > now:
+        return dict(cached[1])
+    counts: dict[str, int] = {}
+    try:
+        from ..entity.persistence import agent as persistence_agent
+
+        statement = sqlalchemy.select(persistence_agent.Agent.kind, sqlalchemy.func.count()).group_by(
+            persistence_agent.Agent.kind
+        )
+        tenant_uow = getattr(ap.persistence_mgr, 'tenant_uow', None)
+        if callable(tenant_uow):
+            async with tenant_uow(workspace_uuid):
+                result = await ap.persistence_mgr.execute_async(statement)
+        else:
+            result = await ap.persistence_mgr.execute_async(statement)
+        for kind, count in result.all():
+            counts[str(kind or 'agent')] = int(count or 0)
+    except Exception:
+        counts = {}
+    _agent_count_cache[workspace_uuid] = (now + _AGENT_COUNT_CACHE_TTL_SECONDS, dict(counts))
+    return counts
+
+
+def _bot_processor_counts(bots) -> tuple[int, int]:
+    """Count plugin-processor subscriptions and event bindings across bots."""
+    processors = 0
+    bindings = 0
+    for bot in bots:
+        entity = getattr(bot, 'bot_entity', bot)
+        declared_processors = getattr(entity, 'plugin_processors', None)
+        if isinstance(declared_processors, list):
+            processors += len(declared_processors)
+        declared_bindings = getattr(entity, 'event_bindings', None)
+        if isinstance(declared_bindings, list):
+            bindings += len(declared_bindings)
+    return processors, bindings
 
 
 async def _count(
@@ -81,6 +141,10 @@ async def _cloud_workspace_resource_counts(ap: core_app.Application, bindings) -
             'mcp_server_count': 0,
             'extension_count': 0,
             'skill_count': 0,
+            'agent_count': -1,
+            'event_processor_count': -1,
+            'plugin_processor_count': 0,
+            'event_binding_count': 0,
             'adapters': [],
             'execution_generation': binding.placement_generation,
         }
@@ -91,6 +155,9 @@ async def _cloud_workspace_resource_counts(ap: core_app.Application, bindings) -
     for key, bot in getattr(ap.platform_mgr, '_bots_by_key', {}).items():
         if len(key) >= 2 and key[1] in counts:
             counts[key[1]]['bot_count'] += 1
+            processors, bindings = _bot_processor_counts([bot])
+            counts[key[1]]['plugin_processor_count'] += processors
+            counts[key[1]]['event_binding_count'] += bindings
             adapter = getattr(bot, 'adapter', None)
             if adapter is not None and getattr(bot, 'enable', False):
                 adapter_sets[key[1]].add(adapter.__class__.__name__)
@@ -113,6 +180,10 @@ async def _cloud_workspace_resource_counts(ap: core_app.Application, bindings) -
     for workspace_uuid, resource in counts.items():
         resource['extension_count'] = resource['plugin_count'] + resource['mcp_server_count']
         resource['adapters'] = sorted(adapter_sets[workspace_uuid])
+        agent_counts = await _workspace_agent_kind_counts(ap, workspace_uuid)
+        if agent_counts:
+            resource['agent_count'] = int(agent_counts.get('agent', 0))
+            resource['event_processor_count'] = int(agent_counts.get('event_processor', 0))
     return list(counts.values())
 
 
@@ -163,6 +234,9 @@ async def build_heartbeat_payload(
             features['bot_count'] = len(platform_mgr.bots)
             adapters = sorted({bot.adapter.__class__.__name__ for bot in enabled_bots if getattr(bot, 'adapter', None)})
             features['adapters'] = adapters
+            processors, bindings = _bot_processor_counts(platform_mgr.bots)
+            features['plugin_processor_count'] = processors
+            features['event_binding_count'] = bindings
     except Exception:
         pass
 
@@ -189,16 +263,16 @@ async def build_heartbeat_payload(
             cloud_counter=lambda: len(ap.platform_mgr._bots_by_key),
         )
 
-    # Plugin count (from plugin runtime)
+    # Scoped Cloud counts are already available; never issue tenantless RPCs.
     try:
         plugin_connector = getattr(ap, 'plugin_connector', None)
-        if plugin_connector is not None:
+        if workspace_resource is None and plugin_connector is not None:
             plugins = await plugin_connector.list_plugins()
             features['plugin_count'] = len(plugins)
     except Exception:
         features['plugin_count'] = -1
 
-    # Skill count (from Box runtime via skill manager)
+    # Skill count (from the Core SkillRepository cache)
     try:
         skill_mgr = getattr(ap, 'skill_mgr', None)
         if skill_mgr is not None:
@@ -206,8 +280,65 @@ async def build_heartbeat_payload(
     except Exception:
         pass
 
+    # Agent processors: configuration rows, so one scoped count per Workspace.
+    # The Cloud snapshot supplies these already and overrides below.
+    if workspace_resource is None:
+        agent_counts = await _workspace_agent_kind_counts(ap, workspace_uuid)
+        features['agent_count'] = int(agent_counts.get('agent', 0)) if agent_counts else -1
+        features['event_processor_count'] = int(agent_counts.get('event_processor', 0)) if agent_counts else -1
+
     if workspace_resource is not None:
         features.update({key: value for key, value in workspace_resource.items() if key != 'workspace_uuid'})
+
+    features['kb_engines'] = []
+    try:
+        features['kb_engines'] = sorted(
+            {
+                kb.get_knowledge_engine_plugin_id()[:64]
+                for (ws, _kb_uuid), kb in ap.rag_mgr.knowledge_bases.items()
+                if ws == workspace_uuid and kb.get_knowledge_engine_plugin_id()
+            }
+        )[:16]
+    except Exception:
+        pass
+    features['kb_file_count'] = -1
+    cloud_runtime = getattr(getattr(ap.persistence_mgr, 'mode', None), 'value', None) == 'cloud_runtime'
+    if not cloud_runtime:
+        try:
+            result = await ap.persistence_mgr.execute_async(
+                sqlalchemy.select(sqlalchemy.func.count())
+                .select_from(persistence_rag.File)
+                .where(persistence_rag.File.workspace_uuid == workspace_uuid)
+            )
+            features['kb_file_count'] = result.scalar() or 0
+        except Exception:
+            pass
+    for field, pattern in (('deploy_source', r'[a-z0-9_-]{1,32}'), ('deploy_tool_version', r'[0-9A-Za-z.+_-]{1,32}')):
+        value = os.environ.get(f'LANGBOT_{field.upper()}', '')
+        if re.fullmatch(pattern, value):
+            features[field] = value
+    if usage.enabled(ap):
+        try:
+            alert_service = getattr(ap, 'alert_service', None)
+            if alert_service is not None:
+                settings = await asyncio.wait_for(alert_service._settings(workspace_uuid), timeout=1.0)
+                usage.inc(
+                    ap,
+                    workspace_uuid,
+                    'alert.state',
+                    enabled='yes' if alert_service.enabled() and settings['enabled'] else 'no',
+                    channel=settings['email_channel'],
+                )
+        except Exception:
+            pass
+    batch = usage.take_batch(workspace_uuid) if usage.enabled(ap) else None
+    features['lbctl_versions'] = (
+        sorted({dims['version'] for metric, dims, _count in batch['c'] if metric == 'lbctl.client'})[:5]
+        if batch
+        else []
+    )
+    if batch:
+        features['usage'] = batch
 
     return {
         'event_type': 'instance_heartbeat',
@@ -237,6 +368,9 @@ async def build_heartbeat_payloads(ap: core_app.Application) -> list[dict]:
     """Build one heartbeat per active Workspace."""
     bindings = await ap.workspace_service.list_active_execution_bindings()
     workspace_uuids = sorted({binding.workspace_uuid for binding in bindings})
+    cloud_runtime = getattr(getattr(ap.persistence_mgr, 'mode', None), 'value', None) == 'cloud_runtime'
+    if len(workspace_uuids) == 1 and not cloud_runtime:
+        ap._telemetry_default_workspace = workspace_uuids[0]
     workspace_create_ts = {
         binding.workspace_uuid: _workspace_created_timestamp(getattr(binding, 'workspace_created_at', None))
         for binding in bindings
@@ -265,10 +399,30 @@ async def heartbeat_loop(ap: core_app.Application) -> None:
                 # Heartbeats are a daily bounded batch, not best-effort query events.
                 # Await each send so the TelemetryManager's 8-task queue cannot drop
                 # Workspaces after the first batch.
-                await ap.telemetry.send(payload)
+                batch = payload['features'].get('usage')
+                try:
+                    sent = await ap.telemetry.send(payload)
+                except Exception:
+                    usage.nack(payload['workspace_uuid'], batch)
+                    raise
+                if sent is True:
+                    usage.ack(payload['workspace_uuid'], batch)
+                else:
+                    usage.nack(payload['workspace_uuid'], batch)
         except Exception as e:
             try:
                 ap.logger.debug(f'Telemetry heartbeat failed: {e}')
             except Exception:
                 pass
-        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        # Cloud dashboards need fresh scoped snapshots, including Workspaces
+        # discovered after startup. A transient startup/projection failure must
+        # not suppress synchronization for an entire day.
+        cloud_runtime = getattr(getattr(ap.persistence_mgr, 'mode', None), 'value', None) == 'cloud_runtime'
+        await asyncio.sleep(heartbeat_interval(cloud_runtime))
+
+
+def heartbeat_interval(cloud_runtime: bool) -> int:
+    try:
+        return max(30, int(os.environ['LANGBOT_TELEMETRY_HEARTBEAT_SECONDS']))
+    except (KeyError, ValueError):
+        return 300 if cloud_runtime else HEARTBEAT_INTERVAL_SECONDS

@@ -8,6 +8,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from langbot_plugin.runtime.bounded_executor import BlockingWorkCapacityError
+
 
 DEFAULT_MAX_WORKERS = 8
 DEFAULT_MAX_PENDING = 128
@@ -22,14 +24,6 @@ _blocking_work_scope: contextvars.ContextVar[str | None] = contextvars.ContextVa
     'langbot_blocking_work_scope',
     default=None,
 )
-
-
-class BlockingWorkCapacityError(RuntimeError):
-    """Raised before unbounded blocking work can enter the executor queue."""
-
-    def __init__(self, message: str, *, scope: str | None = None) -> None:
-        super().__init__(message)
-        self.scope = scope
 
 
 @contextlib.contextmanager
@@ -153,6 +147,13 @@ def _validated_limits(
     return workers, pending, scope_limit
 
 
+def dns_pool_limits(max_workers: int) -> tuple[int, int]:
+    """Resolver pool size for a main pool of ``max_workers`` threads."""
+
+    workers = max(4, min(16, max_workers // 4))
+    return workers, max(64, workers * 16)
+
+
 class BoundedThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
     """Thread pool with a hard cap on running plus queued submissions."""
 
@@ -172,6 +173,21 @@ class BoundedThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
         super().__init__(
             max_workers=max_workers,
             thread_name_prefix=thread_name_prefix,
+        )
+        # asyncio DNS uses the default executor too. Keep a separately bounded
+        # resolver pool so long-lived SDK calls cannot starve control-plane DNS.
+        # Size it with the main pool: a fixed 2 workers / 32 queued saturated
+        # on Cloud (thousands of Workspaces reconnecting bots and syncing), and
+        # every new database or HTTP connection then failed its lookup.
+        dns_workers, dns_pending = dns_pool_limits(max_workers)
+        self._dns_executor = (
+            BoundedThreadPoolExecutor(
+                max_workers=dns_workers,
+                max_pending=dns_pending,
+                thread_name_prefix='langbot-dns',
+            )
+            if thread_name_prefix != 'langbot-dns'
+            else None
         )
         self.max_workers = max_workers
         self.max_pending = max_pending
@@ -194,6 +210,10 @@ class BoundedThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
         *args: Any,
         **kwargs: Any,
     ) -> concurrent.futures.Future:
+        import socket
+
+        if self._dns_executor is not None and fn in (socket.getaddrinfo, socket.getnameinfo):
+            return self._dns_executor.submit(fn, *args, **kwargs)
         scope = current_blocking_work_scope()
         if not self._capacity.acquire(blocking=False):
             with self._stats_lock:
@@ -245,6 +265,11 @@ class BoundedThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
 
         future.add_done_callback(complete)
         return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        if self._dns_executor is not None:
+            self._dns_executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
 
     def _release_scope_locked(self, scope: str | None) -> None:
         if scope is None:

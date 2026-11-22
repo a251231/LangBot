@@ -2,20 +2,77 @@
 
 from __future__ import annotations
 
+from ....i18n import t
+
 import typing
+import copy
+import time
+import json
+import os
+import re
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from openai import AsyncOpenAI
+from ..http_pool import RequesterHTTPPool
+from ..prompt_caching import apply_prompt_caching
+import asyncio
+import httpx
+from urllib.parse import urlsplit
+from ..request_policy import current_call, RequestPolicy, error_metadata
 
 import litellm
-from litellm import acompletion, aembedding, arerank
+from litellm import acompletion, aembedding, arerank, atranscription, aspeech
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+from litellm.secret_managers.main import get_secret, get_secret_bool
 
 from .. import errors, reasoning, requester
-from ....utils import httpclient
+from . import minimax
+from ....utils import httpclient, image
 import langbot_plugin.api.entities.builtin.resource.tool as resource_tool
 import langbot_plugin.api.entities.builtin.pipeline.query as pipeline_query
 import langbot_plugin.api.entities.builtin.provider.message as provider_message
 
 
+class _LeasedHTTPHandler(AsyncHTTPHandler):
+    """Adapt a leased transport without LiteLLM's hidden connection-error retry."""
+
+    def __init__(self, client, timeout):
+        self.client = client
+        self.timeout = timeout
+        self.event_hooks = None
+        self.client_alias = 'langbot'
+
+    async def post(self, url, *, timeout=None, stream=False, logging_obj=None, **kwargs):
+        if isinstance(kwargs.get('data'), (str, bytes)):
+            kwargs['content'] = kwargs.pop('data')
+        request = self.client.build_request('POST', url, timeout=timeout or self.timeout, **kwargs)
+        response = await self.client.send(request, stream=stream)
+        if response.is_error:
+            # Buffer the error body before releasing the stream so LiteLLM can
+            # still map the HTTP status and upstream error code.
+            try:
+                await response.aread()
+            finally:
+                await response.aclose()
+            response.raise_for_status()
+        return response
+
+    async def close(self):
+        pass  # The requester's lease owns the transport.
+
+    async def __aexit__(self, *args):
+        pass
+
+    def __del__(self):
+        pass
+
+
 class _ThinkStripState:
-    """Stateful filter that drops think blocks across chunks."""
+    """Drop explicit think blocks, buffering only possible split tag prefixes.
+
+    Untagged text must stream immediately: an orphan closing tag cannot identify
+    earlier text as reasoning without delaying every ordinary answer until EOF.
+    """
 
     _THINK_OPEN = '<think>'
     _THINK_CLOSE = '</think>'
@@ -30,7 +87,6 @@ class _ThinkStripState:
         self._open_tags = tuple(open_tag for open_tag, _close_tag in self._pairs)
         self._buf = ''
         self._close_tag: str | None = None
-        self._pending_initial = True
 
     def feed(self, chunk: str) -> str:
         """Feed a streaming delta and return user-visible content."""
@@ -63,7 +119,6 @@ class _ThinkStripState:
         if close_idx != -1:
             self._close_tag = None
             self._buf = ''
-            self._pending_initial = False
             return self._process_visible_text(text[close_idx + len(close_tag) :])
 
         self._buf = self._close_prefix(text, close_tag)
@@ -74,37 +129,14 @@ class _ThinkStripState:
         index = 0
 
         while index < len(text):
-            if self._pending_initial:
-                open_idx, open_tag, close_tag = self._find_next_open(text, index)
-                orphan_close_idx, orphan_close_tag = self._find_next_close(text, index)
-
-                if orphan_close_idx != -1 and (open_idx == -1 or orphan_close_idx < open_idx):
-                    self._pending_initial = False
-                    index = orphan_close_idx + len(orphan_close_tag)
-                    continue
-
-                if open_idx == -1:
-                    self._buf = text[index:]
-                    return ''.join(out)
-
-                if open_idx > index:
-                    self._pending_initial = False
-                    out.append(text[index:open_idx])
-                    index = open_idx
-                    continue
-
             open_idx, open_tag, close_tag = self._find_next_open(text, index)
             if open_idx == -1:
                 emit_end = self._visible_emit_end(text, index)
                 out.append(text[index:emit_end])
-                if emit_end > index:
-                    self._pending_initial = False
                 self._buf = text[emit_end:]
                 return ''.join(out)
 
             out.append(text[index:open_idx])
-            if open_idx > index:
-                self._pending_initial = False
             body_start = open_idx + len(open_tag)
             close_idx = text.find(close_tag, body_start)
             if close_idx == -1:
@@ -112,7 +144,6 @@ class _ThinkStripState:
                 self._buf = self._close_prefix(text[body_start:], close_tag)
                 return ''.join(out)
 
-            self._pending_initial = False
             index = close_idx + len(close_tag)
 
         self._buf = ''
@@ -129,16 +160,6 @@ class _ThinkStripState:
                 best_open = open_tag
                 best_close = close_tag
         return best_idx, best_open, best_close
-
-    def _find_next_close(self, text: str, start: int) -> tuple[int, str]:
-        best_idx = -1
-        best_close = ''
-        for _open_tag, close_tag in self._pairs:
-            idx = text.find(close_tag, start)
-            if idx != -1 and (best_idx == -1 or idx < best_idx):
-                best_idx = idx
-                best_close = close_tag
-        return best_idx, best_close
 
     def _visible_emit_end(self, text: str, start: int) -> int:
         visible = text[start:]
@@ -162,8 +183,25 @@ class _ThinkStripState:
 class LiteLLMRequester(requester.ProviderAPIRequester):
     """LiteLLM unified API requester supporting chat, embedding, and rerank."""
 
+    reports_raw_timing = True
+    TOKEN_COUNT_TIMEOUT = 4.0
+    # A count that outlived its caller (timeout or cancellation). Its thread
+    # cannot be stopped, so no new count starts until it finishes.
+    _stalled_count_task: asyncio.Task | None = None
+
     _EMBEDDING_MODEL_HINTS = ('embedding', 'embed', 'bge-', 'e5-', 'm3e', 'gte-', 'text-embedding')
     _RERANK_MODEL_HINTS = ('rerank', 're-rank', 're_rank')
+    _ASR_MODEL_HINTS = (
+        'whisper',
+        'sensevoice',
+        'asr',
+        'paraformer',
+        'conformer',
+        'speech-to-text',
+        'transcription',
+        'stt',
+    )
+    _TTS_MODEL_HINTS = ('tts', 'text-to-speech', 'speech-synthesis', 'cosyvoice', 'voice-clone', 'sambert', 'chattts')
     _QWEN_DEDICATED_THINKING_MODELS = frozenset(
         {
             'qwen3.7-max-preview',
@@ -196,6 +234,7 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         'bailian-chat-completions': 'qwen',
         'doubao-chat-completions': 'doubao',
         'mimo-chat-completions': 'mimo',
+        'minimax-chat-completions': 'minimax',
     }
 
     default_config: dict[str, typing.Any] = {
@@ -210,9 +249,90 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
 
     async def initialize(self):
         """Initialize LiteLLM client settings."""
-        # LiteLLM doesn't require explicit client initialization
-        # Configuration is passed per-request via litellm params
-        pass
+        self._http_pool = RequesterHTTPPool(
+            follow_redirects=True, drain_sse=self._get_custom_llm_provider() == 'openai'
+        )
+
+    async def aclose(self):
+        if getattr(self, '_http_pool', None) is not None:
+            await self._http_pool.aclose()
+        if hasattr(self, '_metadata_cache'):
+            self._metadata_cache.clear()
+
+    @asynccontextmanager
+    async def _client_args(self, args):
+        pool = getattr(self, '_http_pool', None)
+        provider = args.get('custom_llm_provider') or self._get_custom_llm_provider()
+        if pool is None or provider not in ('openai', 'openrouter') or args.get('client') is not None:
+            yield args
+            return
+        # Preserve explicitly customized LiteLLM transports and TLS settings.
+        if (
+            any(args.get(key) is not None for key in ('shared_session', 'http_client', 'ssl_verify', 'ssl_certificate'))
+            or getattr(litellm, 'aclient_session', None) is not None
+            or getattr(litellm, 'ssl_verify', True) is not True
+            or getattr(litellm, 'ssl_certificate', None)
+            or getattr(litellm, 'force_ipv4', False)
+            or any(name in os.environ for name in ('SSL_VERIFY', 'SSL_CERTIFICATE'))
+        ):
+            yield args
+            return
+        if not args['model'].startswith(f'{provider}/'):
+            yield args  # A caller redirected the model; let LiteLLM resolve its transport.
+            return
+        model_name = args['model'].removeprefix(f'{provider}/')
+        if provider == 'openrouter' and model_name in litellm.open_ai_chat_completion_models:
+            yield args  # Preserve LiteLLM's alternate bare-model routing.
+            return
+        transport_started = time.perf_counter()
+        async with pool.lease() as client:
+            state = current_call.get()
+            if state:
+                state.metrics['transport_setup_ms'] = round(
+                    state.metrics.get('transport_setup_ms', 0) + (time.perf_counter() - transport_started) * 1000, 3
+                )
+            if provider == 'openrouter' or get_secret_bool('EXPERIMENTAL_OPENAI_BASE_LLM_HTTP_HANDLER'):
+                yield {**args, 'client': _LeasedHTTPHandler(client, args.get('timeout', 120))}
+                return
+            # A fresh lightweight SDK wrapper keeps rotating keys, organization
+            # and deadlines request-local; only its HTTP transport is reused.
+            api_key = args.get('api_key') or litellm.api_key or litellm.openai_key or get_secret('OPENAI_API_KEY')
+            if not api_key:
+                raise errors.RequesterError(
+                    t('No API key is configured for this model provider'),
+                    code='authentication',
+                    retryable=False,
+                )
+            sdk = AsyncOpenAI(
+                api_key=api_key,
+                base_url=(
+                    args.get('api_base')
+                    or litellm.api_base
+                    or get_secret('OPENAI_BASE_URL')
+                    or get_secret('OPENAI_API_BASE')
+                    or 'https://api.openai.com/v1'
+                ),
+                http_client=client,
+                organization=args.get('organization') or litellm.organization,
+                timeout=args.get('timeout', 120),
+                max_retries=0,
+            )
+            yield {**args, 'client': sdk}
+
+    def _cached_metadata(self, key, compute):
+        if not hasattr(self, '_metadata_cache'):
+            self._metadata_cache = OrderedDict()
+        cache = self._metadata_cache
+        cached = cache.get(key)
+        if cached is not None and time.monotonic() - cached[0] < 300:
+            cache.move_to_end(key)
+            return copy.deepcopy(cached[1])
+        value = compute()
+        cache[key] = (time.monotonic(), copy.deepcopy(value))
+        cache.move_to_end(key)
+        while len(cache) > 128:
+            cache.popitem(last=False)
+        return value
 
     def _build_litellm_model_name(self, model_name: str, custom_llm_provider: str | None = None) -> str:
         """Build LiteLLM model name with provider prefix if needed."""
@@ -228,9 +348,26 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
     def _get_custom_llm_provider(self) -> str | None:
         return self.requester_cfg.get('custom_llm_provider') or None
 
+    def _uses_openrouter_protocol(self) -> bool:
+        # OpenRouter's shipped metadata also serves OpenAI-compatible non-chat
+        # operations. Select gateway chat semantics independently of it.
+        return (
+            self._get_custom_llm_provider() == 'openrouter'
+            or self.requester_cfg.get('requester_name') == 'openrouter-chat-completions'
+        )
+
     def _safe_litellm_bool_helper(self, helper_name: str, model_name: str) -> bool:
         """Call a LiteLLM boolean capability helper without letting metadata gaps fail requests."""
+        return self._cached_metadata(
+            ('bool', helper_name, model_name), lambda: self._uncached_litellm_bool_helper(helper_name, model_name)
+        )
+
+    def _uncached_litellm_bool_helper(self, helper_name, model_name):
         helper = getattr(litellm, helper_name, None)
+        if helper_name == 'supports_pdf_input' and not callable(helper):
+            from litellm.utils import supports_pdf_input
+
+            helper = supports_pdf_input
         if not callable(helper):
             return False
 
@@ -328,6 +465,9 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         return None
 
     def _safe_context_length(self, model_name: str) -> int | None:
+        return self._cached_metadata(('model', model_name), lambda: self._uncached_model_info(model_name))
+
+    def _uncached_model_info(self, model_name):
         helper = getattr(litellm, 'get_model_info', None)
         if not callable(helper):
             return self._known_context_length_fallback(model_name)
@@ -462,6 +602,9 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
     def _known_reasoning_levels(self, model_name: str, family: str) -> list[str] | None:
         normalized_name = model_name.lower().rsplit('/', 1)[-1]
 
+        if family == 'minimax':
+            return minimax.reasoning_levels(normalized_name)
+
         if family == 'deepseek' and normalized_name.startswith('deepseek-'):
             if normalized_name.startswith('deepseek-v4-'):
                 return ['provider_default', 'disabled', 'low', 'high', 'xhigh', 'max']
@@ -592,6 +735,20 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         }
         if family == 'qwen' and 'disabled' in capabilities['levels'] and 'enabled' not in capabilities['levels']:
             capabilities['legacy_levels'] = ['enabled']
+        if self._uses_openrouter_protocol():
+            capabilities['budget_tokens'] = {'min': 1, 'max': 32768}
+        elif family == 'anthropic' and not self._is_anthropic_adaptive_model(normalized_name):
+            if normalized_name.rsplit('/', 1)[-1].startswith(
+                ('claude-3-7-', 'claude-sonnet-4', 'claude-opus-4', 'claude-haiku-4')
+            ):
+                capabilities['budget_tokens'] = {'min': 1024, 'max': 32768}
+        elif family == 'qwen' and self._supports_qwen_thinking_budget(model_name):
+            capabilities['budget_tokens'] = {'min': 1, 'max': 32768}
+        elif family == 'gemini' and 'gemini-2.5' in normalized_name:
+            capabilities['budget_tokens'] = {
+                'min': 128 if 'pro' in normalized_name else (512 if 'flash-lite' in normalized_name else 1),
+                'max': 32768 if 'pro' in normalized_name else 24576,
+            }
         return capabilities
 
     def _build_reasoning_args(self, model: requester.RuntimeLLMModel) -> dict[str, typing.Any]:
@@ -599,14 +756,23 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         if level == 'provider_default':
             return {}
 
-        config = {'level': level}
+        config = reasoning.normalize_reasoning_config(self._reasoning_config_value(model))
         capabilities = self.get_reasoning_capabilities(model)
         try:
             reasoning.validate_reasoning_capabilities(config, capabilities, model.model_entity.name)
         except ValueError as exc:
-            raise errors.RequesterError(str(exc)) from exc
+            raise errors.RequesterError(str(exc), code='invalid_policy') from exc
 
         family = self._reasoning_family(model.model_entity.name, model)
+        if family == 'minimax':
+            return minimax.reasoning_parameters(level)
+        budget = config.get('budget_tokens')
+        if budget is not None:
+            if self._uses_openrouter_protocol():
+                return {'extra_body': {'reasoning': {'max_tokens': budget}}}
+            if family == 'qwen':
+                return {'extra_body': {'enable_thinking': True, 'thinking_budget': budget}}
+            return {'thinking': {'type': 'enabled', 'budget_tokens': budget}}
         if level == 'disabled':
             if family in {'deepseek', 'kimi', 'mimo', 'doubao'}:
                 return {'extra_body': {'thinking': {'type': 'disabled'}}}
@@ -651,12 +817,27 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
     def _reasoning_level(self, model: requester.RuntimeLLMModel) -> str:
         return reasoning.normalize_reasoning_config(self._reasoning_config_value(model))['level']
 
-    def _infer_model_type(self, model_id: str) -> str:
+    def _infer_model_type(self, model_id: str, model_payload: dict[str, typing.Any] | None = None) -> str:
+        if model_payload:
+            explicit_type = (model_payload.get('type') or model_payload.get('task') or '').lower()
+            if explicit_type in ('asr', 'audio_transcription', 'speech-to-text', 'stt'):
+                return 'asr'
+            if explicit_type in ('tts', 'text_to_speech', 'text-to-speech', 'speech-synthesis'):
+                return 'tts'
+            if explicit_type in ('embedding', 'text-embedding'):
+                return 'embedding'
+            if explicit_type in ('rerank', 'reranking'):
+                return 'rerank'
+
         normalized_id = (model_id or '').lower()
         if any(kw in normalized_id for kw in self._RERANK_MODEL_HINTS):
             return 'rerank'
         if any(kw in normalized_id for kw in self._EMBEDDING_MODEL_HINTS):
             return 'embedding'
+        if any(kw in normalized_id for kw in self._ASR_MODEL_HINTS):
+            return 'asr'
+        if any(kw in normalized_id for kw in self._TTS_MODEL_HINTS):
+            return 'tts'
         return 'llm'
 
     def _enrich_scanned_model(
@@ -664,7 +845,7 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         model_id: str,
         model_payload: dict[str, typing.Any] | None = None,
     ) -> dict[str, typing.Any]:
-        model_type = self._infer_model_type(model_id)
+        model_type = self._infer_model_type(model_id, model_payload)
         scanned_model: dict[str, typing.Any] = {
             'id': model_id,
             'name': model_id,
@@ -703,11 +884,21 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         messages: typing.List[provider_message.Message],
         reasoning_family: str = '',
         include_reasoning_context: bool = True,
+        model_name: str | None = None,
+        pdf_input_declared: bool = False,
     ) -> list[dict]:
         """Convert LangBot messages to LiteLLM/OpenAI format."""
         req_messages = []
         for m in messages:
             msg_dict = m.dict(exclude_none=True)
+            provider_fields = msg_dict.get('provider_specific_fields')
+            replay_fields = minimax.take_replay_fields(provider_fields) if isinstance(provider_fields, dict) else {}
+            if isinstance(provider_fields, dict):
+                # Stream completion metadata belongs to the response, never to
+                # replayed chat messages. Keep provider signatures for LiteLLM.
+                provider_fields.pop('finish_reason', None)
+                if not provider_fields:
+                    msg_dict.pop('provider_specific_fields', None)
             content = msg_dict.get('content')
 
             if msg_dict.get('role') == 'assistant' and reasoning_family:
@@ -743,6 +934,9 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
                     else:
                         msg_dict.pop('provider_specific_fields', None)
 
+            if msg_dict.get('role') == 'assistant' and reasoning_family == 'minimax':
+                msg_dict.update(replay_fields)
+
             if isinstance(content, list):
                 converted_parts = []
                 for part in content:
@@ -760,18 +954,37 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
                             if isinstance(raw_image_url, dict):
                                 fallback_url = raw_image_url.get('url')
                         if image_b64 or fallback_url:
-                            part['image_url'] = {'url': image_b64 or fallback_url}
+                            part['image_url'] = {
+                                'url': image.normalize_image_data_url(image_b64) if image_b64 else fallback_url
+                            }
                             part['type'] = 'image_url'
                             part.pop('image_base64', None)
                         else:
                             continue
-                    # OpenAI-compatible chat models reject non-image file parts
-                    # (audio/document base64 or url). These originate from Voice /
-                    # File attachments — including ones replayed from conversation
-                    # history — and the agent already accesses their bytes via the
-                    # sandbox. Drop them from the model payload to avoid
-                    # "Invalid user message ... invalid content type=file_base64".
+                    # Explicit PDF input must succeed or fail visibly; keep other legacy file handling.
                     if isinstance(part, dict) and part.get('type') in ('file_base64', 'file_url'):
+                        file_data = part.get('file_base64') or part.get('file_url')
+                        if isinstance(file_data, str) and file_data.startswith('data:application/pdf;base64,'):
+                            supported = pdf_input_declared or (
+                                model_name is not None
+                                and self._safe_litellm_bool_helper('supports_pdf_input', model_name)
+                            )
+                            if not supported:
+                                raise errors.RequesterError(
+                                    t(
+                                        'The selected model does not support native PDF input; read the PDF as text instead.'
+                                    ),
+                                    code='unsupported_pdf_input',
+                                )
+                            converted_parts.append(
+                                {
+                                    'type': 'file',
+                                    'file': {
+                                        'file_data': file_data,
+                                        'filename': part.get('file_name') or 'document.pdf',
+                                    },
+                                }
+                            )
                         continue
                     converted_parts.append(part)
                 msg_dict['content'] = converted_parts
@@ -779,6 +992,17 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
             req_messages.append(msg_dict)
 
         return req_messages
+
+    @staticmethod
+    def _adapt_messages_for_provider(messages: list[dict], chat_provider: str | None) -> None:
+        """Adapt serialized request messages in place for the chat transport."""
+        if chat_provider == 'groq':
+            # Groq rejects LiteLLM's metadata envelope on messages and tool calls.
+            for message in messages:
+                message.pop('provider_specific_fields', None)
+                for tool_call in message.get('tool_calls') or []:
+                    tool_call.pop('provider_specific_fields', None)
+                    tool_call.get('function', {}).pop('provider_specific_fields', None)
 
     _THINK_PATTERNS: tuple[str, ...] = (
         r'^\s*(?:(?!<think>).)*?</think>\s*',
@@ -1058,32 +1282,226 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         if include_retry_params:
             if self.requester_cfg.get('drop_params'):
                 args['drop_params'] = self.requester_cfg['drop_params']
-            if self.requester_cfg.get('num_retries'):
+            if self.requester_cfg.get('num_retries') is not None:
                 args['num_retries'] = self.requester_cfg['num_retries']
             if self.requester_cfg.get('api_version'):
                 args['api_version'] = self.requester_cfg['api_version']
         return args
 
+    _QUOTA_ERROR_CODES = frozenset(
+        {
+            'insufficient_quota',
+            'quota_exceeded',
+            'billing_hard_limit_reached',
+            # New API / One API (LangBot Models gateway)
+            'insufficient_user_quota',
+            'pre_consume_token_quota_failed',
+            'token_quota_exhausted',
+            # Other OpenAI-compatible gateways
+            'insufficient_balance',
+            'insufficient_credits',
+            'payment_required',
+        }
+    )
+    _QUOTA_MESSAGE_PATTERN = re.compile(
+        r'额度不足|余额不足|额度已用尽|额度用尽|欠费|'
+        r'insufficient[ _-]?(?:user[ _-]?)?(?:balance|quota|credits?|funds)|'
+        r'quota (?:is )?(?:not enough|exceeded|exhausted)|'
+        r'credit balance is too low|exceeded your current quota|out of credits',
+        re.IGNORECASE,
+    )
+    _SAFE_ERROR_CODE = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
+
+    @staticmethod
+    def _upstream_error_details(e: Exception) -> tuple[str | None, str]:
+        """Return the upstream machine code and diagnostic text of a provider error.
+
+        LiteLLM does not always keep the response body, so the exception chain
+        and the rendered message are inspected as well. The text is only used
+        for classification and is never shown to users.
+        """
+
+        code: str | None = None
+        texts: list[str] = []
+        seen: set[int] = set()
+        current: BaseException | None = e
+        while current is not None and id(current) not in seen and len(seen) < 5:
+            seen.add(id(current))
+            body = getattr(current, 'body', None)
+            if not isinstance(body, dict):
+                body = LiteLLMRequester._response_json(getattr(current, 'response', None))
+            if isinstance(body, dict):
+                upstream = body.get('error', body)
+                if isinstance(upstream, dict):
+                    if code is None and isinstance(upstream.get('code'), str) and upstream['code']:
+                        code = upstream['code']
+                    if code is None and upstream.get('type') in LiteLLMRequester._QUOTA_ERROR_CODES:
+                        code = upstream['type']
+                    if isinstance(upstream.get('message'), str):
+                        texts.append(upstream['message'])
+            attr_code = getattr(current, 'code', None)
+            if code is None and isinstance(attr_code, str) and attr_code:
+                code = attr_code
+            message = getattr(current, 'message', None)
+            texts.append(message if isinstance(message, str) else str(current))
+            current = current.__cause__ or current.__context__
+        return code, ' '.join(texts)
+
+    @staticmethod
+    def _response_json(response) -> dict | None:
+        if not isinstance(response, httpx.Response):
+            return None
+        try:
+            payload = json.loads(response.content[:65536] or b'null')
+        except (httpx.ResponseNotRead, httpx.StreamError, ValueError, TypeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _is_quota_error(cls, status: int | None, code: str | None, text: str) -> bool:
+        if code and code.lower() in cls._QUOTA_ERROR_CODES:
+            return True
+        if status == 402:
+            return True
+        return bool(cls._QUOTA_MESSAGE_PATTERN.search(text or ''))
+
     def _handle_litellm_error(self, e: Exception) -> None:
         """Convert LiteLLM exceptions to RequesterError. Never returns, always raises."""
-        # Check more specific exceptions first (they inherit from base exceptions)
-        if isinstance(e, litellm.ContextWindowExceededError):
-            raise errors.RequesterError(f'上下文长度超限: {str(e)}')
-        if isinstance(e, litellm.BadRequestError):
-            raise errors.RequesterError(f'请求参数错误: {str(e)}')
-        if isinstance(e, litellm.AuthenticationError):
-            raise errors.RequesterError(f'API key 无效: {str(e)}')
-        if isinstance(e, litellm.NotFoundError):
-            raise errors.RequesterError(f'模型或路径无效: {str(e)}')
-        if isinstance(e, litellm.RateLimitError):
-            raise errors.RequesterError(f'请求过于频繁或余额不足: {str(e)}')
-        if isinstance(e, litellm.Timeout):
-            raise errors.RequesterError(f'请求超时: {str(e)}')
-        if isinstance(e, litellm.APIConnectionError):
-            raise errors.RequesterError(f'连接错误: {str(e)}')
-        if isinstance(e, litellm.APIError):
-            raise errors.RequesterError(f'API 错误: {str(e)}')
-        raise errors.RequesterError(f'未知错误: {str(e)}')
+        if isinstance(e, errors.RequesterError):
+            raise e
+        metadata = error_metadata(e)
+        status = metadata['status_code']
+        upstream_code, upstream_text = self._upstream_error_details(e)
+        if self._is_quota_error(status, upstream_code, upstream_text):
+            raise errors.RequesterError(
+                t('Insufficient balance or quota for this model. Please top up and try again.'),
+                code='quota_exceeded',
+                retryable=False,
+                **metadata,
+            ) from e
+        mappings = (
+            (litellm.ContextWindowExceededError, 'context_length', t('Context length exceeded'), False),
+            (litellm.AuthenticationError, 'authentication', t('Invalid API key'), False),
+            (getattr(litellm, 'PermissionDeniedError', ()), 'permission_denied', t('Permission denied'), False),
+            (litellm.NotFoundError, 'not_found', t('Invalid model or endpoint'), False),
+            (litellm.RateLimitError, 'rate_limit', t('Rate limit exceeded or insufficient balance'), True),
+            (litellm.Timeout, 'timeout', t('Request timed out'), True),
+            (litellm.APIConnectionError, 'connection', t('Connection failed'), True),
+            (litellm.BadRequestError, 'bad_request', t('Invalid request parameters'), False),
+            (getattr(litellm, 'InternalServerError', ()), 'internal_error', t('Internal server error'), True),
+            (getattr(litellm, 'BadGatewayError', ()), 'bad_gateway', t('Internal server error'), True),
+            (getattr(litellm, 'ServiceUnavailableError', ()), 'service_unavailable', t('Internal server error'), True),
+        )
+        for exception_type, code, message, retryable in mappings:
+            if isinstance(e, exception_type):
+                raise errors.RequesterError(message, code=code, retryable=retryable, **metadata) from e
+        code = 'upstream_error'
+        if status in (500, 502, 503):
+            message = t('Internal server error')
+            code = 'internal_error'
+        elif status == 504:
+            message = t('Request timed out')
+            code = 'timeout'
+        elif status == 401:
+            message = t('Invalid API key')
+            code = 'authentication'
+        elif status == 403:
+            message = t('Permission denied')
+            code = 'permission_denied'
+        elif status == 404:
+            message = t('Invalid model or endpoint')
+            code = 'not_found'
+        elif status == 429:
+            message = t('Rate limit exceeded or insufficient balance')
+            code = 'rate_limit'
+        elif status == 400:
+            message = t('Invalid request parameters')
+            code = 'bad_request'
+        elif status is not None:
+            message = f'{t("API error")} (HTTP {status})'
+        elif isinstance(e, (litellm.APIError, getattr(litellm, 'OpenAIError', ()))):
+            message = t('API error')
+        else:
+            message = t('Unknown error')
+        if code == 'upstream_error' and upstream_code and self._SAFE_ERROR_CODE.match(upstream_code):
+            # Machine-readable upstream codes are stable English identifiers and
+            # make otherwise generic failures diagnosable without leaking bodies.
+            message = f'{message} [{upstream_code}]'
+
+        raise errors.RequesterError(
+            message,
+            code=code,
+            retryable=status in (408, 409, 429, 500, 502, 503, 504),
+            **metadata,
+        ) from e
+
+    def _apply_transport(self, args, model, extra_args):
+        state = current_call.get()
+        policy = (
+            state.policy
+            if state
+            else RequestPolicy.resolve(self.requester_cfg, model.model_entity.extra_args, extra_args)
+        )
+        args.pop('request_policy', None)
+        if state:
+            # The Host owns retries; do not multiply attempts in nested SDKs.
+            args['num_retries'] = 0
+            args['max_retries'] = 0
+            args['timeout'] = httpx.Timeout(
+                connect=policy.connect_timeout,
+                read=policy.read_timeout,
+                write=policy.write_timeout,
+                pool=policy.pool_timeout,
+            )
+            state.mark('request_prepared_ms')
+        base = args.get('api_base', '')
+        is_openrouter = urlsplit(base).hostname == 'openrouter.ai' or (
+            not base and self._get_custom_llm_provider() == 'openrouter'
+        )
+        headers = dict(args.get('extra_headers') or {})
+        existing = {key.lower() for key in headers}
+        if policy.attribution and is_openrouter:
+            if 'http-referer' not in existing:
+                headers['HTTP-Referer'] = 'https://langbot.app'
+            if not {'x-title', 'x-openrouter-title'} & existing:
+                headers['X-OpenRouter-Title'] = 'LangBot'
+        conversation_header = policy.conversation_header or ('x-session-id' if is_openrouter else None)
+        if state and state.conversation_id and conversation_header and conversation_header not in existing:
+            headers[conversation_header] = state.conversation_id
+        if headers:
+            args['extra_headers'] = headers
+
+    async def _completion(self, args):
+        state = current_call.get()
+        if state:
+            state.mark('request_started_ms')
+            result = await state.wait(
+                lambda: acompletion(**args),
+                'first_event' if args.get('stream') else 'response',
+                state.policy.first_event_timeout if args.get('stream') else state.policy.total_timeout,
+            )
+            state.mark('response_open_ms')
+            return result
+        return await acompletion(**args)
+
+    async def _raw_chunks(self, response):
+        state = current_call.get()
+        iterator = response.__aiter__()
+        while True:
+            try:
+                if state:
+                    chunk = await state.wait(
+                        lambda: anext(iterator),
+                        'stream_idle' if state.raw_started else 'first_event',
+                        state.policy.stream_idle_timeout if state.raw_started else state.policy.first_event_timeout,
+                    )
+                    state.raw_started = True
+                    state.mark('first_event_ms')
+                else:
+                    chunk = await anext(iterator)
+            except StopAsyncIteration:
+                return
+            yield chunk
 
     async def _build_completion_args(
         self,
@@ -1094,14 +1512,44 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         stream: bool = False,
     ) -> dict:
         """Build common completion arguments for invoke_llm and invoke_llm_stream."""
+        preparation_start = time.perf_counter()
+        state = current_call.get()
+        cache_preparation = state is not None and state.policy.retries > 0
+        scoped_model = copy.copy(model)
+        try:
+            scoped_model.reasoning_config_override = reasoning.resolve_reasoning_config(model, extra_args)
+        except ValueError as exc:
+            raise errors.RequesterError(str(exc), code='invalid_policy') from exc
+        model = scoped_model
         reasoning_family = self._reasoning_family(model.model_entity.name, model)
         reasoning_level = self._reasoning_level(model)
-        req_messages = self._convert_messages(
-            messages,
-            reasoning_family=reasoning_family,
-            include_reasoning_context=reasoning_level != 'disabled',
+        pdf_input_declared = 'pdf_input' in (model.model_entity.abilities or [])
+        message_key = (
+            'messages',
+            id(messages),
+            reasoning_family,
+            reasoning_level != 'disabled',
+            model.model_entity.name,
+            pdf_input_declared,
         )
-        model_name = self._build_litellm_model_name(model.model_entity.name)
+        if cache_preparation and message_key in state.prepared:
+            req_messages = copy.deepcopy(state.prepared[message_key])
+            state.metrics['preparation_cache_hits'] = state.metrics.get('preparation_cache_hits', 0) + 1
+        else:
+            req_messages = self._convert_messages(
+                messages,
+                reasoning_family=reasoning_family,
+                include_reasoning_context=reasoning_level != 'disabled',
+                model_name=model.model_entity.name,
+                pdf_input_declared=pdf_input_declared,
+            )
+            if cache_preparation:
+                state.prepared[message_key] = copy.deepcopy(req_messages)
+        # OpenRouter shares requester metadata with OpenAI-compatible non-chat
+        # operations, but chat needs its own adapter to preserve cache markers.
+        chat_provider = 'openrouter' if self._uses_openrouter_protocol() else self._get_custom_llm_provider()
+        self._adapt_messages_for_provider(req_messages, chat_provider)
+        model_name = self._build_litellm_model_name(model.model_entity.name, chat_provider)
         api_key = model.provider.token_mgr.get_token()
 
         args = {
@@ -1114,10 +1562,14 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
             args['stream_options'] = {'include_usage': True}
         self._build_common_args(args)
 
+        if chat_provider == 'openrouter':
+            args['custom_llm_provider'] = chat_provider
+
         # Apply model-level extra_args first, then call-level extra_args
         if model.model_entity.extra_args:
             args.update(model.model_entity.extra_args)
         args.update(extra_args)
+        args.pop('reasoning_config', None)
 
         reasoning_args = self._build_reasoning_args(model)
         if reasoning_args:
@@ -1142,8 +1594,23 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
                     raise errors.RequesterError('allowed_openai_params must be an array')
                 args['allowed_openai_params'] = list(dict.fromkeys([*allowed_openai_params, 'reasoning_effort']))
 
+        budget = model.reasoning_config_override.get('budget_tokens')
+        if budget is not None and reasoning_family == 'anthropic' and not self._uses_openrouter_protocol():
+            output_limit = args.get('max_completion_tokens', args.get('max_tokens'))
+            if type(output_limit) is not int or output_limit <= budget:
+                raise errors.RequesterError(
+                    'Anthropic budget_tokens requires explicit max_tokens greater than the budget',
+                    code='invalid_policy',
+                )
+
         if funcs:
-            tools = await self.ap.tool_mgr.generate_tools_for_openai(funcs)
+            tool_key = ('tools', id(funcs))
+            if cache_preparation and tool_key in state.prepared:
+                tools = copy.deepcopy(state.prepared[tool_key])
+            else:
+                tools = copy.deepcopy(await self.ap.tool_mgr.generate_tools_for_openai(funcs))
+                if cache_preparation:
+                    state.prepared[tool_key] = copy.deepcopy(tools)
             if tools:
                 args['tools'] = tools
                 args.setdefault('tool_choice', 'auto')
@@ -1152,6 +1619,15 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
                 # and imports proxy-only dependencies such as FastAPI.
                 args['_skip_mcp_handler'] = True
 
+        cache_family = reasoning_family
+        if cache_family == 'openrouter':
+            cache_family = self._infer_reasoning_family_from_model_name(model.model_entity.name) or cache_family
+        apply_prompt_caching(args, state, provider=self._get_custom_llm_provider(), family=cache_family)
+        self._apply_transport(args, model, extra_args)
+        if state:
+            state.metrics['preparation_ms'] = round(
+                state.metrics.get('preparation_ms', 0) + (time.perf_counter() - preparation_start) * 1000, 3
+            )
         return args
 
     async def count_tokens(
@@ -1162,18 +1638,49 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         extra_args: dict[str, typing.Any] = {},
     ) -> int:
         """Count input tokens with LiteLLM's model-aware tokenizer."""
-        args = await self._build_completion_args(model, messages, funcs, extra_args, stream=False)
+        # Counting only needs the input representation, not generation policy,
+        # credentials, or transport parameters.
+        reasoning_config = reasoning.resolve_reasoning_config(model, extra_args)
+        req_messages = self._convert_messages(
+            messages,
+            reasoning_family=self._reasoning_family(model.model_entity.name, model),
+            include_reasoning_context=reasoning_config['level'] != 'disabled',
+            model_name=model.model_entity.name,
+            pdf_input_declared='pdf_input' in (model.model_entity.abilities or []),
+        )
+        chat_provider = 'openrouter' if self._uses_openrouter_protocol() else self._get_custom_llm_provider()
+        self._adapt_messages_for_provider(req_messages, chat_provider)
         count_args: dict[str, typing.Any] = {
-            'model': args['model'],
-            'messages': args['messages'],
+            'model': self._build_litellm_model_name(model.model_entity.name, chat_provider),
+            'messages': req_messages,
         }
-        if 'tools' in args:
-            count_args['tools'] = args['tools']
-        if 'tool_choice' in args:
-            count_args['tool_choice'] = args['tool_choice']
+        for args in (model.model_entity.extra_args, extra_args):
+            if args:
+                for key in ('model', 'messages', 'tools', 'tool_choice'):
+                    if key in args:
+                        count_args[key] = args[key]
+        if funcs:
+            tools = await self.ap.tool_mgr.generate_tools_for_openai(funcs)
+            if tools:
+                count_args['tools'] = tools
+                count_args.setdefault('tool_choice', 'auto')
 
+        # Concurrent counts are normal (one per conversation). Only a count
+        # that outlived its caller blocks new ones: its thread cannot be
+        # stopped, and repeated stalled downloads would fill the executor.
+        if self._stalled_count_task is not None and not self._stalled_count_task.done():
+            raise errors.RequesterError('Token counter is still busy loading tokenizer resources')
+        task = asyncio.create_task(asyncio.to_thread(litellm.token_counter, **count_args))
+        task.add_done_callback(lambda completed: None if completed.cancelled() else completed.exception())
         try:
-            tokens = litellm.token_counter(**count_args)
+            tokens = await asyncio.wait_for(asyncio.shield(task), timeout=self.TOKEN_COUNT_TIMEOUT)
+        except TimeoutError as exc:
+            self._stalled_count_task = task
+            raise errors.RequesterError('Token counting exceeded its time limit') from exc
+        except asyncio.CancelledError:
+            if not task.done():
+                self._stalled_count_task = task
+            raise
         except Exception as e:
             self._handle_litellm_error(e)
 
@@ -1193,38 +1700,43 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         """Invoke LLM and return message with usage info."""
         args = await self._build_completion_args(model, messages, funcs, extra_args, stream=False)
 
-        try:
-            response = await acompletion(**args)
+        async with self._client_args(args) as args:
+            try:
+                response = await self._completion(args)
 
-            message_data = response.choices[0].message.model_dump()
-            if 'role' not in message_data or message_data['role'] is None:
-                message_data['role'] = 'assistant'
+                message_data = response.choices[0].message.model_dump()
+                if 'role' not in message_data or message_data['role'] is None:
+                    message_data['role'] = 'assistant'
 
-            content = message_data.get('content', '')
-            reasoning_content = message_data.get('reasoning_content', None)
-            thinking_blocks = message_data.get('thinking_blocks')
-            if reasoning_content or thinking_blocks:
-                provider_fields = dict(message_data.get('provider_specific_fields') or {})
-                if reasoning_content:
-                    provider_fields['reasoning_content'] = reasoning_content
-                if thinking_blocks:
-                    provider_fields['thinking_blocks'] = thinking_blocks
-                message_data['provider_specific_fields'] = provider_fields
-            display_reasoning = reasoning_content or self._thinking_blocks_text(thinking_blocks) or None
-            message_data['content'] = self._process_thinking_content(content, display_reasoning, remove_think)
+                content = message_data.get('content', '')
+                reasoning_content = message_data.get('reasoning_content', None)
+                thinking_blocks = message_data.get('thinking_blocks')
+                if self._reasoning_family(model.model_entity.name, model) == 'minimax':
+                    message_data['provider_specific_fields'] = minimax.capture_content(message_data)
+                if reasoning_content or thinking_blocks:
+                    provider_fields = dict(message_data.get('provider_specific_fields') or {})
+                    if reasoning_content:
+                        provider_fields['reasoning_content'] = reasoning_content
+                    if thinking_blocks:
+                        provider_fields['thinking_blocks'] = thinking_blocks
+                    message_data['provider_specific_fields'] = provider_fields
+                display_reasoning = reasoning_content or self._thinking_blocks_text(thinking_blocks) or None
+                message_data['content'] = self._process_thinking_content(content, display_reasoning, remove_think)
 
-            if 'reasoning_content' in message_data:
-                del message_data['reasoning_content']
-            if 'thinking_blocks' in message_data:
-                del message_data['thinking_blocks']
+                if 'reasoning_content' in message_data:
+                    del message_data['reasoning_content']
+                if 'thinking_blocks' in message_data:
+                    del message_data['thinking_blocks']
 
-            message = provider_message.Message(**message_data)
-            usage_info = self._extract_usage(response)
+                message = provider_message.Message(**message_data)
+                usage_info = self._extract_usage(response)
+                if current_call.get():
+                    current_call.get().usage = usage_info
 
-            return message, usage_info
+                return message, usage_info
 
-        except Exception as e:
-            self._handle_litellm_error(e)
+            except Exception as e:
+                self._handle_litellm_error(e)
 
     async def invoke_llm_stream(
         self,
@@ -1245,132 +1757,166 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
         reasoning_started = False
         reasoning_closed = False
         thinking_blocks_state: list[dict[str, typing.Any]] = []
+        keep_minimax_content = self._reasoning_family(model.model_entity.name, model) == 'minimax'
+        raw_content_parts: list[str] = []
+        response = None
 
-        try:
-            response = await acompletion(**args)
-            async for chunk in response:
-                # Capture usage whenever a chunk carries it.
-                #
-                # Important: many OpenAI-compatible gateways (e.g. new-api) and
-                # providers send the final usage payload in a chunk that STILL
-                # contains a (empty-delta) choice, not an empty `choices` list.
-                # The previous implementation only captured usage when `choices`
-                # was empty, so streamed calls always recorded 0 tokens.
-                # We therefore capture usage independently of `choices`, and then
-                # fall through to also process any content this chunk may carry.
-                if getattr(chunk, 'usage', None):
-                    usage_info = self._normalize_usage(chunk.usage)
-                    if query is not None:
-                        if query.variables is None:
-                            query.variables = {}
-                        query.variables[requester.STREAM_USAGE_QUERY_VARIABLE] = usage_info
+        async with self._client_args(args) as args:
+            try:
+                response = await self._completion(args)
+                async for chunk in self._raw_chunks(response):
+                    # Capture usage whenever a chunk carries it.
+                    #
+                    # Important: many OpenAI-compatible gateways (e.g. new-api) and
+                    # providers send the final usage payload in a chunk that STILL
+                    # contains a (empty-delta) choice, not an empty `choices` list.
+                    # The previous implementation only captured usage when `choices`
+                    # was empty, so streamed calls always recorded 0 tokens.
+                    # We therefore capture usage independently of `choices`, and then
+                    # fall through to also process any content this chunk may carry.
+                    if getattr(chunk, 'usage', None):
+                        if current_call.get():
+                            current_call.get().usage = self._extract_usage(chunk)
+                        usage_info = self._normalize_usage(chunk.usage)
+                        if query is not None:
+                            if query.variables is None:
+                                query.variables = {}
+                            query.variables[requester.STREAM_USAGE_QUERY_VARIABLE] = usage_info
 
-                if not hasattr(chunk, 'choices') or not chunk.choices:
-                    continue
+                    if not hasattr(chunk, 'choices') or not chunk.choices:
+                        continue
 
-                choice = chunk.choices[0]
-                delta = choice.delta.model_dump() if hasattr(choice, 'delta') else {}
-                finish_reason = getattr(choice, 'finish_reason', None)
+                    choice = chunk.choices[0]
+                    delta = choice.delta.model_dump() if hasattr(choice, 'delta') else {}
+                    finish_reason = getattr(choice, 'finish_reason', None)
 
-                if 'role' in delta and delta['role']:
-                    role = delta['role']
+                    if 'role' in delta and delta['role']:
+                        role = delta['role']
 
-                delta_content = delta.get('content') or ''
-                reasoning_content = delta.get('reasoning_content') or ''
-                provider_fields = dict(delta.get('provider_specific_fields') or {})
-                if finish_reason:
-                    # Preserve an explicit provider stop even when the final delta is empty.
-                    provider_fields['finish_reason'] = finish_reason
-                raw_thinking_blocks = delta.get('thinking_blocks')
-                if raw_thinking_blocks:
-                    thinking_blocks_state = self._merge_thinking_blocks(thinking_blocks_state, raw_thinking_blocks)
-                    provider_fields['thinking_blocks'] = thinking_blocks_state
-                thinking_blocks_text = self._thinking_blocks_text(raw_thinking_blocks)
-                display_reasoning_content = reasoning_content or thinking_blocks_text
+                    state = current_call.get()
+                    if state and delta.get('content'):
+                        state.mark('first_content_ms')
+                    if state and (delta.get('reasoning_content') or delta.get('thinking_blocks')):
+                        state.mark('first_reasoning_ms')
+                    delta_content = delta.get('content') or ''
+                    reasoning_content = delta.get('reasoning_content') or ''
+                    provider_fields = dict(delta.get('provider_specific_fields') or {})
+                    if keep_minimax_content:
+                        if isinstance(delta.get('content'), str):
+                            raw_content_parts.append(delta['content'])
+                        if finish_reason and raw_content_parts:
+                            provider_fields[minimax.RAW_CONTENT_FIELD] = ''.join(raw_content_parts)
+                            raw_content_parts.clear()
+                    if finish_reason:
+                        # Preserve an explicit provider stop even when the final delta is empty.
+                        provider_fields['finish_reason'] = finish_reason
+                    raw_thinking_blocks = delta.get('thinking_blocks')
+                    if raw_thinking_blocks:
+                        thinking_blocks_state = self._merge_thinking_blocks(thinking_blocks_state, raw_thinking_blocks)
+                        provider_fields['thinking_blocks'] = thinking_blocks_state
+                    thinking_blocks_text = self._thinking_blocks_text(raw_thinking_blocks)
+                    display_reasoning_content = reasoning_content or thinking_blocks_text
 
-                # Handle reasoning_content based on remove_think flag
-                if reasoning_content:
-                    provider_fields['reasoning_content'] = reasoning_content
-                    if remove_think:
-                        delta_content = delta_content or None
-                    else:
-                        # Stream explicit markers so downstream adapters and
-                        # the debug page see the same format as non-streaming
-                        # responses.
-                        if not reasoning_started:
-                            delta_content = '<think>\n'
-                            reasoning_started = True
+                    # Handle reasoning_content based on remove_think flag
+                    if reasoning_content:
+                        provider_fields['reasoning_content'] = reasoning_content
+                        if remove_think:
+                            delta_content = delta_content or None
                         else:
-                            delta_content = ''
-                        delta_content += display_reasoning_content
-                        if delta.get('content'):
-                            delta_content += f'\n</think>\n{delta.get("content")}'
-                            reasoning_closed = True
+                            # Stream explicit markers so downstream adapters and
+                            # the debug page see the same format as non-streaming
+                            # responses.
+                            if not reasoning_started:
+                                delta_content = '<think>\n'
+                                reasoning_started = True
+                            else:
+                                delta_content = ''
+                            delta_content += display_reasoning_content
+                            if delta.get('content'):
+                                delta_content += f'\n</think>\n{delta.get("content")}'
+                                reasoning_closed = True
 
-                elif display_reasoning_content:
-                    if remove_think:
-                        delta_content = delta_content or None
-                    else:
-                        if not reasoning_started:
-                            delta_content = '<think>\n'
-                            reasoning_started = True
+                    elif display_reasoning_content:
+                        if remove_think:
+                            delta_content = delta_content or None
                         else:
-                            delta_content = ''
-                        delta_content += display_reasoning_content
-                        if delta.get('content'):
-                            delta_content += f'\n</think>\n{delta.get("content")}'
-                            reasoning_closed = True
+                            if not reasoning_started:
+                                delta_content = '<think>\n'
+                                reasoning_started = True
+                            else:
+                                delta_content = ''
+                            delta_content += display_reasoning_content
+                            if delta.get('content'):
+                                delta_content += f'\n</think>\n{delta.get("content")}'
+                                reasoning_closed = True
 
-                elif delta_content and not remove_think and reasoning_started and not reasoning_closed:
-                    delta_content = f'\n</think>\n{delta_content}'
-                    reasoning_closed = True
+                    elif delta_content and not remove_think and reasoning_started and not reasoning_closed:
+                        delta_content = f'\n</think>\n{delta_content}'
+                        reasoning_closed = True
 
-                if finish_reason and not remove_think and reasoning_started and not reasoning_closed:
-                    delta_content = f'{delta_content}\n</think>\n'
-                    reasoning_closed = True
+                    if finish_reason and not remove_think and reasoning_started and not reasoning_closed:
+                        delta_content = f'{delta_content}\n</think>\n'
+                        reasoning_closed = True
 
-                if think_state is not None and delta_content:
-                    delta_content = think_state.feed(delta_content)
+                    if think_state is not None and delta_content:
+                        delta_content = think_state.feed(delta_content)
 
-                tool_calls = self._normalize_stream_tool_calls(delta.get('tool_calls'), tool_call_state)
+                    tool_calls = self._normalize_stream_tool_calls(delta.get('tool_calls'), tool_call_state)
 
-                if not delta_content and not tool_calls and not provider_fields and not finish_reason:
+                    if not delta_content and not tool_calls and not provider_fields and not finish_reason:
+                        chunk_idx += 1
+                        continue
+
+                    chunk_data: dict[str, typing.Any] = {
+                        'role': role,
+                        'content': delta_content if delta_content else None,
+                        'tool_calls': tool_calls,
+                        'is_final': bool(finish_reason),
+                    }
+
+                    # Preserve provider_specific_fields from delta (e.g., Gemini thought_signatures)
+                    if provider_fields:
+                        chunk_data['provider_specific_fields'] = provider_fields
+
+                    chunk_data = {k: v for k, v in chunk_data.items() if v is not None}
+                    yield provider_message.MessageChunk(**chunk_data)
                     chunk_idx += 1
-                    continue
 
-                chunk_data: dict[str, typing.Any] = {
-                    'role': role,
-                    'content': delta_content if delta_content else None,
-                    'tool_calls': tool_calls,
-                    'is_final': bool(finish_reason),
-                }
-
-                # Preserve provider_specific_fields from delta (e.g., Gemini thought_signatures)
-                if provider_fields:
-                    chunk_data['provider_specific_fields'] = provider_fields
-
-                chunk_data = {k: v for k, v in chunk_data.items() if v is not None}
-                yield provider_message.MessageChunk(**chunk_data)
-                chunk_idx += 1
-
-            if reasoning_started and not reasoning_closed:
-                yield provider_message.MessageChunk(
-                    role=role,
-                    content='\n</think>\n',
-                    is_final=True,
-                )
-
-            if think_state is not None:
-                pending_content = think_state.flush()
-                if pending_content:
+                if raw_content_parts:
                     yield provider_message.MessageChunk(
                         role=role,
-                        content=pending_content,
+                        is_final=True,
+                        provider_specific_fields={minimax.RAW_CONTENT_FIELD: ''.join(raw_content_parts)},
+                    )
+
+                if reasoning_started and not reasoning_closed:
+                    yield provider_message.MessageChunk(
+                        role=role,
+                        content='\n</think>\n',
                         is_final=True,
                     )
 
-        except Exception as e:
-            self._handle_litellm_error(e)
+                if think_state is not None:
+                    pending_content = think_state.flush()
+                    if pending_content:
+                        yield provider_message.MessageChunk(
+                            role=role,
+                            content=pending_content,
+                            is_final=True,
+                        )
+
+            except Exception as e:
+                self._handle_litellm_error(e)
+
+            finally:
+                # Closing a downstream async generator must release the provider's
+                # HTTP stream immediately, including cancellation while at yield.
+                close = getattr(response, 'aclose', None)
+                if callable(close):
+                    try:
+                        await asyncio.wait_for(close(), timeout=5.0)
+                    except Exception as exc:
+                        self.ap.logger.debug(f'Failed to close LLM stream: {type(exc).__name__}')
 
     async def invoke_embedding(
         self,
@@ -1543,9 +2089,9 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
                 body = await httpclient.response_text(e.response)
             except Exception:
                 pass
-            raise errors.RequesterError(f'rerank 请求失败 (HTTP {e.response.status_code}): {body or str(e)}')
+            raise errors.RequesterError(t('API error') + f' (HTTP {e.response.status_code}): {body or str(e)}')
         except httpx.HTTPError as e:
-            raise errors.RequesterError(f'rerank 连接错误: {str(e)}')
+            raise errors.RequesterError(t('Connection failed') + f': {e}')
 
         raw_results = data.get('results', []) if isinstance(data, dict) else []
         results = []
@@ -1558,6 +2104,123 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
             )
 
         return results
+
+    async def invoke_asr(
+        self,
+        model: requester.RuntimeASRModel,
+        audio: bytes,
+        mime: str,
+        extra_args: dict[str, typing.Any] = {},
+    ) -> str:
+        """Invoke speech recognition (ASR) and return transcript."""
+        model_name = self._build_litellm_model_name(model.model_entity.name)
+        api_key = model.provider.token_mgr.get_token()
+
+        ext = 'wav'
+        if 'mp3' in mime or 'mpeg' in mime:
+            ext = 'mp3'
+        elif 'ogg' in mime:
+            ext = 'ogg'
+        elif 'flac' in mime:
+            ext = 'flac'
+        elif 'm4a' in mime or 'mp4' in mime:
+            ext = 'm4a'
+        elif 'wav' in mime:
+            ext = 'wav'
+        filename = f'audio.{ext}'
+
+        args: dict[str, typing.Any] = {
+            'model': model_name,
+            'file': (filename, audio, mime),
+            'api_key': api_key,
+            'response_format': 'json',
+        }
+        self._build_common_args(args, include_retry_params=False)
+
+        provider = self._get_custom_llm_provider()
+        if provider:
+            args['custom_llm_provider'] = provider
+
+        if model.model_entity.extra_args:
+            args.update(model.model_entity.extra_args)
+        args.update(extra_args)
+
+        try:
+            response = await atranscription(**args)
+            if hasattr(response, 'text'):
+                return response.text or ''
+            if isinstance(response, dict):
+                return response.get('text', '')
+            return str(response)
+        except errors.RequesterError:
+            raise
+        except Exception as e:
+            self._handle_litellm_error(e)
+
+    async def invoke_tts(
+        self,
+        model: requester.RuntimeTTSModel,
+        text: str,
+        extra_args: dict[str, typing.Any] = {},
+    ) -> tuple[bytes, str]:
+        """Invoke text-to-speech and return (audio_bytes, mime_type)."""
+        model_name = self._build_litellm_model_name(model.model_entity.name)
+        api_key = model.provider.token_mgr.get_token()
+
+        combined_extra = {**(model.model_entity.extra_args or {}), **extra_args}
+        voice = combined_extra.pop('voice', None)
+        response_format = combined_extra.pop('response_format', None) or combined_extra.pop('format', None) or 'mp3'
+
+        args: dict[str, typing.Any] = {
+            'model': model_name,
+            'input': text,
+            'response_format': response_format,
+            'api_key': api_key,
+        }
+        if voice:
+            args['voice'] = voice
+        self._build_common_args(args, include_retry_params=False)
+
+        provider = self._get_custom_llm_provider()
+        if provider:
+            args['custom_llm_provider'] = provider
+
+        args.update(combined_extra)
+
+        try:
+            response = await aspeech(**args)
+            content = b''
+            if hasattr(response, 'content'):
+                content = response.content
+            elif hasattr(response, 'read'):
+                res = response.read()
+                if asyncio.iscoroutine(res):
+                    content = await res
+                else:
+                    content = res
+            elif isinstance(response, bytes):
+                content = response
+            elif hasattr(response, 'response') and hasattr(response.response, 'content'):
+                content = response.response.content
+
+            # Determine mime type
+            mime = 'audio/mpeg'
+            if response_format == 'wav':
+                mime = 'audio/wav'
+            elif response_format in ('ogg', 'opus'):
+                mime = 'audio/ogg'
+            elif response_format == 'flac':
+                mime = 'audio/flac'
+            elif response_format == 'aac':
+                mime = 'audio/aac'
+            elif hasattr(response, 'response') and hasattr(response.response, 'headers'):
+                mime = response.response.headers.get('content-type', mime)
+
+            return content, mime
+        except errors.RequesterError:
+            raise
+        except Exception as e:
+            self._handle_litellm_error(e)
 
     async def scan_models(self, api_key: str | None = None) -> dict[str, typing.Any]:
         """Scan models supported by the provider."""
@@ -1588,8 +2251,11 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
                     # rather than /models. Providers whose configured base_url
                     # already ends in /v1 keep their original (working) URL.
                     response = await client.get(f'{base_url}/v1/models', headers=headers)
-                response.raise_for_status()
-                payload = await httpclient.parse_json_response(response)
+                if self._requester_name() == 'minimax-chat-completions' and response.status_code == 404:
+                    payload = {}
+                else:
+                    response.raise_for_status()
+                    payload = await httpclient.parse_json_response(response)
 
             models = []
             for item in payload.get('data', []):
@@ -1600,6 +2266,10 @@ class LiteLLMRequester(requester.ProviderAPIRequester):
                 models.append(self._enrich_scanned_model(model_id, item))
 
             models.sort(key=lambda x: (x['type'] != 'llm', x['name'].lower()))
+
+            direct_minimax = self._requester_name() == 'minimax-chat-completions'
+            if direct_minimax or self._uses_openrouter_protocol():
+                models = minimax.arrange_catalog(models, direct=direct_minimax)
 
             return {'models': models}
 

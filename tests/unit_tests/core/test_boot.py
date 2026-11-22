@@ -36,6 +36,10 @@ async def test_make_app_shuts_down_partially_built_application(monkeypatch):
 @pytest.mark.asyncio
 async def test_main_signal_handler_handles_sigint_before_app_created(monkeypatch):
     captured_handler = {}
+    print_exc = Mock()
+    monkeypatch.setattr(boot.traceback, 'print_exc', print_exc)
+    # Signal handling must not touch a potentially blocked stdout stream.
+    monkeypatch.setattr(boot, 'print', Mock(side_effect=AssertionError('stdout must not be used')), raising=False)
 
     def fake_signal(sig, handler):
         captured_handler[sig] = handler
@@ -47,6 +51,8 @@ async def test_main_signal_handler_handles_sigint_before_app_created(monkeypatch
     monkeypatch.setattr(boot, 'make_app', fake_make_app)
 
     await boot.main(SimpleNamespace())
+
+    print_exc.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -96,7 +102,8 @@ async def test_main_reports_app_run_failure_and_still_shuts_down(monkeypatch):
     monkeypatch.setattr(boot, 'make_app', fake_make_app)
     monkeypatch.setattr(boot.traceback, 'print_exc', print_exc)
 
-    await boot.main(SimpleNamespace())
+    with pytest.raises(RuntimeError, match='run failed'):
+        await boot.main(SimpleNamespace())
 
     print_exc.assert_called_once()
     assert app_inst.shutdown_called is True

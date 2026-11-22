@@ -39,6 +39,11 @@ from langbot.pkg.platform.adapters.telegram.interaction import (
     parse_interaction_callback,
     send_interaction,
 )
+from langbot_plugin.api.entities.builtin.runner.interaction import (
+    InteractionHandle,
+    InteractionRequest,
+    InteractionSubmission,
+)
 
 
 class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatformAdapter):
@@ -149,7 +154,7 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
         application.add_handler(
             MessageReactionHandler(
                 telegram_callback,
-                MessageReactionHandler.MESSAGE_REACTION,
+                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION,
             )
         )
 
@@ -179,6 +184,7 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
             'bot.muted',
             'bot.unmuted',
             'platform.specific',
+            'interaction.callback',
         ]
 
     def get_supported_apis(self) -> list[str]:
@@ -198,26 +204,93 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
             'kick_member',
             'leave_group',
             'call_platform_api',
-            'interaction.request',
+            'send_interaction',
+            'update_interaction',
+            'get_interaction_capabilities',
         ]
 
     def get_interaction_capabilities(self) -> dict[str, typing.Any]:
         return interaction_delivery_capabilities()
 
+    async def send_interaction(
+        self,
+        target_type: str,
+        target_id: str,
+        request: InteractionRequest,
+        callback_token: str,
+        reply_to: str | None = None,
+    ) -> InteractionHandle:
+        result = await send_interaction(
+            self.bot,
+            {
+                'request': request.model_dump(mode='json'),
+                'callback_token': callback_token,
+                'reply_target': {'target_type': target_type, 'target_id': target_id, 'message_id': reply_to},
+            },
+        )
+        handle = InteractionHandle.model_validate(result)
+        handle.context['request'] = request.model_dump(mode='json')
+        handle.context['target_id'] = target_id
+        return handle
+
+    async def update_interaction(
+        self,
+        handle: InteractionHandle,
+        state: str,
+        submission: InteractionSubmission | None = None,
+    ) -> InteractionHandle:
+        del submission
+        target_id = str(handle.context['target_id']).split('#', 1)[0]
+        request = handle.context['request']
+        label = {'submitted': 'Submitted', 'expired': 'Expired', 'cancelled': 'Cancelled'}[state]
+        await self.bot.edit_message_text(
+            chat_id=int(target_id) if target_id.lstrip('-').isdigit() else target_id,
+            message_id=handle.message_id,
+            text=f'{request["title"]}\n\n{label}',
+            reply_markup=None,
+        )
+        return handle
+
     # ---- Message Send / Reply (preserving original logic) ----
 
     async def send_message(self, target_type: str, target_id: str, message: platform_message.MessageChain):
+        return await self._send_to_target(target_id, message)
+
+    async def reply_to_event(
+        self, *, context: dict, target_type: str, target_id: str, message: platform_message.MessageChain
+    ) -> platform_events.MessageResult:
+        if 'quote_origin' not in context:
+            return await self.send_message(target_type, target_id, message)
+        target = (context.get('delivery') or {}).get('reply_target') or {}
+        quote_origin = context.get('quote_origin', False)
+        if not isinstance(quote_origin, bool):
+            raise ValueError('quote_origin must be a boolean')
+        message_id = target.get('message_id') if quote_origin else None
+        if quote_origin and not message_id:
+            raise ValueError('The original Telegram message ID is required to quote a recovered reply')
+        return await self._send_to_target(
+            str(target.get('target_id') or target_id),
+            message,
+            reply_to_message_id=int(message_id) if message_id is not None else None,
+        )
+
+    async def _send_to_target(
+        self, target_id: str, message: platform_message.MessageChain, *, reply_to_message_id: int | None = None
+    ) -> platform_events.MessageResult:
         components = await TelegramMessageConverter.yiri2target(message, self.bot)
 
         chat_id_str, _, thread_id_str = str(target_id).partition('#')
         chat_id: int | str = int(chat_id_str) if chat_id_str.lstrip('-').isdigit() else chat_id_str
         message_thread_id = int(thread_id_str) if thread_id_str and thread_id_str.isdigit() else None
 
+        sent_messages = []
         for component in components:
             component_type = component.get('type')
             args = {'chat_id': chat_id}
             if message_thread_id is not None:
                 args['message_thread_id'] = message_thread_id
+            if reply_to_message_id is not None:
+                args['reply_to_message_id'] = reply_to_message_id
 
             if component_type == 'text':
                 text = component.get('text', '')
@@ -225,20 +298,32 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
                     text = telegramify_markdown.markdownify(content=text)
                     args['parse_mode'] = 'MarkdownV2'
                 args['text'] = text
-                await self.bot.send_message(**args)
+                sent_messages.append(await self.bot.send_message(**args))
             elif component_type == 'photo':
                 photo = component.get('photo')
                 if photo is None:
                     continue
-                args['photo'] = telegram.InputFile(photo)
-                await self.bot.send_photo(**args)
+                sent_messages.append(await self._send_photo_or_document(photo, args))
             elif component_type == 'document':
                 doc = component.get('document')
                 if doc is None:
                     continue
                 filename = component.get('filename', 'file')
                 args['document'] = telegram.InputFile(doc, filename=filename)
-                await self.bot.send_document(**args)
+                sent_messages.append(await self.bot.send_document(**args))
+            elif component_type == 'voice':
+                voice = component.get('voice')
+                if voice is None:
+                    continue
+                args['voice'] = telegram.InputFile(voice, filename='voice.ogg')
+                if component.get('duration'):
+                    args['duration'] = component['duration']
+                sent_messages.append(await self.bot.send_voice(**args))
+
+        return platform_events.MessageResult(
+            message_id=sent_messages[-1].message_id if sent_messages else None,
+            raw={'message_ids': [sent.message_id for sent in sent_messages]},
+        )
 
     async def reply_message(
         self,
@@ -249,6 +334,7 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
         assert isinstance(message_source.source_platform_object, Update)
         components = await TelegramMessageConverter.yiri2target(message, self.bot)
 
+        sent_messages = []
         for component in components:
             component_type = component.get('type')
             args = {
@@ -271,20 +357,42 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
                 if self.config['markdown_card'] is True:
                     args['parse_mode'] = 'MarkdownV2'
                 args['text'] = content
-                await self.bot.send_message(**args)
+                sent_messages.append(await self.bot.send_message(**args))
             elif component_type == 'photo':
                 photo = component.get('photo')
                 if photo is None:
                     continue
-                args['photo'] = telegram.InputFile(photo)
-                await self.bot.send_photo(**args)
+                sent_messages.append(await self._send_photo_or_document(photo, args))
             elif component_type == 'document':
                 doc = component.get('document')
                 if doc is None:
                     continue
                 filename = component.get('filename', 'file')
                 args['document'] = telegram.InputFile(doc, filename=filename)
-                await self.bot.send_document(**args)
+                sent_messages.append(await self.bot.send_document(**args))
+            elif component_type == 'voice':
+                voice = component.get('voice')
+                if voice is None:
+                    continue
+                args['voice'] = telegram.InputFile(voice, filename='voice.ogg')
+                if component.get('duration'):
+                    args['duration'] = component['duration']
+                sent_messages.append(await self.bot.send_voice(**args))
+
+        return platform_events.MessageResult(
+            message_id=sent_messages[-1].message_id if sent_messages else None,
+            raw={'message_ids': [sent.message_id for sent in sent_messages]},
+        )
+
+    async def _send_photo_or_document(self, photo: bytes, args: dict):
+        try:
+            return await self.bot.send_photo(photo=telegram.InputFile(photo), **args)
+        except telegram.error.BadRequest as exc:
+            if 'image_process_failed' not in str(exc).lower() and 'photo_invalid_dimensions' not in str(exc).lower():
+                raise
+            # Preserve rejected image bytes without retrying already-sent parts.
+            await self.logger.warning('Telegram rejected photo encoding; sending the image as a document')
+            return await self.bot.send_document(document=telegram.InputFile(photo, filename='image'), **args)
 
     # ---- Streaming Output (preserving original logic) ----
 
@@ -302,6 +410,14 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
         return args
 
     _MAX_STREAM_STATES: typing.ClassVar[int] = 1000
+
+    async def _delete_group_stream_message(self, chat_mode: str, chat_id: int, stream_id: int | None):
+        if chat_mode == 'private' or stream_id is None:
+            return
+        try:
+            await self.bot.delete_message(chat_id=chat_id, message_id=stream_id)
+        except telegram.error.TelegramError:
+            pass
 
     def _cap_stream_states(self) -> None:
         while len(self.msg_stream_id) > self._MAX_STREAM_STATES:
@@ -350,6 +466,19 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
         if message_id not in self.msg_stream_id:
             return
 
+        # Media cannot be edited into a text stream. Deliver terminal attachments
+        # through the regular reply path, including attachment-only completions.
+        if is_final and not bot_message.tool_calls:
+            attachments = platform_message.MessageChain(
+                [
+                    part
+                    for part in message
+                    if isinstance(part, (platform_message.Image, platform_message.File, platform_message.Voice))
+                ]
+            )
+            if attachments:
+                await self.reply_message(message_source, attachments, quote_origin=quote_origin)
+
         stream_state = self.msg_stream_id[message_id]
         chat_mode, stream_id = stream_state[:2]
         has_visible_content = len(stream_state) > 2 and stream_state[2]
@@ -357,6 +486,8 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
 
         if not components or components[0]['type'] != 'text':
             if is_final and bot_message.tool_calls is None:
+                if not has_visible_content:
+                    await self._delete_group_stream_message(chat_mode, chat_id, stream_id)
                 self.msg_stream_id.pop(message_id)
             return
 
@@ -386,6 +517,8 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
             if is_final and bot_message.tool_calls is None:
                 # Finalise: send the real message, discard the draft
                 args = self._build_message_args(chat_id, content, message_thread_id)
+                if quote_origin and effective_message:
+                    args['reply_to_message_id'] = effective_message.id
                 try:
                     await self.bot.send_message(**args)
                 except telegram.error.BadRequest as exc:
@@ -426,6 +559,10 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
                     if 'Message_too_long' in str(exc):
                         args['text'] = self._process_markdown(content[:4000] + '\n\n… (truncated)')
                         await self.bot.edit_message_text(**args)
+                    elif 'Message is not modified' in str(exc):
+                        # The message already shows this exact content (e.g. the
+                        # final chunk repeats the last edit); nothing to deliver.
+                        pass
                     else:
                         raise
                 self.msg_stream_id[message_id] = (chat_mode, stream_id, True)
@@ -498,8 +635,6 @@ class TelegramAdapter(TelegramAPIMixin, abstract_platform_adapter.AbstractPlatfo
         params: dict = {},
     ) -> dict:
         """Call a Telegram-specific platform API."""
-        if action == 'interaction.request':
-            return await send_interaction(self.bot, params)
         handler = PLATFORM_API_MAP.get(action)
         if handler is None:
             from langbot_plugin.api.entities.builtin.platform.errors import NotSupportedError

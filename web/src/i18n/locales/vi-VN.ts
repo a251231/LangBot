@@ -1,6 +1,269 @@
 import pipelineMigration from './pipeline-migration/vi-VN';
+import pluginPermissions from './plugin-permissions/vi-VN';
 const viVN = {
+  pluginPermissions,
+  planRevision: {
+    subscribedOn: 'Ngày đăng ký: {{date}}',
+    latestQuota: 'Hạn mức mới nhất của gói này',
+    showLatest: 'Xem hạn mức mới nhất của gói này',
+    showCurrent: 'Xem gói đăng ký hiện tại',
+    latestTab: 'Mới nhất',
+    currentTab: 'Hiện tại',
+    cancelToSubscribe:
+      'Hủy gói hiện tại để đăng ký hạn mức mới nhất vào kỳ tiếp theo',
+
+    current: 'Current subscription: {{plan}} · revision {{revision}}',
+    owned: 'Purchased revision {{revision}}',
+    latest: 'Latest revision {{revision}}',
+    changed:
+      'Your purchased benefits and the latest version differ. Highlighted rows show the changes.',
+    same: 'Benefits match latest revision {{revision}}. Your purchased revision remains unchanged.',
+    unavailable:
+      'The latest plan is unavailable. Your purchased benefits remain in effect.',
+    benefit: 'Benefit',
+    change: 'Changed',
+    enabled: 'Enabled',
+    disabled: 'Disabled',
+    monthlyCredits: 'Monthly bonus credits',
+    retention: 'Chat history retention (days)',
+    unknown:
+      'Current subscription details are unavailable. Refresh or manage your subscription in Space; latest catalog benefits are not your purchased benefits.',
+    handoff:
+      'Manage your subscription in Space. Cancel automatic renewal before purchasing a new version. Prepaid subscriptions end automatically unless renewed before expiry.',
+    cancelFirst:
+      'Cancel automatic renewal in subscription management first. Cancellation preserves paid benefits until the end of the period, without a refund. After confirmation, you can purchase the latest version, effective when payment succeeds.',
+    canceled:
+      'Renewal is canceled. Paid benefits remain until the end of the period, without a refund. A new purchase applies its benefits when payment succeeds.',
+    prepaid:
+      'This prepaid subscription ends automatically. You can renew your current plan before expiry; after expiry, subscriptions use the latest quotas for each plan.',
+    renew: 'Gia hạn gói đăng ký hiện tại',
+    buying: 'Purchasing revision {{revision}}.',
+    fields: {
+      bots_max: 'Bots',
+      members_max: 'Members',
+      pipelines_max: 'Processors',
+      plugins_max: 'Extensions',
+      knowledge_bases_max: 'Knowledge bases',
+      managed_sandbox_sessions_max: 'Sandbox sessions',
+    },
+  },
+  cloudPlans: {
+    subscriptionUnavailable: 'Chưa thể đăng ký',
+    subscriptionUnavailableHint:
+      'Gói này hiện không nhận đăng ký mới. Vui lòng chọn gói khác. Đăng ký hiện có và gia hạn tự động không bị ảnh hưởng.',
+    platformNames: {
+      qqofficial: 'QQ Official API',
+      dingtalk: 'DingTalk',
+      discord: 'Discord',
+      telegram: 'Telegram',
+      lark: 'Lark',
+      slack: 'Slack',
+      kook: 'KOOK',
+      line: 'LINE',
+      wecom: 'WeCom',
+      wecombot: 'WeComBot',
+      wecomcs: 'WeComCustomerService',
+      officialaccount: 'Official Account',
+      wechatpad: 'WeChatPad',
+      openclaw_weixin: 'OpenClaw WeChat',
+      aiocqhttp: 'OneBot v11',
+      satori: 'Satori',
+    },
+    manageSubscription: 'Quản lý đăng ký',
+    downgradeUnavailable: 'Không thể hạ cấp xuống gói miễn phí',
+    features: {
+      multiUserWorkspace: 'Không gian làm việc nhiều người dùng',
+      remoteE2BSandbox: 'Cấu hình sandbox E2B từ xa',
+      communitySupport: 'Hỗ trợ từ cộng đồng',
+      everythingInFree: 'Tất cả tính năng của gói miễn phí',
+      alwaysOnSandbox: 'Một sandbox toàn cục luôn hoạt động',
+      higherWorkspaceLimits: 'Hạn mức không gian làm việc cao hơn',
+    },
+    title: 'So sánh gói',
+    description: 'Chọn gói cho {{workspace}}',
+    billing: 'Chu kỳ thanh toán',
+    monthly: 'Hàng tháng',
+    annual: 'Hàng năm',
+    currency: 'Tiền tệ',
+    loading: 'Đang tải gói…',
+    error: 'Không thể tải các gói',
+    retry: 'Thử lại',
+    empty: 'Không có gói khả dụng',
+    current: 'Gói hiện tại',
+    recommended: 'Đề xuất',
+    free: 'Miễn phí',
+    annualNote: 'Tương đương {{price}} / tháng',
+    ownerOnly: 'Chỉ chủ sở hữu hoặc quản trị viên',
+    choose: 'Tiếp tục thanh toán',
+    handoff:
+      'Đăng nhập và thanh toán tại Space. Lựa chọn của bạn sẽ được giữ lại.',
+    quotas: 'Hạn mức không gian',
+    unlimited: 'Không giới hạn',
+    retention: 'Lịch sử tin nhắn · {{count}} ngày',
+    retentionLabel: 'Thời gian lưu tin nhắn',
+    retentionHelp: 'Tin nhắn được tự động xóa sau thời gian này.',
+    credits: '{{count}} tín dụng mô hình mỗi tháng',
+    creditsLabel: 'Tín dụng hàng tháng',
+    creditsHelp: 'Tín dụng được cấp mỗi tháng đăng ký, kể cả gói năm.',
+    platforms: 'Hỗ trợ nền tảng phổ biến',
+    excludedPlatforms: 'Không hỗ trợ: {{platforms}}',
+    allPlatforms: 'Tất cả nền tảng hiện có',
+    limits: {
+      bots: 'Bot',
+      pipelines: 'Bộ xử lý',
+      knowledge_bases: 'Kho kiến thức',
+      plugins: 'Tiện ích mở rộng',
+      members: 'Thành viên',
+      managed_sandbox_sessions: 'Phiên sandbox được quản lý',
+    },
+  },
+  workspaceSandbox: {
+    quotaCheck:
+      'Hạn ngạch đĩa được kiểm tra trước và sau lệnh, không liên tục.',
+    testRun: 'Chạy thử',
+    testRunCost: 'Tạo sandbox tạm, dùng một suất và có thể phát sinh phí.',
+    checkHint: 'Kiểm tra và lưu không tạo sandbox. Chạy thử là tùy chọn.',
+    queryUnsupported:
+      'Dịch vụ không hỗ trợ truy vấn mẫu; mẫu chưa được xác minh. Có thể lưu hoặc chạy thử.',
+    limitsTitle: 'Giới hạn không gian',
+    limitsHelp: 'Để trống để kế thừa mặc định. Chỉ áp dụng cho tác vụ mới.',
+    inherit: 'Kế thừa mặc định',
+    limitMax: 'Tối đa: {{value}}',
+    limitUnsupported: 'Môi trường hoặc chính sách không hỗ trợ',
+    e2bLimitUnsupported:
+      'Do mẫu hoặc dịch vụ E2B quản lý; không hỗ trợ cấu hình này',
+    invalidLimits: 'Nhập giá trị trong phạm vi hiển thị',
+
+    confirm: 'Xác nhận và lưu',
+    cancel: 'Hủy',
+    current: 'Đang dùng: {{backend}}',
+    unsaved: 'Chưa lưu',
+    configureE2b: 'Cấu hình E2B',
+    apiUrl: 'URL API',
+    sandboxUrl: 'URL sandbox',
+    template: 'Mẫu',
+    keyConfigured: 'Đã cấu hình; để trống để giữ nguyên',
+    keyRequired: 'Nhập API Key',
+    keyHelp:
+      'Khóa đã lưu không được trả về. Nhập khóa mới khi đổi URL dịch vụ.',
+    noManagedProcesses: 'Môi trường này không hỗ trợ máy chủ MCP stdio.',
+    label: 'Môi trường thực thi',
+    description:
+      'Tác vụ mới dùng môi trường này. Tác vụ đang chạy tiếp tục dùng môi trường cũ.',
+    saved: 'Đã lưu, áp dụng cho tác vụ mới',
+    saveFailed: 'Không thể lưu môi trường',
+    loadFailed: 'Không thể kiểm tra môi trường',
+    refresh: 'Kiểm tra lại',
+    noEnvironment: 'Không có môi trường khả dụng',
+    unavailable: 'Môi trường đã chọn không khả dụng cho tác vụ mới.',
+    templateVerified:
+      'Template verified: temporary sandbox created, executed and deleted',
+    limitLabels: {
+      timeout_sec: 'Thời gian lệnh (giây)',
+      idle_ttl_sec: 'Thu hồi khi rảnh (giây)',
+      max_sessions: 'Số sandbox tối đa',
+      cpus: 'Lõi CPU',
+      memory_mb: 'Bộ nhớ (MiB)',
+      pids_limit: 'Giới hạn tiến trình',
+      workspace_quota_mb: 'Hạn ngạch đĩa (MiB)',
+    },
+    reasons: {
+      resource_not_found: 'Requested service resource not found',
+      rate_limited: 'Too many requests; retry later',
+      template_not_found: 'Template not found or not visible to this account',
+      template_query_failed: 'Template query failed; check service status',
+      template_not_ready: 'Template build is not ready',
+      network_error: 'Cannot reach service; check URLs and network',
+      capacity_limited:
+        'Service capacity exhausted or rate limited; retry later',
+      permission_denied: 'Permission denied for the supplied credentials',
+      template_creation_failed:
+        'Sandbox creation failed; check template status and service capacity',
+      template_execution_failed: 'Sandbox created but execution check failed',
+      template_cleanup_failed:
+        'Temporary sandbox cleanup failed; check E2B service',
+
+      environment_unavailable: 'Không khả dụng',
+      policy_restricted: 'Bị nền tảng hạn chế',
+      probe_failed: 'Kiểm tra thất bại',
+      docker_missing: 'Chưa cài Docker CLI',
+      docker_unreachable: 'Docker chưa chạy hoặc bị từ chối truy cập',
+      nsjail_missing: 'Chưa cài nsjail',
+      cgroup_unavailable: 'Giới hạn cgroup nsjail chưa sẵn sàng',
+      isolation_unavailable: 'Kiểm tra cách ly nsjail thất bại',
+      sdk_missing: 'Chưa cài E2B SDK',
+      missing_credentials: 'Thiếu API Key E2B',
+      connection_failed: 'Không thể kết nối E2B; kiểm tra URL và mạng',
+      authentication_failed: 'Xác thực E2B thất bại; kiểm tra khóa',
+      probe_timeout: 'Kiểm tra hết thời gian',
+      invalid_configuration: 'URL hoặc thông tin xác thực E2B chưa đầy đủ',
+      not_checked: 'Cấu hình đã đổi; hãy kiểm tra lại',
+    },
+  },
+  workspaceLanguage: {
+    label: 'Ngôn ngữ không gian làm việc',
+    description:
+      'Dùng cho thông báo máy chủ và phản hồi mặc định của bot. Không thay đổi ngôn ngữ giao diện cá nhân.',
+    saved: 'Đã lưu ngôn ngữ',
+    saveFailed: 'Không thể lưu ngôn ngữ',
+  },
+  inflight: {
+    autoCollapse: 'Tự thu gọn',
+    empty: 'Không có sự kiện đang xử lý',
+    move: 'Kéo lên xuống hoặc dùng phím mũi tên',
+    botLogs: 'Nhật ký bot',
+    processorLogs: 'Nhật ký bộ xử lý',
+
+    title: 'Đang thực hiện',
+    expand: 'Mở rộng',
+    collapse: 'Thu gọn',
+    reconnecting: 'Đang kết nối lại; hiển thị trạng thái nhận được gần nhất.',
+    details: 'Xem chi tiết',
+    debug: 'Sự kiện gỡ lỗi',
+    limited:
+      'Chỉ hiển thị một phần. Xem bảng điều khiển để biết tất cả lượt chạy.',
+    queued: 'Đang chờ',
+    running: 'Đang xử lý',
+    waiting: 'Chờ nhập liệu',
+    tool: 'Đang gọi công cụ',
+    thinking: 'Đang suy nghĩ',
+    replying: 'Chuẩn bị trả lời',
+    generating: 'Đang tạo câu trả lời',
+    completed: 'Hoàn tất',
+    failed: 'Thất bại',
+    cancelled: 'Đã hủy',
+    ignored: 'Đã bỏ qua',
+  },
+  githubStarPrompt: {
+    title: 'LangBot đã xử lý {{total}} sự kiện cho bạn',
+    description:
+      'Nếu LangBot hữu ích với bạn, hãy tặng một Star trên GitHub để nhiều người biết đến hơn.',
+    later: 'Để sau',
+    star: 'Star',
+    close: 'Đóng',
+  },
   assistant: {
+    movePosition: 'Di chuyển trợ lý theo chiều ngang',
+    resizeHeight: 'Điều chỉnh chiều cao trợ lý',
+    sessions: 'Cuộc trò chuyện',
+    currentChat: 'Cuộc trò chuyện hiện tại',
+    stop: 'Dừng tác vụ',
+    stopped:
+      'Đã dừng. Công cụ có thể đã thực hiện thay đổi. Kiểm tra tài nguyên trước khi thử lại.',
+    setupRequired:
+      'Đăng nhập bằng tài khoản LangBot hoặc cấu hình mô hình để bắt đầu sử dụng trợ lý không gian làm việc.',
+    loginAccount: 'Đăng nhập LangBot Account',
+    configureModels: 'Cấu hình mô hình',
+    providerCheckFailed: 'Không thể kiểm tra nhà cung cấp. Vui lòng thử lại.',
+    retrySetup: 'Thử lại',
+    preparing: 'Đang chuẩn bị trợ lý…',
+    thinking: 'Mô hình đang trả lời · Vòng {{round}}',
+    executing: 'Đang chạy công cụ…',
+    toolRunning: 'Đang chạy',
+    recommendationFailed:
+      'Không tải được mô hình đề xuất. Vui lòng chọn mô hình.',
+    expand: 'Mở rộng trợ lý không gian làm việc',
+    collapse: 'Thu gọn trợ lý không gian làm việc',
     modelHint: 'Đổi mô hình trợ lý cho tin nhắn tiếp theo',
     details: 'Xem dữ liệu thô',
     found: 'Tìm thấy {{count}} mục',
@@ -23,6 +286,9 @@ const viVN = {
       get_pipeline: 'Xem Pipeline',
       get_knowledge_schema: 'Xem lược đồ knowledge engine',
       list_operation_logs: 'Truy vấn nhật ký thao tác',
+      workspace_search: 'Tìm khả năng của không gian làm việc',
+      workspace_describe: 'Xem định nghĩa thao tác',
+      workspace_call: 'Thực hiện thao tác không gian làm việc',
     },
     resources: {
       models: 'Tìm mô hình trò chuyện',
@@ -36,11 +302,14 @@ const viVN = {
     newChat: 'Cuộc trò chuyện mới',
     close: 'Đóng',
     welcome:
-      'Hãy cho tôi biết bạn muốn xây dựng gì. Tôi có thể xem không gian làm việc này và đề xuất cấu hình cơ sở tri thức cùng Pipeline để bạn xác nhận.',
+      'Hãy cho tôi biết bạn muốn xây dựng gì. Tôi có thể xem không gian làm việc này, đề xuất cấu hình cho bot, Agent, cơ sở tri thức, Pipeline và các tài nguyên khác, rồi áp dụng sau khi bạn xác nhận.',
     discover: 'Có những mô hình, cơ sở tri thức và Pipeline nào khả dụng?',
     build: 'Giúp tôi tạo ứng dụng hỏi đáp dựa trên cơ sở tri thức.',
     toolResult: 'Kết quả thao tác',
     review: 'Kiểm tra thao tác và tham số cụ thể trước khi xác nhận',
+    dangerousWarning:
+      'Thao tác nhạy cảm: thao tác này có rủi ro cao và có thể không hoàn tác được. Hãy kiểm tra kỹ tham số trước khi xác nhận.',
+    parameters: 'Tham số:',
     confirm: 'Xác nhận và thực thi',
     decline: 'Từ chối',
     working: 'Đang xử lý…',
@@ -56,6 +325,14 @@ const viVN = {
   sidebarGuide: {
     steps: {
       monitoring: {
+        rangeDays: '{{days}} ngày qua',
+        customRange: 'Khoảng thời gian tùy chỉnh',
+        rangeStart: 'Bắt đầu',
+        rangeEnd: 'Kết thúc',
+        rangeHint: 'Bắt đầu phải trước kết thúc. Tối đa 365 ngày.',
+        autoRefreshLabel: 'Tự động làm mới',
+        autoRefreshOff: 'Tự động làm mới: tắt',
+        autoRefreshEvery: 'Làm mới mỗi {{seconds}} giây',
         title: 'Xem hoạt động',
         description:
           'Xem hoạt động bot, mức sử dụng mô hình, lượng tin nhắn và hiệu suất hệ thống.',
@@ -102,9 +379,14 @@ const viVN = {
       'Chọn sự kiện được hỗ trợ, nhập dữ liệu thử rồi xem đầu ra và kết quả công cụ. Hành động nền tảng được mô phỏng; mô hình và công cụ khác chạy theo cấu hình.',
     pipeline: {
       trigger: {
-        title: 'Chọn tin nhắn cần trả lời',
+        title: 'Choose which messages to answer',
         description:
-          'Pipeline xử lý sự kiện tin nhắn và tự động trả lời bằng AI. Đặt điều kiện kích hoạt trong nhóm, quy tắc trò chuyện riêng và bộ lọc tin nhắn tại đây.',
+          'Pipelines handle message events and reply automatically with AI.',
+      },
+      speech: {
+        title: 'Configure speech capabilities',
+        description:
+          'Configure speech recognition (ASR) and text-to-speech (TTS) models to handle voice messages and synthesized voice replies.',
       },
       ai: {
         title: 'Cấu hình khả năng AI',
@@ -136,6 +418,14 @@ const viVN = {
           'Gửi tin nhắn thử để kiểm tra điều kiện kích hoạt, câu trả lời AI và xử lý đầu ra. Thay đổi cấu hình được lưu trước khi thử.',
       },
       monitoring: {
+        rangeDays: '{{days}} ngày qua',
+        customRange: 'Khoảng thời gian tùy chỉnh',
+        rangeStart: 'Bắt đầu',
+        rangeEnd: 'Kết thúc',
+        rangeHint: 'Bắt đầu phải trước kết thúc. Tối đa 365 ngày.',
+        autoRefreshLabel: 'Tự động làm mới',
+        autoRefreshOff: 'Tự động làm mới: tắt',
+        autoRefreshEvery: 'Làm mới mỗi {{seconds}} giây',
         title: 'Xem lịch sử chạy',
         description:
           'Dùng thẻ cạnh tiêu đề để xem cuộc trò chuyện, các bước xử lý và lỗi khi không có phản hồi hoặc phản hồi không đúng dự kiến.',
@@ -302,6 +592,16 @@ const viVN = {
     editionCloud: 'Cloud',
   },
   common: {
+    refresh: 'Làm mới',
+    clickToCopy: 'Nhấp để sao chép',
+    finish: 'Hoàn tất',
+    operationFailed: 'Thao tác thất bại',
+    optional: 'Không bắt buộc',
+    failureReasonNotRecorded:
+      'Chưa lưu nguyên nhân lỗi. Hãy kiểm tra nhật ký bot hoặc gửi lại tin nhắn để biết thêm chi tiết.',
+    loadFailedTitle: 'Không thể tải nội dung',
+    loadFailedHint:
+      'Vui lòng thử lại sau. Nếu vẫn không tải được, hãy kiểm tra kết nối và trạng thái dịch vụ.',
     customValue: 'Tùy chỉnh',
     loadFailed: 'Không tải được. Vui lòng thử lại.',
     search: 'Tìm kiếm',
@@ -498,6 +798,9 @@ const viVN = {
     help: 'Trợ giúp',
   },
   models: {
+    starModel: 'Đánh dấu làm mô hình mặc định cho bộ xử lý mới',
+    unstarModel: 'Bỏ đánh dấu',
+    starModelFailed: 'Không thể cập nhật mô hình được đánh dấu',
     codex: {
       account: 'Gói đăng ký ChatGPT',
       description:
@@ -689,6 +992,10 @@ const viVN = {
     chat: 'Trò chuyện',
     embedding: 'Embedding',
     rerank: 'Sắp xếp lại',
+    asr: 'ASR (Nhận dạng giọng nói)',
+    tts: 'TTS (Văn bản thành giọng nói)',
+    asrTab: 'ASR',
+    ttsTab: 'TTS',
     rerankUrlTooltip:
       'URL đầy đủ cho endpoint sắp xếp lại (vd: https://dashscope.aliyuncs.com/compatible-api/v1/reranks)',
     rerankPathTooltip:
@@ -755,16 +1062,21 @@ const viVN = {
     saveSuccess: 'Lưu thành công',
     saveError: 'Lưu thất bại: ',
     createSuccess: 'Tạo thành công. Vui lòng cấu hình định tuyến sự kiện',
+    autoCreatedPipeline:
+      'Đã tự động tạo pipeline và liên kết các sự kiện tin nhắn',
     createError: 'Tạo thất bại: ',
     deleteSuccess: 'Xóa thành công',
     deleteError: 'Xóa thất bại: ',
     deleteConfirmation: 'Bạn có chắc chắn muốn xóa Bot này không?',
     platformAdapter: 'Nền tảng/Lựa chọn Adapter',
     selectAdapter: 'Chọn Adapter',
+    saveAndEnable: 'Lưu và bật',
+    searchAdapters: 'Tìm kiếm adapter',
+    noMatchingAdapters: 'Không tìm thấy adapter phù hợp',
     legacyAdapters: 'Adapter cũ',
     legacyAdapterBadge: 'Cũ',
     legacyAdaptersHint:
-      'Các adapter này đã có phiên bản hướng sự kiện mới hơn.\nChúng chỉ được giữ lại để tương thích với cấu hình hiện có và không được khuyến nghị cho Bot mới.',
+      'Adapter cũ chủ yếu gửi và nhận tin nhắn, được giữ để tương thích với cấu hình bot hiện có.\nAdapter mới kết nối cùng nền tảng qua sự kiện, gồm tin nhắn và các yêu cầu kết bạn hoặc thay đổi nhóm được hỗ trợ, rồi chuyển đến bộ xử lý.\nƯu tiên bản mới khi tạo bot. Bot hiện có vẫn dùng được bản cũ. Khi chuyển đổi, kiểm tra kết nối và tuyến sự kiện; tài khoản nền tảng không được nâng cấp.',
     adapterConfig: 'Cấu hình Adapter',
     viewAdapterDocs: 'Xem tài liệu',
     bindPipeline: 'Liên kết Pipeline',
@@ -777,6 +1089,10 @@ const viVN = {
     earlier: 'Trước đó',
     dateFormat: '{{day}}/{{month}}',
     setBotEnableError: 'Thiết lập trạng thái bật Bot thất bại',
+    enabling: 'Đang bật…',
+    disabling: 'Đang tắt…',
+    enableConfirmed: 'Đã bật',
+    disableConfirmed: 'Đã tắt',
     log: 'Nhật ký',
     configuration: 'Cấu hình',
     logs: 'Nhật ký',
@@ -785,6 +1101,28 @@ const viVN = {
     routingConnection: 'Định tuyến & Kết nối',
     routingConnectionDescription:
       'Liên kết Pipeline xử lý tin nhắn cho Bot này',
+    routingHelp: {
+      title: 'Định tuyến sự kiện là gì?',
+      intro:
+        'Bot nhận tin nhắn, lời mời kết bạn và các sự kiện như tham gia nhóm.',
+      events: 'Sự kiện đến',
+      agents: 'Các Agent khác nhau',
+      message: 'Nhận tin nhắn',
+      friend: 'Lời mời kết bạn',
+      group: 'Tham gia nhóm',
+      messageAction: 'Agent trả lời',
+      friendAction: 'Agent xét duyệt',
+      groupAction: 'Agent chào mừng',
+      rules: 'Theo quy tắc của bạn · Ví dụ',
+      instructions:
+        'Agent làm theo chỉ dẫn của bạn và gọi công cụ để trả lời, xét duyệt yêu cầu và thực hiện thao tác khác.',
+      plugin:
+        'Với nhu cầu nâng cao, bộ xử lý plugin đăng ký hàng loạt sự kiện và xử lý bằng mã. Thêm cấu hình bộ xử lý plugin bên dưới.',
+      docs: 'Phát triển bộ xử lý plugin của riêng bạn',
+      runnerDocs: 'Phát triển trình chạy Agent của riêng bạn',
+      pause: 'Tạm dừng',
+      play: 'Phát',
+    },
     eventRouting: 'Định tuyến sự kiện',
     eventRoutingDescription:
       'Chọn bộ xử lý cho từng sự kiện của Bot. Chỉnh sửa logic trong cấu hình Agent hoặc Pipeline tương ứng. Pipeline chỉ hỗ trợ sự kiện tin nhắn.',
@@ -794,7 +1132,8 @@ const viVN = {
     commonScenarios: 'Tình huống phổ biến',
     dragEventRoute: 'Kéo tuyến {{index}}',
     behaviorReplyMessages: 'Trả lời tin nhắn',
-    behaviorReplyMessagesDescription: 'Gửi tin nhắn đến bộ xử lý.',
+    behaviorReplyMessagesDescription:
+      'Xử lý tin nhắn riêng và tin nhắn nhóm nhắc đến bot này.',
     behaviorWelcomeMembers: 'Chào mừng thành viên mới',
     behaviorWelcomeMembersDescription:
       'Chạy bộ xử lý khi có người tham gia nhóm.',
@@ -824,7 +1163,7 @@ const viVN = {
     enabled: 'Đã bật',
     eventBindingDescriptionPlaceholder: 'Mô tả quy tắc',
     noEventBindings: 'Chưa có tuyến sự kiện',
-    unsupportedPipelineEvent: 'Pipeline chỉ hỗ trợ sự kiện message.*',
+    unsupportedPipelineEvent: 'Pipeline chỉ hỗ trợ sự kiện message.received',
     disable: 'Tắt',
     enable: 'Bật',
     disabledBindings: 'Đã tắt',
@@ -834,6 +1173,7 @@ const viVN = {
     advancedEventValues: 'Xem tất cả',
     eventGroup: 'Nhóm',
     eventGroupNames: {
+      wecomcs: 'Dịch vụ khách hàng WeCom',
       bot: 'Trạng thái bot',
       feedback: 'Phản hồi',
       friend: 'Bạn bè',
@@ -848,6 +1188,9 @@ const viVN = {
     routeFallbackCatchAll: '{{route}} là tuyến nhận mọi sự kiện.',
     routeFallbackIgnored:
       'Sự kiện không khớp tuyến nào sẽ bị bỏ qua. Chỉ thêm tuyến nhận tất cả khi mọi sự kiện cần kết quả rõ ràng.',
+    matchRecords: 'Lịch sử khớp',
+    matchRecordsDescription:
+      'Kết quả gần nhất của mỗi quy tắc và các sự kiện không khớp gần đây. Nhật ký trong bộ nhớ được xóa khi khởi động lại.',
     testRoute: 'Kiểm tra tuyến',
     adapterEventDebugAction: 'Kiểm tra lắng nghe',
     adapterEventDebugTitle: 'Gỡ lỗi sự kiện nền tảng',
@@ -931,6 +1274,15 @@ const viVN = {
     eventWildcard: 'Tất cả sự kiện',
     eventNamespaceWildcard: '{{namespace}}.*',
     eventNames: {
+      wecombot_enter_chat: 'Người dùng vào cuộc trò chuyện với bot',
+      wecombot_template_card_event: 'Tương tác thẻ mẫu',
+      dingtalk_card_action: 'Tương tác thẻ DingTalk',
+      wecomcs_enter_session: 'Khách hàng vào hội thoại',
+      wecomcs_msg_send_fail: 'Gửi tin nhắn hỗ trợ thất bại',
+      wecomcs_servicer_status_change: 'Trạng thái nhân viên thay đổi',
+      wecomcs_session_status_change: 'Trạng thái hội thoại hỗ trợ thay đổi',
+      wecomcs_reject_customer_msg_switch_change:
+        'Cài đặt từ chối tin nhắn thay đổi',
       message_received: 'Nhận tin nhắn',
       message_edited: 'Tin nhắn được chỉnh sửa',
       message_deleted: 'Tin nhắn bị xóa',
@@ -940,6 +1292,7 @@ const viVN = {
       friend_added: 'Đã thêm bạn',
       group_member_joined: 'Thành viên tham gia nhóm',
       group_member_left: 'Thành viên rời nhóm',
+      group_info_updated: 'Thông tin nhóm được cập nhật',
       group_member_banned: 'Thành viên bị cấm tham gia nhóm',
       bot_invited_to_group: 'Bot được mời vào nhóm',
       bot_removed_from_group: 'Bot bị xóa khỏi nhóm',
@@ -948,6 +1301,22 @@ const viVN = {
       platform_specific: 'Sự kiện riêng của nền tảng',
     },
     eventDescriptions: {
+      wecombot_enter_chat:
+        'Người dùng mở cuộc trò chuyện với bot. Dùng cho quy trình chào mừng.',
+      wecombot_template_card_event:
+        'Người dùng nhấp hoặc gửi thẻ. Phản hồi biểu mẫu do hệ thống quản lý được xử lý riêng.',
+      dingtalk_card_action:
+        'Nhấp và gửi thẻ; phản hồi và biểu mẫu được quản lý được xử lý riêng.',
+      wecomcs_enter_session:
+        'Khách hàng mở liên kết hỗ trợ; gồm nguồn truy cập và mã chào mừng.',
+      wecomcs_msg_send_fail:
+        'WeChat thông báo gửi thất bại, gồm ID tin nhắn và loại lỗi.',
+      wecomcs_servicer_status_change:
+        'Nhân viên bắt đầu, dừng hoặc tạm dừng tiếp nhận.',
+      wecomcs_session_status_change:
+        'Nhân viên tiếp nhận, chuyển, kết thúc hoặc mở lại hội thoại.',
+      wecomcs_reject_customer_msg_switch_change:
+        'Nhân viên bật hoặc tắt từ chối tin nhắn khách hàng.',
       all: 'Khớp mọi sự kiện bộ chuyển đổi này nhận được.',
       namespace: 'Khớp mọi sự kiện {{group}}.',
       namespace_bot:
@@ -955,7 +1324,7 @@ const viVN = {
       namespace_feedback: 'Khớp sự kiện phản hồi từ nền tảng hoặc người dùng.',
       namespace_friend: 'Khớp yêu cầu kết bạn và thay đổi quan hệ bạn bè.',
       namespace_group:
-        'Khớp sự kiện tham gia, rời, bị xóa khỏi nhóm và sự kiện nhóm khác.',
+        'Khớp các thay đổi thành viên và cập nhật thông tin nhóm.',
       namespace_message: 'Khớp sự kiện nhận, sửa, xóa và thả cảm xúc tin nhắn.',
       namespace_platform:
         'Khớp sự kiện riêng của nền tảng do bộ chuyển đổi cung cấp.',
@@ -969,6 +1338,7 @@ const viVN = {
       friend_added: 'Đã tạo quan hệ bạn bè.',
       group_member_joined: 'Thành viên tham gia nhóm có bot.',
       group_member_left: 'Thành viên rời nhóm có bot.',
+      group_info_updated: 'Thông tin nhóm như tên hoặc chủ sở hữu đã thay đổi.',
       group_member_banned: 'Thành viên nhóm bị cấm hoặc xóa.',
       bot_invited_to_group: 'Bot được mời vào nhóm.',
       bot_removed_from_group: 'Bot bị xóa khỏi nhóm.',
@@ -981,6 +1351,9 @@ const viVN = {
       'Phải khớp mọi điều kiện để kích hoạt. Để trống để luôn kích hoạt.',
     conditionsEmpty: 'Không có điều kiện — luôn kích hoạt.',
     addFilter: 'Thêm điều kiện',
+    filterIsAtBot: 'Nhắc đến bot này',
+    mentionYes: 'Có',
+    mentionNo: 'Không',
     filterChatType: 'Loại phiên',
     filterChatId: 'ID phiên',
     filterMessageText: 'Nội dung tin nhắn',
@@ -1055,6 +1428,21 @@ const viVN = {
     imagesAttached: 'hình ảnh đính kèm',
     noLogs: 'Chưa có nhật ký',
     sessionMonitor: {
+      resetContext: 'Đặt lại ngữ cảnh',
+      resetDescription:
+        'Tin nhắn mới sẽ bắt đầu với ngữ cảnh trống. Lịch sử giám sát, tệp và bộ nhớ dài hạn được giữ lại. Hãy đợi các tác vụ đang chạy hoàn tất.',
+      resetSuccess: 'Đã đặt lại ngữ cảnh.',
+      resetError:
+        'Không thể đặt lại. Hãy đợi các tác vụ đang chạy hoàn tất rồi thử lại.',
+      resetScopeMember:
+        'Cuộc trò chuyện này lưu ngữ cảnh riêng cho từng thành viên nhóm, nên chỉ ngữ cảnh của thành viên này được đặt lại.',
+      resetScopeGroup:
+        'Nhóm này dùng chung một ngữ cảnh, nên cuộc hội thoại của cả nhóm sẽ được đặt lại, không chỉ của thành viên này.',
+      inGroup: 'trong {{group}}',
+      filterByGroup: 'Cùng nhóm',
+      groupFilterActive: 'Nhóm {{group}}',
+      clearGroupFilter: 'Hiện tất cả phiên',
+
       title: 'Phiên',
       sessions: 'Phiên',
       noSessions: 'Không tìm thấy phiên nào',
@@ -1102,7 +1490,26 @@ const viVN = {
     },
   },
   agents: {
+    apiToolsSelectAll: 'Chọn tất cả',
     monitoring: {
+      rangeDays: '{{days}} ngày qua',
+      customRange: 'Khoảng thời gian tùy chỉnh',
+      rangeStart: 'Bắt đầu',
+      rangeEnd: 'Kết thúc',
+      rangeHint: 'Bắt đầu phải trước kết thúc. Tối đa 365 ngày.',
+      autoRefreshLabel: 'Tự động làm mới',
+      autoRefreshOff: 'Tự động làm mới: tắt',
+      autoRefreshEvery: 'Làm mới mỗi {{seconds}} giây',
+      runStatus: 'Trạng thái thực thi',
+      toolCalls: 'Lượt gọi công cụ',
+      delivery: 'Gửi tin nhắn',
+      sendFailed: 'Gửi thất bại',
+      sendCount: '{{count}} lượt gọi gửi thành công',
+      noSend: 'Chưa ghi nhận lượt gửi',
+      noSteps: 'Chưa ghi nhận bước thực thi.',
+      recipient: 'Người nhận',
+      actionCompleted: 'Công cụ đã thực thi thành công.',
+      simulatedAction: 'Thao tác mô phỏng; không gửi tin nhắn thật.',
       description:
         'Xem sự kiện kích hoạt, đầu ra mô hình và quá trình gọi công cụ của mỗi tác vụ.',
       empty: 'Chưa có lượt chạy. Kích hoạt sự kiện hoặc chạy thử gỡ lỗi.',
@@ -1205,6 +1612,9 @@ const viVN = {
       'Chạy theo quy trình cố định: nhận tin nhắn, gọi AI và trả lời người dùng, với cơ sở tri thức và plugin có thể cấu hình. Chỉ xử lý sự kiện tin nhắn, phù hợp với tác vụ có các bước rõ ràng và cần kiểm soát quá trình xử lý.',
     allEvents: 'Hỗ trợ tất cả sự kiện',
     messageEventsOnly: 'Chỉ sự kiện tin nhắn',
+    selectAgentRunner: 'Chọn trình chạy Agent',
+    selectProcessorPlugin: 'Chọn plugin xử lý',
+    createBasicInfoDescription: 'Đặt tên, biểu tượng và chọn plugin',
     chooseType: 'Chọn cách hoạt động',
     chooseTypeDescription:
       'Chọn loại bộ xử lý trước. Bạn có thể cấu hình thêm sau khi tạo.',
@@ -1263,7 +1673,7 @@ const viVN = {
     eventToolUnavailable: 'Không khả dụng',
     eventApiToolsDescription:
       'Đích được cố định theo sự kiện hiện tại. Agent chỉ cung cấp tham số hành động.',
-    platformApiTools: 'Công cụ nền tảng',
+    platformApiTools: 'Công cụ bot',
     platformApiToolsDescription:
       'Agent có thể chọn ID người dùng, nhóm hoặc tin nhắn. Chỉ cấp quyền cần thiết.',
     apiToolEvents: 'Sự kiện',
@@ -1318,6 +1728,17 @@ const viVN = {
     viewMarketplace: 'Xem chợ tiện ích',
     restoringRunnerInstall: 'Đang khôi phục cài đặt plugin và chờ trình chạy…',
     noInstalledRunners: 'Chưa cài tiện ích trình chạy nào.',
+    runnerDiagnosis: {
+      missing:
+        'Không tìm thấy Runner đã chọn hoặc tiện ích của nó. Hãy cài đặt hoặc khôi phục tiện ích.',
+      disabled:
+        'Tiện ích Runner đã chọn bị tắt. Hãy bật nó trong trang Tiện ích.',
+      runtime:
+        'Môi trường chạy tiện ích không khả dụng hoặc bị tắt. Hãy khôi phục kết nối trước khi chạy.',
+      repair: 'Quản lý tiện ích và môi trường chạy',
+      draft:
+        'Trang sửa lỗi mở trong thẻ mới. Lựa chọn Runner và bản nháp chưa lưu vẫn được giữ ở đây.',
+    },
     installingRunner: 'Đang cài {{runner}}...',
     runnerInstallSuccess: 'Đã cài {{runner}} và có thể chọn',
     selectedRunnerUnavailable: 'Trình chạy đã chọn không khả dụng',
@@ -1500,6 +1921,218 @@ const viVN = {
     uploadLocal: 'Tải lên cục bộ',
     debugging: 'Gỡ lỗi',
     uploadLocalPlugin: 'Tải lên Plugin cục bộ',
+    spaceUpload: {
+      descriptionInstalled:
+        'Tải plugin cài cục bộ {{author}}/{{name}} lên chợ tiện ích.',
+      shareInstalledAction: 'Chia sẻ lên Space',
+      installedPackageTitle: 'Gói plugin đã cài sẽ được tải lên',
+      installedPackageHint:
+        'Plugin cài cục bộ được tải lên nguyên gói .lbpkg; tác giả, tên và phiên bản lấy từ manifest.',
+      menuAction: 'Tải lên chợ ứng dụng',
+      title: 'Tải plugin lên chợ ứng dụng',
+      description:
+        'Build plugin đang gỡ lỗi {{author}}/{{name}} và phát hành lên chợ ứng dụng.',
+      loadFailed: 'Không tải được thông tin tải lên của plugin',
+      spaceNotConnected:
+        'Workspace này chưa liên kết với tài khoản LangBot. Hãy liên kết trước khi tải lên.',
+      label: 'Tên',
+      version: 'Phiên bản',
+      pluginDescription: 'Mô tả',
+      repository: 'Kho lưu trữ',
+      repositoryPublicHint:
+        'Khi đồng bộ lên GitHub, kho chưa tồn tại sẽ được tạo và kho riêng tư hiện có sẽ được chuyển sang công khai.',
+      author: 'Tác giả',
+      authorHint:
+        'Khi phát hành sẽ dùng danh tính tác giả này trên chợ ứng dụng.',
+      license: 'Giấy phép',
+      licensePlaceholder: 'Chọn giấy phép',
+      licenseNone: 'Không chỉ định',
+      changelog: 'Nhật ký thay đổi',
+      syncGithub: 'Đồng bộ lên GitHub',
+      syncGithubHint:
+        'Commit và push thư mục làm việc của plugin. Mặc định dùng cấu hình git cục bộ; URL kho và token bên dưới có thể ghi đè. Nếu có token và kho GitHub chưa tồn tại, hệ thống sẽ tự tạo.',
+      repoUrl: 'URL kho (tùy chọn)',
+      repoUrlHint: 'Để trống để dùng origin git cục bộ.',
+      token: 'Token truy cập (tùy chọn)',
+      tokenPlaceholder: 'Chỉ dùng cho lần push này',
+      branch: 'Nhánh',
+      commitMessage: 'Thông điệp commit',
+      syncOnly: 'Chỉ đồng bộ lên GitHub',
+      gitSynced: 'Đã đồng bộ lên GitHub',
+      gitCommittedNoRemote:
+        'Đã commit cục bộ nhưng chưa cấu hình remote để push',
+      gitNothing: 'Không có thay đổi để đồng bộ',
+      gitFailed: 'Đồng bộ Git thất bại: ',
+      uploadSuccess: 'Đã tải plugin lên chợ ứng dụng',
+      reviewOnSpace: 'Gửi duyệt trên chợ ứng dụng',
+      uploadFailed: 'Tải plugin lên thất bại: ',
+      basicInfo: 'Thông tin cơ bản',
+      changeIcon: 'Đổi biểu tượng',
+      iconInvalidType: 'Vui lòng chọn một tệp hình ảnh',
+      iconTooLarge: 'Biểu tượng phải nhỏ hơn 10 MB',
+      labelRequired: 'Nhập tên bằng ít nhất một ngôn ngữ',
+      langEn: 'English',
+      langZhHans: 'Tiếng Trung giản thể',
+      langZhHant: 'Tiếng Trung phồn thể',
+      langJa: 'Tiếng Nhật',
+      langTh: 'Tiếng Thái',
+      langVi: 'Tiếng Việt',
+      langEs: 'Tiếng Tây Ban Nha',
+      uploadButton: 'Tải lên chợ ứng dụng',
+      notDebugHint:
+        'Chỉ có thể tải lên plugin đang kết nối gỡ lỗi. Hãy chạy `lbp run` để bắt đầu gỡ lỗi trước.',
+      stepInfo: 'Thông tin plugin',
+      stepSettings: 'Ghi chú phát hành',
+      stepConfirm: 'Xác nhận tải lên',
+      stepResult: 'Kết quả tải lên',
+      startUpload: 'Bắt đầu tải lên',
+      uploadingTitle: 'Đang tải lên chợ tiện ích...',
+      uploadingDesc:
+        'Đang đóng gói tệp plugin cục bộ, kiểm tra manifest và đồng bộ với LangBot Space...',
+      uploadSuccessTitle: 'Tải plugin lên thành công!',
+      uploadSuccessDesc:
+        'Plugin {{author}}/{{name}} (v{{version}}) đã được gửi tới LangBot Space.',
+      reviewNoticeTitle: 'Thông báo kiểm duyệt',
+      reviewNoticeDesc:
+        'Plugin đã vào hàng đợi kiểm duyệt. Sau khi được duyệt, plugin sẽ hiển thị công khai trên chợ tiện ích.',
+      viewInSpace: 'Xem trên chợ Space',
+      viewMyPlugins: 'Quản lý plugin của tôi',
+      finishAndClose: 'Xong',
+      retryUpload: 'Thử tải lên lại',
+      backToEdit: 'Quay lại chỉnh sửa',
+      manifestNotice:
+        'Thông tin dưới đây được đọc từ tệp manifest (manifest.yaml) chỉ để xác nhận. Nếu cần sửa đổi, vui lòng chỉnh sửa tệp manifest và khởi động lại gỡ lỗi.',
+      manifestSource: 'Đã xác nhận từ manifest',
+      nextStep: 'Tiếp theo',
+      prevStep: 'Quay lại',
+      nextToSettings: 'Tiếp theo: Ghi chú phát hành',
+      nextToConfirm: 'Tiếp theo: Xác nhận tải lên',
+      confirmAndUpload: 'Xác nhận tải lên Chợ Tiện ích mở rộng',
+      noDescription: 'Chưa có mô tả',
+      noRepository: 'Chưa chỉ định kho mã nguồn',
+      noLicense: 'Chưa chỉ định giấy phép',
+      changelogPlaceholder:
+        'Nhập ghi chú phát hành cho phiên bản này (ví dụ tính năng mới, sửa lỗi)...',
+      changelogHint:
+        'Nhật ký thay đổi sẽ hiển thị trong lịch sử phiên bản của Chợ Tiện ích mở rộng.',
+      reviewSummaryTitle: 'Kiểm tra trước khi phát hành',
+      reviewTargetMarket: 'Chợ mục tiêu',
+      reviewTargetMarketValue: 'Chợ Tiện ích mở rộng (LangBot Space)',
+      reviewAccountStatus: 'Trạng thái tài khoản',
+      reviewAccountConnected: 'Đã kết nối tài khoản LangBot',
+      reviewAccountNotConnected: 'Chưa kết nối tài khoản (tải lên sẽ thất bại)',
+      spaceNotConnectedTitle: 'Chưa liên kết tài khoản chợ',
+      bindSpaceButton: 'Liên kết tài khoản ngay',
+      bindRequiredToProceed: 'Vui lòng liên kết tài khoản để tiếp tục',
+      prerequisitesTitle: 'Yêu cầu tiên quyết để phát hành',
+      prerequisitesDescription:
+        'Trước khi tải plugin lên chợ tiện ích mở rộng, vui lòng đảm bảo đáp ứng các yêu cầu sau.',
+      req1Title: 'Yêu cầu 1: Liên kết tài khoản LangBot Space',
+      req1Desc:
+        'Cài đặt LangBot cục bộ phải được đăng nhập hoặc liên kết với LangBot Space.',
+      reqBound: 'Đã liên kết',
+      reqCompleted: 'Đã sẵn sàng',
+      req2Title: 'Yêu cầu 2: Tạo danh tính người sáng tạo trên Space',
+      req2Desc:
+        'Tài khoản LangBot phải có danh tính người sáng tạo và định danh phải khớp với tác giả plugin.',
+      req2WaitSpace: 'Vui lòng hoàn thành Yêu cầu 1 trước',
+      req2NoCreator: 'Tài khoản LangBot này chưa tạo danh tính người sáng tạo',
+      req2Mismatch: 'Định danh người sáng tạo không khớp',
+      req2MismatchDetail:
+        'Định danh Space của bạn là @{{creator}}, nhưng tác giả plugin là {{author}}.',
+      createCreatorButton: 'Đi đến tạo danh tính',
+      manageCreatorButton: 'Xem cài đặt người sáng tạo',
+      pendingReq: 'Đang chờ',
+      autoProceedTip:
+        'Khi hoàn thành tất cả các yêu cầu, quy trình tải lên sẽ tự động mở ra.',
+      refreshStatus: 'Làm mới trạng thái',
+      reviewGitSync: 'Đồng bộ GitHub',
+      reviewGitSyncEnabled: 'Đã bật (đẩy lên {{branch}})',
+      reviewGitSyncDisabled: 'Đã tắt',
+      reviewChangelog: 'Ghi chú phát hành',
+      reviewChangelogEmpty: '(Chưa nhập ghi chú phát hành)',
+      pluginIdentifier: 'Định danh plugin',
+      banners: {
+        guideTitle: 'Hướng dẫn thực hiện:',
+        disabledTooltip:
+          'Vui lòng làm theo hướng dẫn ở biểu ngữ phía trên trước khi tải lên',
+        bindButton: 'Kết nối tài khoản LangBot',
+        reauthButton: 'Xác thực lại tài khoản',
+        createCreatorButton: 'Mở hồ sơ người sáng tạo',
+        manageCreatorButton: 'Quản lý hồ sơ người sáng tạo',
+        viewMyPluginsButton: 'Xem plugin của tôi trên Space',
+        refreshButton: 'Làm mới trạng thái',
+        retryButton: 'Thử tải lên lại',
+        readyToUpload: {
+          title: 'Đã sẵn sàng xuất bản',
+          description:
+            'Tài khoản LangBot và hồ sơ người sáng tạo đã sẵn sàng. Vui lòng kiểm tra chi tiết bên dưới và xác nhận tải lên.',
+        },
+        notConnected: {
+          title: 'Chưa kết nối tài khoản LangBot Space',
+          description:
+            'Phiên bản cục bộ này chưa được kết nối với LangBot Space. Cần có tài khoản LangBot để xác minh danh tính và xuất bản plugin.',
+          guide:
+            'Vui lòng nhấp vào "Kết nối tài khoản LangBot" bên dưới để đăng nhập. Sau khi kết nối, bạn có thể xuất bản plugin.',
+        },
+        noCreator: {
+          title: 'Chưa tạo hồ sơ người sáng tạo trên Space',
+          description:
+            'Việc xuất bản plugin lên chợ ứng dụng yêu cầu hồ sơ người sáng tạo (Creator Profile) để hiển thị thông tin tác giả.',
+          guide:
+            'Vui lòng nhấp vào nút bên dưới để thiết lập slug, tiểu sử và ảnh đại diện trên Space. Sau đó quay lại và nhấp "Làm mới trạng thái".',
+        },
+        authorMismatch: {
+          title: 'Tác giả plugin không khớp với mã định danh người sáng tạo',
+          description:
+            'Tác giả trong tệp manifest là "{{author}}", nhưng mã định danh người sáng tạo trên Space là "@{{creator}}". Cả hai phải hoàn toàn khớp nhau.',
+          guide:
+            'Cách giải quyết:\n1. Cập nhật manifest.yaml và đặt metadata.author thành "{{creator}}";\n2. Hoặc chuyển sang tài khoản LangBot khớp với "{{author}}". Sau đó nhấp "Làm mới trạng thái".',
+        },
+        pendingReview: {
+          title: 'Đã có bản đệ trình đang chờ xem xét',
+          description:
+            'Bản đệ trình trước đó cho plugin này hiện đang chờ xem xét. Vui lòng đợi bản xem xét hoàn tất trước khi gửi phiên bản mới.',
+          guide:
+            'Vui lòng nhấp vào "Xem plugin của tôi trên Space" bên dưới để kiểm tra tiến trình xem xét.',
+        },
+        sessionExpired: {
+          title: 'Phiên xác thực Space đã hết hạn',
+          description:
+            'Mã truy cập Space đã hết hạn hoặc không hợp lệ. Xác thực thất bại.',
+          guide:
+            'Vui lòng nhấp vào "Xác thực lại tài khoản" bên dưới để đăng nhập lại và thử lại.',
+        },
+        validationFailed: {
+          title: 'Xác thực gói plugin thất bại',
+          description: 'Kiểm tra gói plugin thất bại: {{detail}}',
+          guide:
+            'Vui lòng kiểm tra các trường trong manifest.yaml, định dạng phiên bản SemVer và các tệp biểu tượng, README.',
+        },
+        genericError: {
+          title: 'Xuất bản plugin thất bại',
+          description: '{{detail}}',
+          guide:
+            'Vui lòng kiểm tra kết nối mạng hoặc thử lại sau. Nếu sự cố vẫn tiếp diễn, hãy liên hệ cộng đồng Space.',
+        },
+      },
+      errors: {
+        noCreatorProfile:
+          'Vui lòng thiết lập hồ sơ người sáng tạo trên Space trước khi tải lên plugin',
+        authorMismatch:
+          'Tác giả plugin "{{author}}" không khớp với mã định danh người sáng tạo trên Space "@{slug}"',
+        pendingReview:
+          'Bạn đã có bản đệ trình plugin đang chờ xem xét. Vui lòng đợi hoàn tất',
+        sessionExpired:
+          'Phiên đăng nhập Space đã hết hạn. Vui lòng xác thực lại',
+        notConnected:
+          'Vui lòng kết nối tài khoản LangBot Space trước khi tải lên plugin',
+        packageFailed:
+          'Đóng gói plugin thất bại. Vui lòng kiểm tra mã nguồn và thư mục',
+        inspectFailed: 'Kiểm tra tệp khai báo plugin thất bại: {{detail}}',
+        certPrecheckFailed: 'Kiểm tra chứng nhận trước thất bại: {{detail}}',
+      },
+    },
     localPreview: {
       title: 'Xem trước gói plugin cục bộ',
       unpacking: 'Đang giải nén để xem trước gói...',
@@ -1542,6 +2175,10 @@ const viVN = {
     updating: 'Đang cập nhật...',
     updateSuccess: 'Cập nhật plugin thành công',
     updateError: 'Cập nhật thất bại: ',
+    installedVersion: 'Phiên bản đã cài v{{version}}',
+    updateToVersion: 'Cập nhật lên v{{version}}',
+    confirmUpdatePluginVersion:
+      'Cập nhật plugin {{author}}/{{name}} từ v{{from}} lên v{{to}}?',
     saveConfigSuccessNormal: 'Lưu cấu hình thành công',
     saveConfigError: 'Lưu cấu hình thất bại: ',
     config: 'Cấu hình',
@@ -1607,6 +2244,12 @@ const viVN = {
       depsInfo: '{{count}} phụ thuộc cần cài đặt',
       depsProgress: 'Đã cài {{installed}}/{{total}} · Còn lại {{remaining}}',
       installComplete: 'Cài đặt plugin thành công',
+      followUp: {
+        nextSteps: 'Bước tiếp theo',
+        agents: 'Tạo Agent hoặc bộ xử lý plugin',
+        pipelines: 'Tạo pipeline',
+        knowledge: 'Tạo cơ sở tri thức',
+      },
       updateComplete: 'Đã cập nhật plugin thành công',
       installCompletePlugin: 'Đã cài đặt plugin thành công',
       installCompleteMCP: 'Đã cài đặt máy chủ MCP thành công',
@@ -1619,6 +2262,13 @@ const viVN = {
     },
   },
   market: {
+    typeTiles: {
+      all: 'Tất cả tiện ích',
+      allDesc: 'Plugin, MCP và kỹ năng',
+      pluginDesc: 'Nền tảng, công cụ, runner và hơn thế',
+      mcpDesc: 'Công cụ từ máy chủ MCP bên ngoài',
+      skillDesc: 'Dạy Agent cách làm việc mới',
+    },
     certifiedPlugin: 'Plugin được chứng nhận',
     certificationTooltip:
       'Phiên bản này đã vượt qua đánh giá về cách ly dữ liệu và khả năng tương thích với môi trường chạy dùng chung. Gói đã được ký.',
@@ -1888,6 +2538,7 @@ const viVN = {
     triggerConditions: 'Điều kiện kích hoạt',
     safetyControls: 'An toàn',
     outputProcessing: 'Đầu ra',
+    speechProcessing: 'Giọng nói',
     nameRequired: 'Tên không được để trống',
     descriptionRequired: 'Mô tả không được để trống',
     createSuccess: 'Tạo thành công. Vui lòng chỉnh sửa tham số Pipeline',
@@ -1922,6 +2573,10 @@ const viVN = {
       addPlugin: 'Thêm Plugin',
       selectPlugins: 'Chọn Plugin',
       pluginsTitle: 'Plugin',
+      pluginScopeHint:
+        'Chỉ kiểm soát trình lắng nghe sự kiện, công cụ và lệnh của pipeline này; không ảnh hưởng đến Runner được chọn trong cài đặt AI.',
+      runnerScopeHint:
+        'Chọn Runner độc lập tại đây, không phụ thuộc vào công tắc plugin tiện ích. Plugin của Runner vẫn phải được cài đặt và khả dụng.',
       mcpServersTitle: 'Máy chủ MCP',
       mcpResourcesTitle: 'Tài nguyên MCP',
       noMCPServersSelected: 'Chưa chọn máy chủ MCP nào',
@@ -1936,6 +2591,9 @@ const viVN = {
       enableAllPlugins: 'Bật tất cả Plugin',
       enableAllMCPServers: 'Bật tất cả máy chủ MCP',
       enableAllSkills: 'Bật tất cả kỹ năng',
+      toolsDescription:
+        'Chọn công cụ sự kiện, công cụ bot và thao tác không gian làm việc mà Agent được gọi. Pipeline tự động trả lời bằng văn bản do mô hình tạo, nên không cần công cụ trả lời.',
+      saveTools: 'Lưu quyền công cụ',
       allPluginsEnabled: 'Đã bật tất cả plugin',
       allMCPServersEnabled: 'Đã bật tất cả máy chủ MCP',
       allSkillsEnabled: 'Tất cả kỹ năng đã được bật',
@@ -1966,7 +2624,7 @@ const viVN = {
       mcpToolsScopeTooltip:
         'Tại đây chỉ hiển thị công cụ từ máy chủ MCP hiện được cho phép trong Tiện ích mở rộng.',
       skillToolsScopeTooltip:
-        'Công cụ kỹ năng khả dụng khi dịch vụ kỹ năng LangBot và backend sandbox Box đã sẵn sàng. Chúng cho phép Agent kích hoạt hoặc đăng ký kỹ năng.',
+        'Kích hoạt kỹ năng và tài nguyên chỉ đọc hoạt động không cần Box. Đăng ký từ workspace của Agent vẫn cần sandbox Box.',
       selectTools: 'Chọn công cụ',
       resourcesTitle: 'Tài nguyên',
       resourcesDescription:
@@ -2019,6 +2677,14 @@ const viVN = {
       uploading: 'Đang tải lên...',
     },
     monitoring: {
+      rangeDays: '{{days}} ngày qua',
+      customRange: 'Khoảng thời gian tùy chỉnh',
+      rangeStart: 'Bắt đầu',
+      rangeEnd: 'Kết thúc',
+      rangeHint: 'Bắt đầu phải trước kết thúc. Tối đa 365 ngày.',
+      autoRefreshLabel: 'Tự động làm mới',
+      autoRefreshOff: 'Tự động làm mới: tắt',
+      autoRefreshEvery: 'Làm mới mỗi {{seconds}} giây',
       title: 'Nhật ký chạy',
       workbench: 'Cấu hình và gỡ lỗi',
       description: 'Xem nhật ký thực thi và lỗi của Pipeline này (24 giờ qua)',
@@ -2247,6 +2913,21 @@ const viVN = {
     newVersionAvailable: 'Có phiên bản mới',
     viewUpdateGuide: 'Xem hướng dẫn cập nhật',
     noReleaseNotes: 'Không có ghi chú phát hành',
+    latestBadge: 'Mới nhất',
+    currentBadge: 'Hiện tại',
+    viewOnWebsite: 'Xem trên trang web',
+    whatsNewInCurrent: 'Có gì mới trong phiên bản này',
+    releasesIncluded: 'Gồm {{count}} phiên bản',
+    upToDate: 'Bạn đang dùng phiên bản mới nhất',
+    showOlderReleases: 'Hiển thị {{count}} phiên bản cũ hơn',
+    viewFullChangelog: 'Xem toàn bộ nhật ký thay đổi',
+    changeTypes: {
+      new: 'Mới',
+      improved: 'Cải thiện',
+      changed: 'Thay đổi',
+      fixed: 'Sửa lỗi',
+      security: 'Bảo mật',
+    },
   },
   systemSettings: {
     title: 'System Settings',
@@ -2383,11 +3064,44 @@ const viVN = {
     space_account_not_registeredTitle: 'Account not registered',
     space_account_not_registered:
       'No local account is registered for this LangBot Account email. Ask the Workspace owner for an invitation.',
+    space_dedicated_member_requiredTitle:
+      'Bạn chưa là thành viên của instance này',
+    space_dedicated_member_required:
+      'Tài khoản LangBot của bạn chưa được mời vào instance này. Hãy nhờ chủ sở hữu mời bạn từ trang Cloud trên LangBot Space, chấp nhận lời mời rồi thử lại.',
     space_account_binding_requiredTitle: 'LangBot Account connection required',
     space_account_binding_required:
       'This local account must connect a LangBot Account from Account settings before using LangBot Account login.',
   },
+  dailyMessageQuota: {
+    planLimited: '{{count}} tin nhắn mỗi ngày',
+    planUnlimited: 'Không giới hạn tin nhắn mỗi ngày',
+    planHelp:
+      'Số tin nhắn bot có thể xử lý mỗi ngày, tính theo ngày UTC và đặt lại lúc 00:00 UTC. Chỉ tính tin nhắn bot thực sự xử lý. Khi hết hạn mức, tin nhắn mới trong ngày sẽ không được xử lý và người dùng sẽ được thông báo.',
+    title: 'Tin nhắn hôm nay',
+    usage: '{{used}} / {{limit}}',
+    remaining: 'Còn {{count}}',
+    resetsAt: 'Đặt lại {{time}}',
+    today: 'hôm nay {{time}}',
+    tomorrow: 'ngày mai {{time}}',
+    exhausted: 'Đã hết hạn mức hôm nay',
+    exhaustedHint: 'Tin nhắn mới tạm dừng đến {{time}}',
+    nearLimit: 'Sắp hết',
+    upgrade: 'Nâng cấp gói',
+    unlimited: 'Không giới hạn',
+    settingsTitle: 'Hạn mức tin nhắn mỗi ngày',
+    settingsDescription:
+      'Số tin nhắn bot có thể xử lý mỗi ngày, gồm cả trò chuyện gỡ lỗi. Tính theo ngày UTC; tin nhắn nhóm không kích hoạt bot sẽ không bị tính.',
+    unlimitedDescription: 'Gói của bạn không giới hạn tin nhắn mỗi ngày.',
+    errorTitle: 'Đã hết hạn mức tin nhắn hôm nay',
+    errorBody:
+      'Không gian làm việc này đã xử lý {{limit}} tin nhắn hôm nay nên tin nhắn này không được xử lý. Hạn mức sẽ đặt lại {{time}}.',
+    errorUpgrade: 'Nâng cấp để có hạn mức cao hơn',
+    unavailable: 'Hiện không lấy được mức sử dụng hôm nay',
+  },
   workspace: {
+    dedicatedSpaceMembersHint:
+      'Thành viên đăng nhập bằng tài khoản LangBot được mời từ trang Cloud trên LangBot Space. Lời mời bên dưới tạo một tài khoản mật khẩu riêng trên instance này.',
+    manageOnSpace: 'Quản lý trên LangBot Space',
     title: 'Workspace',
     description: 'Manage members, roles, and invitation links',
     selectTitle: 'Choose a Workspace',
@@ -2401,8 +3115,7 @@ const viVN = {
     upgradePlan: 'Change or upgrade plan',
     ossSingletonDescription:
       'This self-hosted instance has one Workspace and can include multiple users.',
-    cloudManagedDescription:
-      'This Workspace is hosted by LangBot Cloud. Manage members here; billing opens in Cloud.',
+    cloudManagedDescription: 'This Workspace is hosted by LangBot Cloud.',
     loadFailed: 'Failed to load Workspace information',
     members: 'Members',
     you: 'You',
@@ -2418,6 +3131,10 @@ const viVN = {
       failed: 'Invitation link created, but email could not be sent',
     },
     invitationCreateFailed: 'Failed to create invitation',
+    memberLimitReached:
+      'Không gian làm việc đã đạt giới hạn thành viên ({{max}}, bao gồm lời mời đang chờ). Nâng cấp gói để mời thêm thành viên.',
+    memberLimitReachedToast:
+      'Đã đạt giới hạn thành viên. Nâng cấp gói để mời thêm thành viên.',
     oneTimeLinkWarning: 'Copy this link now. It is shown only once.',
     copyInvitation: 'Copy invitation link',
     invitationCopied: 'Invitation link copied',
@@ -2471,6 +3188,135 @@ const viVN = {
     },
   },
   monitoring: {
+    rangeDays: '{{days}} ngày qua',
+    customRange: 'Khoảng thời gian tùy chỉnh',
+    rangeStart: 'Bắt đầu',
+    rangeEnd: 'Kết thúc',
+    rangeHint: 'Bắt đầu phải trước kết thúc. Tối đa 365 ngày.',
+    autoRefreshLabel: 'Tự động làm mới',
+    autoRefreshOff: 'Tự động làm mới: tắt',
+    autoRefreshEvery: 'Làm mới mỗi {{seconds}} giây',
+    unified: {
+      inputs: 'Sự kiện và đầu vào',
+      outputs: 'Kết quả tạo ra',
+      deliveries: 'Bản ghi gửi',
+      conversation: 'Ngữ cảnh hội thoại',
+      related: 'Lượt chạy liên quan',
+      events: 'Sự kiện thực thi',
+      llm_calls: 'Lần gọi mô hình',
+      tool_calls: 'Lần gọi công cụ',
+      errors: 'Lỗi',
+      payload: 'Chi tiết',
+      metadata: 'Thông tin kỹ thuật',
+      loadMore: 'Tải thêm',
+      noRecords: 'Chưa có bản ghi',
+      contextHint: 'Các tin nhắn khác không nhất thiết thuộc lượt chạy này.',
+      unhandled: 'Chưa chạy bộ xử lý',
+      roles: {
+        user: 'Người dùng',
+        assistant: 'Trợ lý',
+        system: 'Hệ thống',
+        tool: 'Công cụ',
+      },
+    },
+    execution: {
+      title: 'Lượt thực thi',
+      subtitle:
+        'Mọi sự kiện đầu vào và lượt thực thi được kích hoạt trên các tác nhân và pipeline.',
+      tabs: { executions: 'Lượt thực thi' },
+      filters: {
+        source: 'Loại',
+        sourceAll: 'Tất cả loại',
+        sourceAgent: 'Tác nhân',
+        sourcePipeline: 'Pipeline',
+        mode: 'Chế độ thực thi',
+        modeAll: 'Thực tế + gỡ lỗi',
+        modeLive: 'Chỉ thực tế',
+        modeDebug: 'Chỉ gỡ lỗi',
+        status: 'Trạng thái',
+        statusAll: 'Tất cả trạng thái',
+      },
+      status: {
+        completed: 'Hoàn thành',
+        failed: 'Thất bại',
+        running: 'Đang chạy',
+        queued: 'Trong hàng đợi',
+        cancelled: 'Đã hủy',
+        ignored: 'Đã bỏ qua',
+      },
+      // prettier-ignore
+      kind: {
+        agent: 'Tác nhân',
+        pipeline: 'Pipeline',
+        processor: 'Bộ xử lý',
+      },
+      columns: {
+        time: 'Thời gian',
+        target: 'Bộ xử lý',
+        status: 'Trạng thái',
+        duration: 'Thời lượng',
+        tokens: 'Token',
+      },
+      debug: 'Gỡ lỗi',
+      empty: 'Không có lượt thực thi trong khoảng này',
+      loading: 'Đang tải lượt thực thi...',
+      triggeredBy: 'Được kích hoạt bởi {{trigger}}',
+      handledByPlugin: 'Được plugin {{plugin}} xử lý',
+      handledByUnknownPlugin: 'Được một plugin không xác định xử lý',
+      filteredByStage: 'Bị pipeline chặn · {{stage}}',
+      filteredByUnknownStage: 'Bị pipeline chặn',
+      filterStages: {
+        BanSessionCheckStage: 'Kiểm soát truy cập',
+        GroupRespondRuleCheckStage: 'Quy tắc phản hồi nhóm',
+        PreContentFilterStage: 'Bộ lọc nội dung / quy tắc bỏ qua',
+        PostContentFilterStage: 'Bộ lọc nội dung đầu ra',
+        RequireRateLimitOccupancy: 'Giới hạn tần suất',
+      },
+      cards: {
+        latencyHint:
+          'P50/P95: khoảng 50%/95% lượt chạy hoàn tất trong thời gian này. Chỉ tính Agent đã hoàn tất gần đây, không gồm thời gian xếp hàng.',
+        tokensHint:
+          'Chỉ cộng mức dùng đã ghi. Tổng có thể thiếu nếu mô hình không trả về dữ liệu sử dụng.',
+        totalExecutions: 'Lượt thực thi',
+        bySource: 'Tác nhân {{agent}} · Pipeline {{pipeline}}',
+        successRate: 'Tỷ lệ thực thi thành công',
+        successRateHint:
+          'Thành công ÷ (thành công + thất bại). Không tính lượt đang chạy, bỏ qua hoặc đã hủy.',
+        denominator:
+          'Thành công {{completed}} trong {{denominator}} lượt đã kết thúc',
+        running: 'Đang chạy',
+        queued: 'Trong hàng đợi',
+        waiting: 'Đang chờ nhập liệu',
+        failed: 'Thất bại',
+        ignored: 'Đã bỏ qua',
+        latency: 'Thời gian thực thi',
+        p50: 'P50',
+        p95: 'P95',
+        sample: 'Mẫu gồm {{count}} lượt thực thi',
+        tokens: 'Token',
+        coverage: 'Có dữ liệu sử dụng cho {{withUsage}}/{{calls}} lệnh gọi',
+        debugRuns: 'Bao gồm {{count}} lượt gỡ lỗi',
+      },
+      detail: {
+        title: 'Lượt thực thi',
+        timeline: 'Dòng thời gian',
+        executionId: 'ID thực thi',
+        eventId: 'Sự kiện',
+        queue: 'Hàng đợi',
+        runner: 'Trình thực thi',
+        created: 'Được tạo',
+        duration: 'Thời lượng',
+        usage: 'Mức sử dụng',
+        noEvents: 'Chưa ghi nhận sự kiện truy vết',
+        query: 'Tin nhắn đầu vào',
+        modelCalls: 'Lệnh gọi mô hình',
+        toolCalls: 'Lệnh gọi công cụ',
+        errors: 'Lỗi',
+        loadError: 'Không thể tải truy vết thực thi',
+        openObject: 'Mở đối tượng',
+        a11yDescription: 'Toàn bộ truy vết của lượt thực thi này',
+      },
+    },
     title: 'Bảng điều khiển',
     description: 'Giám sát hoạt động Bot, cuộc gọi LLM và hiệu suất hệ thống',
     overview: 'Tổng quan',
@@ -2486,6 +3332,9 @@ const viVN = {
       pipeline: 'Pipeline',
       allBots: 'Tất cả Bot',
       selectBot: 'Chọn Bot',
+      processor: 'Bộ xử lý',
+      allProcessors: 'Tất cả bộ xử lý',
+      selectProcessor: 'Chọn bộ xử lý',
       allPipelines: 'Tất cả Pipeline',
       selectPipeline: 'Chọn Pipeline',
       loading: 'Đang tải...',
@@ -2510,6 +3359,15 @@ const viVN = {
       feedback: 'Phản hồi người dùng',
       sessions: 'Phân tích phiên',
       errors: 'Nhật ký lỗi',
+    },
+    pipelineTrace: {
+      received: 'Tin nhắn nhận được',
+      processing: 'Quá trình xử lý',
+      replies: 'Phản hồi',
+      noSteps: 'Không có bản ghi gọi mô hình hoặc công cụ',
+      success: 'Thành công',
+      error: 'Thất bại',
+      pending: 'Đang chờ',
     },
     messageList: {
       timestamp: 'Thời gian',
@@ -2719,9 +3577,9 @@ const viVN = {
     statusDetail: 'Trạng thái',
     pluginDisabled: 'Hệ thống plugin đã tắt',
     boxDisabled:
-      'Sandbox Box đã tắt trong cấu hình — công cụ sandbox, thêm/chỉnh sửa skill và stdio MCP đều không khả dụng',
+      'Sandbox Box đã tắt trong cấu hình — công cụ thực thi và stdio MCP không khả dụng',
     boxUnavailable:
-      'Sandbox Box không khả dụng — công cụ sandbox, thêm/chỉnh sửa skill và stdio MCP đều không khả dụng',
+      'Sandbox Box không khả dụng — công cụ thực thi và stdio MCP không khả dụng',
     boxRequiredHint:
       'Tính năng này cần Box runtime. Hãy bật trong cấu hình (box.enabled = true) và đảm bảo runtime đang hoạt động.',
     boxBackend: 'Backend',
@@ -2735,6 +3593,7 @@ const viVN = {
     nav: {
       workspace: 'Workspace',
       operationTrace: 'Nhật ký',
+      alerts: 'Cảnh báo',
       models: 'Mô hình',
       api: 'API',
       storage: 'Lưu trữ',
@@ -2826,6 +3685,7 @@ const viVN = {
       skill: 'Kỹ năng',
       knowledge_base: 'Cơ sở tri thức',
       mcp_server: 'Máy chủ MCP',
+      content: 'Nội dung chia sẻ',
       runtime: 'Môi trường chạy',
       system: 'Hệ thống',
       resource: 'Tài nguyên',
@@ -2836,6 +3696,8 @@ const viVN = {
       error: 'Thất bại',
     },
     actions: {
+      content_publish: 'Chia sẻ nội dung lên Space',
+      plugin_publish: 'Xuất bản tiện ích lên Space',
       audit_log_view: 'Xem nhật ký thao tác',
       settings_update: 'Cập nhật cài đặt truy vết',
       settings_view: 'Xem cài đặt truy vết',
@@ -3196,6 +4058,8 @@ const viVN = {
         'Dùng trình chạy đã cài hoặc thử lại sau.',
       browseRunners: 'Duyệt tiện ích trình chạy',
       installAndContinue: 'Cài đặt và tiếp tục',
+      autoConfirmPermissions:
+        'Các quyền plugin khai báo sẽ được cấp tự động. Bạn có thể điều chỉnh trong cài đặt plugin.',
       installing: 'Đang cài đặt...',
       useInstalled: 'Dùng trình chạy này',
       installedUnavailable: 'Đã cài, trình chạy không khả dụng',
@@ -3333,14 +4197,263 @@ const viVN = {
     selectFromSidebar: 'Chọn một trang plugin từ thanh bên',
     invalidPage: 'Trang plugin không hợp lệ',
   },
-  beta_banner: {
+  cloud_banner: {
     message:
-      'Môi trường này đang trong giai đoạn thử nghiệm beta. Độ ổn định của dịch vụ không được đảm bảo. Hãy cân nhắc sử dụng',
-    cloud_link: 'LangBot Cloud (môi trường riêng)',
+      'Bạn đang sử dụng LangBot Cloud, dịch vụ được quản lý. Nếu cần tài nguyên riêng và hạn mức cao hơn, hãy cân nhắc',
+    dedicated_link: 'LangBot Cloud (môi trường riêng)',
+    cta_dedicated: 'xem các gói môi trường riêng',
     or: 'hoặc',
-    oss_link: 'phiên bản mã nguồn mở tự lưu trữ',
+    self_hosted_link: 'phiên bản mã nguồn mở tự lưu trữ',
     period: '.',
     dismiss: 'Đóng',
+  },
+  sensitiveTools: {
+    badge: '{{count}} công cụ nhạy cảm',
+    title: 'Đã bật công cụ nhạy cảm hoặc rủi ro cao',
+    description:
+      'Nếu bot được liên kết phục vụ người dùng không đáng tin, hãy tắt các công cụ tương ứng tại trang "{{page}}".',
+    list: 'Bao gồm: {{items}}',
+    listMore: 'Bao gồm: {{items}} và các mục khác ({{count}} mục)',
+    listSeparator: ', ',
+  },
+  workspaceOperations: {
+    title: 'Thao tác không gian làm việc',
+    description:
+      'Cấu hình các thao tác API hợp nhất của không gian làm việc mà bộ xử lý này được gọi. Đánh dấu nghĩa là cấp quyền.',
+    scopeHint:
+      'Cho phép bộ xử lý này gọi các thao tác API hợp nhất của không gian làm việc LangBot bằng danh tính của chính nó.',
+    searchPlaceholder: 'Tìm theo tên, ID hoặc mô tả...',
+    selectAll: 'Chọn tất cả',
+    deselectAll: 'Bỏ chọn tất cả',
+    selectedCount: 'Đã chọn {{count}}',
+    totalCount: 'Tổng {{count}}',
+    noOperations: 'Không có thao tác không gian làm việc khả dụng',
+    noSearchResults: 'Không tìm thấy thao tác phù hợp',
+    riskRead: 'Đọc',
+    riskWrite: 'Ghi',
+    riskDangerous: 'Nguy hiểm',
+    requiresPermission: 'Cần quyền: {{permission}}',
+    dangerousConfirmTitle: 'Có thao tác không gian làm việc nguy hiểm',
+    dangerousConfirmDescription:
+      'Bộ xử lý này phục vụ người dùng nhắn tin; bất kỳ ai trò chuyện được với bot đều có thể kích hoạt các thao tác này. Bạn có chắc muốn lưu?',
+    dangerousConfirmAction: 'Xác nhận lưu',
+    dangerousConfirmCancel: 'Hủy',
+    saveWorkspaceOperations: 'Lưu thao tác',
+    saveSuccess: 'Đã lưu thao tác không gian làm việc',
+    saveFailed: 'Lưu thao tác không gian làm việc thất bại',
+    configuredCount: 'Đã cấu hình {{count}} thao tác',
+    expandDomain: 'Mở rộng',
+    collapseDomain: 'Thu gọn',
+    ungrantableRemoved:
+      'Một số thao tác không được chọn hoặc đã bị gỡ do thiếu quyền.',
+  },
+  alerts: {
+    enableHint: 'Bật cảnh báo',
+    cta: {
+      title: 'Đăng nhập bằng tài khoản LangBot để gửi email cảnh báo miễn phí',
+      pointFree: 'Gửi chính thức miễn phí, 20 thư mỗi ngày',
+      pointNoSetup: 'Không cần cấu hình SMTP hay Resend',
+      pointPrivate: 'Chỉ gửi tới địa chỉ tài khoản LangBot của bạn',
+      selfHosted: 'Muốn dùng máy chủ email riêng?',
+      selfHostedLink: 'Cấu hình SMTP hoặc Resend trong config.yaml →',
+    },
+    title: 'Cảnh báo',
+    description:
+      'Thông báo qua email và webhook khi bot, Pipeline hoặc mô hình liên tục lỗi',
+    enabled: 'Bật cảnh báo',
+    firingCount: '{{count}} đang cảnh báo',
+    allClear: 'Mọi thứ ổn',
+    sendTest: 'Gửi thử',
+    saveBeforeTest: 'Hãy lưu thay đổi trước khi gửi thử',
+    saved: 'Đã lưu cài đặt cảnh báo',
+    saveFailed: 'Không lưu được cài đặt cảnh báo: {{error}}',
+    loadFailed: 'Không tải được cảnh báo: {{error}}',
+    testSent: 'Đã gửi cảnh báo thử tới {{count}} đích',
+    testPartial: 'Gửi thử có lỗi; xem nhật ký gửi',
+    testNoChannel: 'Chưa có kênh nào; hãy chọn kênh email hoặc webhook',
+    testFailed: 'Không gửi được cảnh báo thử: {{error}}',
+    disabledInstanceWide:
+      'Cảnh báo đã bị tắt cho phiên bản này (alerts.enabled trong config.yaml).',
+    emailTitle: 'Email',
+    emailDescription: 'Hiện gửi qua: {{channel}}',
+    recipients: 'Người nhận (chủ sở hữu và quản trị viên Workspace)',
+    noRecipients: 'Không có chủ sở hữu hoặc quản trị viên nào có email.',
+    extraRecipients:
+      'Người nhận bổ sung (chỉ dịch vụ email của bạn, tối đa 10)',
+    spaceRecipientsHint:
+      'LangBot Space chỉ gửi cho quản trị viên đăng nhập bằng LangBot Space, tới địa chỉ Space của chính họ. Hạn mức miễn phí: 20 thư/ngày, 200 thư/tháng mỗi tài khoản.',
+    channel: {
+      auto: 'Tự động',
+      autoDescription:
+        'Dùng dịch vụ email của bạn nếu đã cấu hình, nếu không dùng LangBot Space',
+      instance: 'Dịch vụ email của bạn',
+      instanceConfigured: 'Đã cấu hình {{provider}} trong config.yaml',
+      instanceMissing:
+        'Chưa cấu hình. Đặt mục email (SMTP hoặc Resend) trong config.yaml',
+      space: 'LangBot Space (chính thức)',
+      spaceAvailable: 'Gửi chính thức miễn phí tới {{accounts}}',
+      spaceMissing: 'Đăng nhập bằng tài khoản LangBot Space để sử dụng',
+      off: 'Tắt',
+      offDescription: 'Chỉ hiển thị tại đây và gửi webhook',
+      none: 'không gửi (không có kênh khả dụng)',
+      ready: 'Sẵn sàng',
+      unavailable: 'Không khả dụng',
+    },
+    rulesTitle: 'Quy tắc',
+    rulesDescription:
+      'Cảnh báo được mở khi số lỗi trong khoảng thời gian đạt ngưỡng.',
+    minutesWithin: 'phút, ít nhất',
+    failuresOrMore: 'lỗi',
+    notifyResolved: 'Thông báo khi cảnh báo phục hồi',
+    throttleHint:
+      'Mỗi cảnh báo được gửi một lần khi mở, sau đó nhắc lại sau 6 giờ, 12 giờ và mỗi 24 giờ nếu vẫn lỗi.',
+    rule: {
+      pipeline_failures: 'Lỗi Pipeline',
+      pipeline_failuresDescription: 'Lỗi xử lý trong một Pipeline',
+      model_failures: 'Lỗi gọi mô hình',
+      model_failuresDescription: 'Yêu cầu thất bại tới một mô hình',
+      bot_offline: 'Bot dừng do lỗi',
+      bot_offlineDescription: 'Cảnh báo ngay; phục hồi khi bot khởi động lại',
+    },
+    webhooksTitle: 'Webhook',
+    webhooksDescription:
+      'Webhook được chọn sẽ nhận sự kiện alert.fired, alert.reminder và alert.resolved.',
+    noWebhooks: 'Chưa có webhook. Thêm trong Cài đặt → API.',
+    webhookDisabled: 'Đã tắt',
+    incidentsTitle: 'Cảnh báo gần đây',
+    noIncidents: 'Chưa có cảnh báo.',
+    incidentMeta: '{{count}} lỗi · mở lúc {{time}}',
+    state: {
+      firing: 'Đang cảnh báo',
+      resolved: 'Đã phục hồi',
+    },
+    deliveriesTitle: 'Nhật ký gửi',
+    noDeliveries: 'Chưa gửi gì.',
+    kind: {
+      fired: 'Cảnh báo',
+      reminder: 'Nhắc lại',
+      resolved: 'Phục hồi',
+      test: 'Thử',
+    },
+    via: {
+      email: 'Email',
+      space: 'LangBot Space',
+      webhook: 'Webhook',
+    },
+    status: {
+      sent: 'Đã gửi',
+      failed: 'Thất bại',
+      rate_limited: 'Hết hạn mức',
+      skipped: 'Bỏ qua',
+    },
+  },
+  promptLibrary: {
+    emptyTitle: 'Mẫu đang được chuẩn bị ✨',
+    emptyBody: 'Bấm “Chia sẻ” cạnh prompt và trở thành người đầu tiên nhé!',
+    bindToFavorite: 'Liên kết tài khoản để yêu thích',
+    originalLanguage: 'bản gốc',
+    open: 'Thư viện prompt',
+    title: 'Thư viện prompt',
+    description:
+      'Tìm prompt đã được duyệt trên LangBot Space. Nhớ lưu cấu hình sau khi áp dụng.',
+    kindMessaging: 'Hội thoại',
+    kindAgent: 'Agent',
+    searchPlaceholder: 'Tìm theo tên, mô tả, thẻ hoặc nội dung',
+    tabAll: 'Tất cả',
+    tabFavorites: 'Yêu thích',
+    favoritesNeedAccount: 'Liên kết LangBot Account để dùng mục yêu thích',
+    otherKindHint:
+      'Bạn đang xem prompt {{kind}}, được viết cho mục đích khác. Hãy kiểm tra trước khi áp dụng.',
+    noFavorites: 'Chưa có prompt yêu thích',
+    empty: 'Không có prompt phù hợp',
+    loadFailed: 'Tải thư viện prompt thất bại',
+    favoriteFailed: 'Không thể cập nhật yêu thích',
+    applied: 'Đã áp dụng. Lưu để có hiệu lực.',
+    uses: '{{count}} lượt dùng',
+    favorite: 'Yêu thích',
+    variablesHint: 'Biến:',
+    append: 'Thêm vào prompt hiện tại',
+    replace: 'Thay prompt hiện tại',
+    replaceTitle: 'Thay prompt hiện tại?',
+    replaceDescription:
+      'Prompt hiện tại sẽ bị ghi đè (vẫn có thể hủy trước khi lưu).',
+    selectHint: 'Chọn một prompt bên trái để xem',
+  },
+  spaceShare: {
+    modeNew: 'Đăng mới',
+    modeUpdate: 'Cập nhật mục có sẵn ({{count}})',
+    pickExisting: 'Chọn mục cần cập nhật',
+    unlisted: 'đã ẩn',
+    identifierHint: 'Chữ thường, số, - hoặc _. Không đổi được sau khi đăng.',
+    bindAccount: 'Liên kết tài khoản LangBot',
+    autoTranslateNotice:
+      'Chỉ cần viết bằng một ngôn ngữ. Chúng tôi sẽ tự động dịch sang các ngôn ngữ khác sau khi tải lên.',
+    shareShort: 'Chia sẻ',
+    shareToSpace: 'Chia sẻ lên Space',
+    findingsBlockTitle:
+      'Phát hiện thông tin xác thực, hãy xóa trước khi chia sẻ',
+    findingsWarnTitle: 'Có dữ liệu cá nhân hoặc nội bộ',
+    submitFailed: 'Gửi thất bại',
+    submittedTitle: 'Đã gửi duyệt',
+    submittedAgentReview:
+      '{{id}} đang được duyệt tự động và sẽ xuất hiện trên LangBot Space khi được duyệt.',
+    submittedManualReview: '{{id}} đang chờ duyệt thủ công.',
+    viewProgress: 'Xem tiến độ trên LangBot Space',
+    needAccountTitle: 'Cần LangBot Account',
+    needAccount:
+      'Liên kết tài khoản LangBot để đóng góp. Nội dung sẽ được đăng dưới hồ sơ nhà sáng tạo của tài khoản đó trên LangBot Space.',
+    needCreatorTitle: 'Chưa có hồ sơ nhà sáng tạo',
+    needCreator:
+      'Thiết lập hồ sơ nhà sáng tạo trên LangBot Space để đóng góp. Chỉ cần làm một lần.',
+    openCreator: 'Thiết lập hồ sơ nhà sáng tạo',
+    acknowledgeWarnings: 'Tôi xác nhận thông tin này có thể công khai',
+    displayName: 'Tên hiển thị',
+    identifier: 'Định danh',
+    descriptionLabel: 'Mô tả',
+    changelog: 'Nhật ký thay đổi',
+    reviewNotice:
+      'Nội dung được duyệt trước khi công khai trên LangBot Space. Chia sẻ lại cùng tên sẽ tạo phiên bản mới.',
+    submit: 'Gửi duyệt',
+    promptTitle: 'Chia sẻ prompt lên LangBot Space',
+    promptDescriptionMessaging:
+      'Đăng dưới dạng prompt hội thoại để người khác dùng trong cấu hình pipeline.',
+    promptDescriptionAgent:
+      'Đăng dưới dạng prompt Agent để người khác dùng trong cấu hình Agent.',
+    detectedVariables: 'Biến phát hiện:',
+    skillTitle: 'Chia sẻ Skill lên LangBot Space',
+    skillDescription:
+      'Tải gói Skill hiện tại. Quá trình duyệt kiểm tra script và yêu cầu ra ngoài.',
+    packageFiles: 'Tệp sẽ gửi',
+    mcpTitle: 'Chia sẻ máy chủ MCP lên LangBot Space',
+    mcpDescription:
+      'Chỉ hỗ trợ MCP từ xa. Thông tin xác thực không được tải lên mà được thay bằng biến giữ chỗ.',
+    mcpPublishedConfig: 'Cấu hình sẽ đăng',
+    mcpToolsCount: 'Kèm {{count}} công cụ',
+    mcpRedactedTitle: 'Đã xóa {{count}} thông tin xác thực',
+    mcpRedactedHint:
+      'Người cài sẽ được yêu cầu nhập các giá trị này. Đặt nhãn dễ hiểu:',
+    mcpInputLabelPlaceholder: 'Nhãn (mặc định: {{label}})',
+    mcpNoCredentials:
+      'Không có thông tin xác thực; cấu hình được đăng nguyên trạng.',
+    mcpNeedsConnection:
+      'Hãy kết nối thành công trước; danh sách công cụ sẽ được đăng kèm',
+    mcpFillInputsTitle: 'Điền thông tin xác thực trước khi bật',
+    mcpFillInputs:
+      'MCP cộng đồng này cần giá trị của bạn cho {{names}}. Thay thế, lưu rồi bật.',
+    finding: {
+      openai_key: 'Khóa OpenAI',
+      anthropic_key: 'Khóa Anthropic',
+      github_token: 'Token GitHub',
+      slack_token: 'Token Slack',
+      aws_access_key: 'Khóa AWS',
+      google_api_key: 'Khóa Google API',
+      private_key: 'Khóa riêng',
+      jwt: 'Token JWT',
+      langbot_key: 'Khóa LangBot',
+      email: 'Địa chỉ email',
+      phone: 'Số điện thoại',
+      private_url: 'URL nội bộ',
+    },
   },
 };
 export default viVN;

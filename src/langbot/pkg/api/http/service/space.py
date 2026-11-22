@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 
 from langbot.pkg.utils import httpclient
+import aiohttp
 import typing
 import datetime
 import time
@@ -17,6 +18,16 @@ from ....cloud.model_catalog import LANGBOT_MODELS_PROVIDER_REQUESTER
 
 
 _CREDITS_CACHE_TTL_SECONDS = 60
+
+
+class SpaceAPIError(Exception):
+    """A LangBot Space API call failed; ``status`` is the HTTP status."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 _CREDITS_CACHE_MAX_ENTRIES = 4096
 
 
@@ -193,6 +204,53 @@ class SpaceService:
                 raise ValueError(f'Failed to get user info: {data.get("msg")}')
             return data.get('data', {})
 
+    async def send_alert_email(self, access_token: str, payload: dict) -> tuple[int, dict]:
+        """Ask LangBot Space to email an alert to the token's own verified address.
+
+        Space chooses the recipient and renders the message from the structured
+        payload; Core cannot supply an address or free-form body. Returns the HTTP
+        status and the decoded response data (empty on non-JSON bodies).
+        """
+        space_url = self._get_space_config()['url'].rstrip('/')
+        session = httpclient.get_session()
+        async with session.post(
+            f'{space_url}/api/v1/notifications/alert-email',
+            json=payload,
+            headers={'Authorization': f'Bearer {access_token}'},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as response:
+            try:
+                body = await httpclient.read_json_limited(response)
+            except Exception:
+                body = {}
+        if not isinstance(body, dict):
+            body = {}
+        data = body.get('data') if isinstance(body.get('data'), dict) else {}
+        return response.status, {**data, 'msg': str(body.get('msg') or '')[:200]}
+
+    async def get_dedicated_membership(self, access_token: str) -> typing.Dict:
+        """Ask Space which role the token's account holds on this dedicated instance.
+
+        Space answers with an empty role for instance IDs that are not dedicated
+        Cloud instances, so this is harmless anywhere else.
+        """
+        from langbot.pkg.utils import constants
+
+        space_url = self._get_space_config()['url']
+        session = httpclient.get_session()
+        async with session.get(
+            f'{space_url}/api/v1/cloud/dedicated/membership',
+            params={'instance_id': constants.instance_id},
+            headers={'Authorization': f'Bearer {access_token}'},
+        ) as response:
+            if response.status != 200:
+                error = await httpclient.read_text_limited(response)
+                raise ValueError(f'Failed to get dedicated membership: {error}')
+            data = await httpclient.read_json_limited(response)
+            if data.get('code') != 0:
+                raise ValueError(f'Failed to get dedicated membership: {data.get("msg")}')
+            return data.get('data', {}) or {}
+
     # === API calls with token validation ===
 
     async def get_user_info(self, user_email: str) -> typing.Dict | None:
@@ -201,6 +259,33 @@ class SpaceService:
         if not access_token:
             return None
         return await self.get_user_info_raw(access_token)
+
+    async def get_creator_profile(self, access_token: str) -> typing.Tuple[bool, dict | None]:
+        """Fetch the authenticated user's Creator Profile from Space.
+
+        Returns (is_token_valid, creator_dict_or_none).
+        """
+        if not access_token:
+            return False, None
+        space_url = self._get_space_config()['url'].rstrip('/')
+        session = httpclient.get_session()
+        try:
+            async with session.get(
+                f'{space_url}/api/v1/creator/profile',
+                headers={'Authorization': f'Bearer {access_token}'},
+            ) as response:
+                if response.status == 401:
+                    return False, None
+                if response.status != 200:
+                    return True, None
+                payload = await httpclient.read_json_limited(response)
+                if payload.get('code') != 0:
+                    return True, None
+                data = payload.get('data') or {}
+                return True, data.get('creator')
+        except Exception:
+            self.ap.logger.exception('Failed to fetch creator profile from Space')
+            return True, None
 
     async def get_credits(self, user_email: str, force_refresh: bool = False) -> int | None:
         """Get Space credits for user with caching (60s TTL)"""
@@ -285,12 +370,137 @@ class SpaceService:
                     models.append(selection)
             return [SpaceModelSelection.model_validate(model) for model in models]
 
+    # === Plugin publishing ===
+
+    async def publish_plugin(
+        self,
+        access_token: str,
+        package_bytes: bytes,
+        *,
+        filename: str = 'plugin.lbpkg',
+        changelog: str = '',
+    ) -> typing.Dict:
+        """Publish a built ``.lbpkg`` to the LangBot Space marketplace.
+
+        Mirrors the CLI's ``POST /api/v1/marketplace/plugins/publish`` contract
+        (multipart ``file`` + ``changelog``). The caller supplies a valid Space
+        access token resolved from the Workspace owner.
+        """
+
+        if not access_token:
+            raise ValueError('A LangBot Space account is required to publish plugins')
+
+        space_url = self._get_space_config()['url'].rstrip('/')
+
+        form = aiohttp.FormData()
+        form.add_field('changelog', changelog or '')
+        form.add_field(
+            'file',
+            package_bytes,
+            filename=filename,
+            content_type='application/octet-stream',
+        )
+
+        session = httpclient.get_session()
+        async with session.post(
+            f'{space_url}/api/v1/marketplace/plugins/publish',
+            data=form,
+            headers={'Authorization': f'Bearer {access_token}'},
+        ) as response:
+            if response.status != 200:
+                try:
+                    payload = await httpclient.read_json_limited(response)
+                    msg = payload.get('msg') or payload.get('message') or ''
+                except Exception:
+                    msg = ''
+                if not msg:
+                    msg = await httpclient.read_text_limited(response)
+                raise ValueError(msg or 'Failed to publish plugin')
+            data = await httpclient.read_json_limited(response)
+            if data.get('code') != 0:
+                raise ValueError(data.get('msg') or 'Failed to publish plugin')
+            return data.get('data', {})
+
+    async def space_api(
+        self,
+        method: str,
+        path: str,
+        *,
+        access_token: str | None = None,
+        params: dict | None = None,
+        json_body: typing.Any = None,
+        form: aiohttp.FormData | None = None,
+    ) -> typing.Any:
+        """Call a LangBot Space JSON API and return its ``data`` (LANG-439).
+
+        Raises ``SpaceAPIError`` with Space's message and HTTP status so the
+        caller can surface it to the WebUI unchanged.
+        """
+        space_url = self._get_space_config()['url'].rstrip('/')
+        headers = {'Authorization': f'Bearer {access_token}'} if access_token else {}
+        session = httpclient.get_session()
+        kwargs: dict[str, typing.Any] = {'headers': headers}
+        if params:
+            kwargs['params'] = {k: v for k, v in params.items() if v not in (None, '')}
+        if json_body is not None:
+            kwargs['json'] = json_body
+        if form is not None:
+            kwargs['data'] = form
+        async with session.request(method, f'{space_url}{path}', **kwargs) as response:
+            try:
+                payload = await httpclient.read_json_limited(response)
+            except Exception:
+                payload = {}
+            if response.status != 200 or not isinstance(payload, dict) or payload.get('code') != 0:
+                msg = ''
+                if isinstance(payload, dict):
+                    msg = payload.get('msg') or payload.get('message') or ''
+                raise SpaceAPIError(response.status, msg or f'LangBot Space returned HTTP {response.status}')
+            return payload.get('data')
+
+    async def submit_content(
+        self,
+        access_token: str,
+        item_type: str,
+        metadata: dict,
+        *,
+        file_bytes: bytes | None = None,
+        filename: str = 'artifact.zip',
+    ) -> dict:
+        """Submit a skill / remote MCP / prompt for Space review (LANG-439)."""
+        import json as _json
+
+        form = aiohttp.FormData()
+        form.add_field('item_type', item_type)
+        form.add_field('metadata', _json.dumps(metadata, ensure_ascii=False))
+        if file_bytes is not None:
+            form.add_field('file', file_bytes, filename=filename, content_type='application/zip')
+        return await self.space_api(
+            'POST', '/api/v1/marketplace/content-submissions', access_token=access_token, form=form
+        )
+
     async def get_recommended_chat_model(self, context: typing.Any) -> dict:
         """Resolve Space's first ranked chat model to a local Workspace model."""
         selection = await self.get_model_selection('chat')
         if not selection:
             raise ValueError('No recommended chat model is available')
-        recommended = selection[0]
+        return await self._resolve_recommended_model(context, selection[0])
+
+    async def get_recommended_assistant_model(self, context: typing.Any) -> dict:
+        """Resolve the dedicated, health-filtered assistant recommendation without fallback."""
+        space_url = self._get_space_config()['url']
+        session = httpclient.get_session()
+        async with session.get(f'{space_url}/api/v1/models/assistant/recommendation') as response:
+            if response.status != 200:
+                raise ValueError('No recommended assistant model is available')
+            payload = await httpclient.read_json_limited(response)
+            if payload.get('code') != 0:
+                raise ValueError('No recommended assistant model is available')
+            recommended = SpaceModel.model_validate(payload['data']['model'])
+        return await self._resolve_recommended_model(context, recommended)
+
+    async def _resolve_recommended_model(self, context: typing.Any, recommended: SpaceModel) -> dict:
+        """Map a public catalog model to this Workspace, refreshing the catalog once."""
 
         async def find_local_model():
             result = await self.ap.persistence_mgr.execute_async(

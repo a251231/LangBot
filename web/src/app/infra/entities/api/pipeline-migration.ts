@@ -4,6 +4,7 @@ export type PipelineMigrationState =
   | 'blocked'
   | 'already_current'
   | 'not_legacy'
+  | 'unsupported_runner'
   | 'activation_pending';
 
 export interface PipelineMigrationIssue {
@@ -65,6 +66,7 @@ export interface MigrationInstallation {
   status: 'installing' | 'completed' | 'failed';
   stage: string;
   code: string | null;
+  diagnostic?: { kind: string; http_status?: number };
   progress_percent?: number;
   download_current?: number;
   download_total?: number;

@@ -1,102 +1,71 @@
-"""Per-query telemetry feature counters.
-
-Collects anonymous, content-free usage signals (tool call counts, knowledge
-base usage, sandbox executions, ...) into ``query.variables`` during query
-processing. The chat handler reads the accumulated dict when building the
-telemetry payload and ships it as the ``features`` JSON object.
-
-Every helper here is defensive: telemetry must NEVER break the pipeline, so
-all mutations are wrapped and failures are silently ignored.
-"""
-
 from __future__ import annotations
 
-import typing
+from . import trace
 
-if typing.TYPE_CHECKING:
-    import langbot_plugin.api.entities.builtin.pipeline.query as pipeline_query
+MAX_COUNTER = 65535
+MAX_MODEL_BYTES = 128
+COUNTERS = frozenset(
+    {
+        ('tool_calls', 'native'),
+        ('tool_calls', 'plugin'),
+        ('tool_calls', 'mcp'),
+        ('tool_calls', 'skill'),
+        ('sandbox', 'execs'),
+        ('sandbox', 'errors'),
+        ('kb', 'retrievals'),
+        ('activated_skills', None),
+        ('llm_calls', None),
+    }
+)
 
 
-FEATURES_KEY = '_telemetry_features'
+def bounded_model_name(value: str) -> str:
+    return value.encode('utf-8')[:MAX_MODEL_BYTES].decode('utf-8', errors='ignore')
 
 
-def get_features(query: pipeline_query.Query) -> dict:
-    """Return the mutable features dict for this query, creating it if needed."""
+def _state(ap, query=None, execution_id: str = ''):
+    from .execution import _execution_counters, current_execution_id
+
+    counters = _execution_counters(ap)
+    if counters is None or not counters._enabled() or trace.reporting_suppressed():
+        return None
+    state = trace.current()
+    if state is None:
+        session = getattr(query, '_agent_run_session', None)
+        run_id = session.get('run_id', '') if isinstance(session, dict) else ''
+        lookup = execution_id or run_id or current_execution_id() or getattr(query, 'query_uuid', '')
+        if isinstance(lookup, str) and lookup:
+            state = counters._resolve(lookup)
+    if state is None or state.closed or not state.reportable:
+        return None
+    counters.configure(state)
+    return state if state.mode != 'off' else None
+
+
+def _increment(state, group: str, key: str | None) -> None:
+    target = state.features if key is None else state.features.setdefault(group, {})
+    name = group if key is None else key
+    target[name] = min(target.get(name, 0) + 1, MAX_COUNTER)
+
+
+def increment(ap, group: str, key: str | None = None, *, query=None, execution_id: str = '') -> None:
     try:
-        return query.variables.setdefault(FEATURES_KEY, {})
-    except Exception:
-        return {}
-
-
-def increment(query: pipeline_query.Query, group: str, key: str | None = None, amount: int = 1) -> None:
-    """Increment a counter.
-
-    ``increment(q, 'sandbox', 'execs')`` -> features['sandbox']['execs'] += 1
-    ``increment(q, 'tool_call_rounds')`` -> features['tool_call_rounds'] += 1
-    """
-    try:
-        features = get_features(query)
-        if key is None:
-            features[group] = int(features.get(group, 0)) + amount
-        else:
-            nested = features.setdefault(group, {})
-            if isinstance(nested, dict):
-                nested[key] = int(nested.get(key, 0)) + amount
-    except Exception:
-        pass
-
-
-def set_value(query: pipeline_query.Query, group: str, value: typing.Any) -> None:
-    """Set a feature value (overwrites)."""
-    try:
-        get_features(query)[group] = value
-    except Exception:
-        pass
-
-
-def collect_features(query: pipeline_query.Query) -> dict:
-    """Build the final ``features`` object for the telemetry payload.
-
-    Combines the counters accumulated during processing with end-of-query
-    snapshots (activated skills, bound MCP servers). Returns a plain dict
-    that must be JSON-serializable; non-serializable values are dropped.
-    """
-    features: dict = {}
-    try:
-        accumulated = query.variables.get(FEATURES_KEY)
-        if isinstance(accumulated, dict):
-            features.update(accumulated)
-    except Exception:
-        pass
-
-    # Activated skills (names only, registered by the activate tool)
-    try:
-        activated = query.variables.get('_activated_skills', {})
-        if isinstance(activated, dict) and activated:
-            features['activated_skills'] = sorted(activated.keys())
+        if (group, key) not in COUNTERS:
+            return
+        state = _state(ap, query, execution_id)
+        if state is not None:
+            _increment(state, group, key)
     except Exception:
         pass
 
-    # MCP servers bound to the pipeline (names only; None means "all enabled")
+
+def note_llm(ap, model, query=None) -> None:
     try:
-        bound_mcp = query.variables.get('_pipeline_bound_mcp_servers', None)
-        if bound_mcp is not None:
-            features['mcp_servers'] = list(bound_mcp)
+        state = _state(ap, query)
+        if state is None:
+            return
+        if not state.model_name:
+            state.model_name = bounded_model_name(model.model_entity.name or '')
+        _increment(state, 'llm_calls', None)
     except Exception:
         pass
-
-    # Drop anything that is not JSON-serializable
-    import json
-
-    try:
-        json.dumps(features)
-        return features
-    except Exception:
-        safe: dict = {}
-        for k, v in features.items():
-            try:
-                json.dumps({k: v})
-                safe[k] = v
-            except Exception:
-                continue
-        return safe

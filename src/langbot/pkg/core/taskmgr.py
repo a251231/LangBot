@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from ..i18n import t
+
 import asyncio
 import json
 import typing
 import datetime
 import time
 
-from . import app
 from . import entities as core_entities
 from .errors import TaskCapacityError
 from .task_boundary import create_detached_task
+
+if typing.TYPE_CHECKING:
+    from . import app
 
 
 class TaskContext:
@@ -202,7 +206,7 @@ class TaskWrapper:
         """Return the stable task projection exposed to API-key callers."""
         if self.task.cancelled():
             status = 'cancelled'
-            error = {'type': 'task_cancelled', 'message': 'Task was cancelled'}
+            error = {'type': 'task_cancelled', 'message': t('Task was cancelled')}
             result = None
         elif not self.task.done():
             status = 'running'
@@ -212,7 +216,14 @@ class TaskWrapper:
             exception = self.assume_exception()
             if exception is not None:
                 status = 'failed'
-                error = {'type': 'task_failed', 'message': 'Task execution failed'}
+                error = {'type': 'task_failed', 'message': t('Task execution failed')}
+                from ..api.application.contracts import ApplicationAPIException
+                from ..api.authz import PermissionDeniedError
+
+                if isinstance(exception, ApplicationAPIException):
+                    error['code'] = exception.error.code
+                elif isinstance(exception, PermissionDeniedError):
+                    error['code'] = exception.error_code
                 result = None
             else:
                 status = 'succeeded'
@@ -223,7 +234,7 @@ class TaskWrapper:
                 except (TypeError, ValueError):
                     result = None
 
-        return {
+        projection = {
             'id': self.id,
             'task_type': self.task_type,
             'kind': self.kind,
@@ -232,6 +243,9 @@ class TaskWrapper:
             'result': result,
             'created_at': self.created_at,
         }
+        if self.task_context.metadata.get('pending_permission_confirmation'):
+            projection['pending_permission_confirmation'] = True
+        return projection
 
     def cancel(self):
         self.task.cancel()

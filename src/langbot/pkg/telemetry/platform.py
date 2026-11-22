@@ -27,9 +27,11 @@ def result_failure_detail(result) -> str:
 
 
 def result_outcome(result):
-    # Empty returns do not prove a remote operation succeeded.
+    # Adapters report a failed platform call by raising or by an error
+    # envelope. Most reply/send implementations return nothing on success, so
+    # a call that returned None without raising completed.
     if result is None:
-        return 'unknown'
+        return 'success'
     if result is False:
         return 'failed'
     raw = getattr(result, 'raw', result)
@@ -117,6 +119,7 @@ def observe_adapter(ap, context, adapter):
 
             return wrapped
 
-        # Instrumentation wraps methods, not Pydantic configuration fields.
+        # Adapters are Pydantic models: method instrumentation is not a model
+        # field assignment. Keep wrappers instance-local, never on the class.
         object.__setattr__(adapter, name, make_wrapper(original, name))
     object.__setattr__(adapter, '_execution_observed', True)

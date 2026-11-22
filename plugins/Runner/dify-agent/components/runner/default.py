@@ -1,0 +1,1597 @@
+"""Dify Agent default runner implementation (Phase 1).
+
+Real Dify Service API integration supporting chat, agent, and workflow app types.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import logging
+import mimetypes
+import os
+import re
+import typing
+import uuid
+
+from langbot_plugin.api.definition.components.runner.runner import Runner
+from langbot_plugin.api.entities.builtin.provider.message import MessageChunk
+from langbot_plugin.api.entities.builtin.runner import (
+    InteractionAction,
+    InteractionField,
+    InteractionNotSupportedError,
+    InteractionOption,
+    InteractionRequest,
+    InteractionSubmission,
+    RunnerContext,
+    RunnerResult,
+)
+from pkg.asset_gateway import register_assets
+from pkg.dify_client import (
+    AsyncDifyClient,
+    DifyAPIError,
+    DifyConfigError,
+    extract_text_from_output,
+    extract_workflow_outputs,
+    process_thinking_content,
+)
+from pkg.http_limits import MAX_STREAM_BUDGET_MB
+from pkg.scoped_identity import scoped_identity
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_LANGBOT_ASSET_TOKEN_INPUT = "langbot_asset_run_token"
+
+# Dify binds every conversation to the end user that created it, while one
+# LangBot conversation can carry several provider users (e.g. runs without a
+# Host session id, or state written by older versions). Dify conversation
+# ids are therefore kept per provider user.
+LEGACY_CONVERSATION_ID_KEY = "external.conversation_id"
+CONVERSATION_IDS_KEY = "external.conversation_ids"
+MAX_CONVERSATION_IDS = 256
+
+
+def _to_bool(value: typing.Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _to_int(value: typing.Any, default: int) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: typing.Any, default: float) -> float:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_adapter_params(ctx: RunnerContext) -> dict[str, typing.Any]:
+    """Read single-run business params from adapter.extra.params."""
+    if ctx.adapter is None:
+        return {}
+    params = (ctx.adapter.extra or {}).get("params")
+    return dict(params) if isinstance(params, dict) else {}
+
+
+def _is_uuid_string(value: typing.Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _conversation_owner(user: str) -> str:
+    return hashlib.sha256(user.encode("utf-8")).hexdigest()[:32]
+
+
+def _shared_group_session(ctx: typing.Any) -> str | None:
+    """Return the Host session id when the whole group shares one conversation.
+
+    The Host sets `session_id` to `group_<group id>` when a pipeline shares
+    context across the group, `groupmember_...` when members are isolated and
+    `person_<id>` for private chats.
+    """
+    session_id = getattr(getattr(ctx, "conversation", None), "session_id", None)
+    if isinstance(session_id, str) and session_id.startswith("group_") and len(session_id) > len("group_"):
+        return session_id
+    return None
+
+
+def _is_conversation_not_found(error: DifyAPIError) -> bool:
+    return error.code == "dify.http_error" and " 404 " in error.message and "Conversation Not Exists" in error.message
+
+
+def _attachment_get(attachment: typing.Any, key: str, default: typing.Any = None) -> typing.Any:
+    if isinstance(attachment, dict):
+        return attachment.get(key, default)
+    return getattr(attachment, key, default)
+
+
+def _content_get(content: typing.Any, key: str, default: typing.Any = None) -> typing.Any:
+    if isinstance(content, dict):
+        return content.get(key, default)
+    return getattr(content, key, default)
+
+
+def _content_type_from_base64(value: typing.Any, default: str) -> str:
+    if isinstance(value, str) and value.startswith("data:") and ";base64," in value:
+        return value[5 : value.find(";base64,")] or default
+    return default
+
+
+def _decode_content(value: typing.Any) -> bytes | None:
+    max_bytes = 10 * 1024 * 1024
+
+    def check_size(size: int) -> None:
+        if size > max_bytes:
+            raise DifyAPIError("Input attachment exceeds the 10 MiB size limit", code="dify.input_error")
+
+    if isinstance(value, (bytes, bytearray)):
+        check_size(len(value))
+        return bytes(value)
+    if isinstance(value, str):
+        start = value.find(",") + 1 if value.startswith("data:") else 0
+        # Check before slicing or decoding: decoding itself allocates memory.
+        if len(value) - start > 4 * ((max_bytes + 2) // 3) + 4:
+            check_size(max_bytes + 1)
+        payload = value[start:]
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+        except (ValueError, base64.binascii.Error):
+            # Retain the existing plain-text attachment fallback, also bounded.
+            check_size(len(value))
+            decoded = value.encode("utf-8")
+        check_size(len(decoded))
+        return decoded
+    return None
+
+
+def _host_reads_attachments(ctx: typing.Any) -> bool:
+    """Whether the Host serves attachment bytes by ref (SDK and Host support both)."""
+    available_apis = getattr(getattr(ctx, "context", None), "available_apis", None)
+    return (
+        hasattr(ctx, "read_input_attachment")
+        and bool(getattr(available_apis, "input_attachments", False))
+        and any(_attachment_get(attachment, "ref") for attachment in ctx.input.attachments or [])
+    )
+
+
+def _ref_file_name(attachment: typing.Any, name: str | None, mime_type: str | None) -> str:
+    """File name that keeps the attachment ref, so it matches [attachment att-N: ...] in the text."""
+    ref = _attachment_get(attachment, "ref")
+    base = os.path.basename(name or _attachment_get(attachment, "name") or "") or (
+        _attachment_get(attachment, "type") or "file"
+    )
+    if not os.path.splitext(base)[1] and mime_type:
+        base += mimetypes.guess_extension(mime_type) or ""
+    return f"{ref}_{base}" if ref else base
+
+
+def _attachments_from_contents(contents: list[typing.Any]) -> list[dict[str, typing.Any]]:
+    attachments: list[dict[str, typing.Any]] = []
+    for item in contents or []:
+        item_type = _content_get(item, "type")
+        if item_type == "image_base64":
+            content = _content_get(item, "image_base64")
+            attachments.append(
+                {
+                    "type": "image",
+                    "name": "image",
+                    "content": content,
+                    "content_type": _content_type_from_base64(content, "image/jpeg"),
+                }
+            )
+        elif item_type == "file_url":
+            attachments.append(
+                {
+                    "type": "file",
+                    "name": _content_get(item, "file_name") or "file",
+                    "url": _content_get(item, "file_url"),
+                }
+            )
+        elif item_type == "file_base64":
+            content = _content_get(item, "file_base64")
+            attachments.append(
+                {
+                    "type": "file",
+                    "name": _content_get(item, "file_name") or "file",
+                    "content": content,
+                    "content_type": _content_type_from_base64(content, "application/octet-stream"),
+                }
+            )
+    return attachments
+
+
+def _int_or_none(value: typing.Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_int(mapping: dict[str, typing.Any], *keys: str) -> int | None:
+    for key in keys:
+        value = _int_or_none(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _usage_from_payload(payload: typing.Any) -> dict[str, typing.Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            usage = metadata.get("usage")
+    if not isinstance(usage, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            usage = data.get("usage")
+            if not isinstance(usage, dict):
+                token_keys = {
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                    "input_tokens",
+                    "output_tokens",
+                    "input_count",
+                    "output_count",
+                    "token_count",
+                    "total_count",
+                }
+                if token_keys.intersection(data):
+                    usage = data
+    token_keys = {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "input_count",
+        "output_count",
+        "token_count",
+        "total_count",
+    }
+    if not isinstance(usage, dict) and token_keys.intersection(payload):
+        usage = payload
+    if not isinstance(usage, dict):
+        return None
+
+    normalized = dict(usage)
+    prompt_tokens = _first_int(usage, "prompt_tokens", "input_tokens", "input_count")
+    completion_tokens = _first_int(usage, "completion_tokens", "output_tokens", "output_count")
+    total_tokens = _first_int(usage, "total_tokens", "token_count", "total_count")
+
+    if prompt_tokens is not None:
+        normalized["prompt_tokens"] = prompt_tokens
+    if completion_tokens is not None:
+        normalized["completion_tokens"] = completion_tokens
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    if total_tokens is not None:
+        normalized["total_tokens"] = total_tokens
+
+    return normalized or None
+
+
+def _mapping_value(mapping: typing.Any, *keys: str) -> typing.Any:
+    """Return a protocol value using explicit aliases with case-insensitive matching."""
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    lowered = {str(key).lower(): value for key, value in mapping.items()}
+    for key in keys:
+        if key.lower() in lowered:
+            return lowered[key.lower()]
+    return None
+
+
+def _protocol_name(value: typing.Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[-\s]+", "_", value.strip().lower())
+
+
+def _workflow_run_id(event: dict[str, typing.Any], fallback: str = "") -> str:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    value = _mapping_value(data, "workflow_run_id", "workflowRunId")
+    if value in (None, ""):
+        value = _mapping_value(event, "workflow_run_id", "workflowRunId")
+    return str(value or fallback).strip()
+
+
+def _human_input_reason(event: dict[str, typing.Any]) -> dict[str, typing.Any] | None:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    if _protocol_name(event.get("event")) == "human_input_required":
+        return data
+
+    raw_reasons = _mapping_value(data, "reasons", "pause_reasons", "pauseReasons")
+    if isinstance(raw_reasons, dict):
+        reasons = [raw_reasons]
+    elif isinstance(raw_reasons, list):
+        reasons = raw_reasons
+    else:
+        raw_reason = _mapping_value(data, "reason", "pause_reason", "pauseReason")
+        reasons = [raw_reason] if isinstance(raw_reason, dict) else []
+
+    for reason in reasons:
+        if not isinstance(reason, dict):
+            continue
+        reason_type = _mapping_value(reason, "TYPE", "type", "reason_type", "reasonType")
+        if _protocol_name(reason_type) == "human_input_required":
+            return reason
+    return None
+
+
+def _form_field_name(field: dict[str, typing.Any]) -> str:
+    return str(
+        _mapping_value(field, "output_variable_name", "outputVariableName", "variable", "name", "id") or ""
+    ).strip()
+
+
+def _form_field_options(field: dict[str, typing.Any]) -> list[str]:
+    source = _mapping_value(field, "option_source", "optionSource")
+    raw_options = _mapping_value(source, "value") if isinstance(source, dict) else None
+    if raw_options is None:
+        raw_options = _mapping_value(field, "options")
+    if isinstance(raw_options, str):
+        raw_options = [line.strip() for line in raw_options.splitlines() if line.strip()]
+    if not isinstance(raw_options, list):
+        return []
+
+    options: list[str] = []
+    for option in raw_options:
+        if isinstance(option, dict):
+            value = _mapping_value(option, "value", "label", "name")
+        else:
+            value = option
+        if value is not None and str(value).strip():
+            options.append(str(value).strip())
+    return options
+
+
+def _form_field_default(field: dict[str, typing.Any]) -> typing.Any:
+    default = _mapping_value(field, "default", "default_value", "defaultValue")
+    if isinstance(default, dict) and _protocol_name(_mapping_value(default, "type")) == "constant":
+        return _mapping_value(default, "value")
+    return default
+
+
+def _strip_form_placeholders(content: str) -> str:
+    cleaned = re.sub(r"^\s*\{\{#\$output\.[^#{}]+#\}\}\s*$", "", content, flags=re.MULTILINE)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _form_step_descriptions(
+    content: str,
+    provider_names: list[str],
+) -> tuple[dict[str, str], str | None]:
+    placeholder_pattern = re.compile(
+        r"^[ \t]*\{\{#\$output\.([^#{}\r\n]+)#\}\}[ \t]*$",
+        flags=re.MULTILINE,
+    )
+    matches = list(placeholder_pattern.finditer(content))
+    if not matches:
+        description = _strip_form_placeholders(content)
+        return ({provider_names[0]: description} if provider_names and description else {}), None
+
+    descriptions: dict[str, str] = {}
+    segment_start = 0
+    known_names = set(provider_names)
+    for match in matches:
+        provider_name = match.group(1).strip()
+        description = content[segment_start : match.start()].strip()
+        if provider_name in known_names and description:
+            descriptions[provider_name] = description
+        segment_start = match.end()
+
+    action_description = content[segment_start:].strip() or None
+    return descriptions, action_description
+
+
+class DefaultRunner(Runner):
+    """Real Runner for Dify Service API.
+
+    Supports three app types:
+    - chat: Chat assistant (including Chatflow)
+    - agent: Agent with tool calls
+    - workflow: Workflow execution
+
+    Configuration (static, from ctx.config):
+    - base-url: Dify API base URL (default: https://api.dify.ai/v1)
+    - app-type: Application type (chat/agent/workflow)
+    - api-key: Dify API key
+    - base-prompt: Default prompt when input is empty
+    - timeout: Request timeout in seconds
+    - stream-budget-mb: Accumulated byte budget for one streaming response, in MiB
+    - remove-think: Whether to remove thinking tags from output
+
+    Runtime state (from ctx.state):
+    - external.conversation_ids: Dify conversation ID per provider user (hashed)
+    - external.conversation_id: last Dify conversation ID (legacy, read only before
+      external.conversation_ids exists)
+
+    Runtime params (from ctx.adapter.extra.params):
+    - Workflow inputs passed to Dify workflow endpoint
+    - Custom variables passed to Dify chat-messages inputs
+    """
+
+    def _validate_config(self, ctx: RunnerContext) -> dict[str, typing.Any]:
+        """Validate and return static configuration.
+
+        Raises DifyConfigError on missing required fields.
+        """
+        config = ctx.config or {}
+        self._get_user_tag(ctx)  # Validate identity before constructing any upstream client.
+
+        base_url = config.get("base-url", "https://api.dify.ai/v1")
+        if not base_url:
+            raise DifyConfigError("base-url is required", code="dify.config_invalid")
+
+        api_key = config.get("api-key", "")
+        if not api_key:
+            raise DifyConfigError("api-key is required", code="dify.config_invalid")
+
+        app_type = config.get("app-type", "chat")
+        valid_types = ["chat", "chatflow", "agent", "workflow"]
+        if app_type not in valid_types:
+            raise DifyConfigError(
+                f"Invalid app-type: {app_type}. Must be one of {valid_types}",
+                code="dify.config_invalid",
+            )
+
+        remove_think = config.get("remove-think", False)
+        if not isinstance(remove_think, bool):
+            raise DifyConfigError("remove-think must be a boolean", code="dify.config_invalid")
+
+        stream_budget_mb = _to_int(config.get("stream-budget-mb"), 16)
+        if stream_budget_mb <= 0:
+            raise DifyConfigError("stream-budget-mb must be a positive integer", code="dify.config_invalid")
+        if stream_budget_mb > MAX_STREAM_BUDGET_MB:
+            raise DifyConfigError(
+                f"stream-budget-mb must not exceed {MAX_STREAM_BUDGET_MB} MiB",
+                code="dify.config_invalid",
+            )
+
+        return {
+            "base_url": base_url,
+            "api_key": api_key,
+            "app_type": app_type,
+            "base_prompt": config.get("base-prompt", ""),
+            "timeout": float(config.get("timeout", 30)),
+            "stream_budget_bytes": stream_budget_mb * 1024 * 1024,
+            "remove_think": remove_think,
+            "langbot_assets_enabled": _to_bool(config.get("langbot-assets-enabled"), False),
+            "asset_gateway_host": str(config.get("langbot-assets-gateway-host") or "0.0.0.0"),
+            "asset_gateway_port": _to_int(config.get("langbot-assets-gateway-port"), 8765),
+            "asset_gateway_request_timeout": _to_float(config.get("langbot-assets-gateway-request-timeout"), 60.0),
+            "asset_gateway_token_ttl": _to_float(config.get("langbot-assets-token-ttl"), 3600.0),
+            "asset_gateway_input_name": str(
+                config.get("langbot-assets-input-name") or DEFAULT_LANGBOT_ASSET_TOKEN_INPUT
+            ),
+        }
+
+    def _get_user_tag(self, ctx: RunnerContext) -> str:
+        """Get user identifier for Dify API."""
+        source = ctx.config.get("user-id-source", "sender")
+        if source not in ("sender", "legacy-session"):
+            raise DifyConfigError("user-id-source is invalid", code="dify.config_invalid")
+        if source == "legacy-session":
+            conversation = ctx.conversation
+            if conversation and conversation.launcher_type in ("group", "person"):
+                launcher_id = conversation.launcher_id
+                if isinstance(launcher_id, str) and launcher_id:
+                    return scoped_identity(self, ctx, f"{conversation.launcher_type}_{launcher_id}")
+            raise DifyConfigError("user-id-source requires trusted Host identity", code="dify.identity_unavailable")
+        shared_group = _shared_group_session(ctx)
+        if shared_group:
+            # The whole group shares one LangBot conversation, so it must also
+            # share one Dify conversation; Dify binds conversations to `user`.
+            return scoped_identity(self, ctx, shared_group)
+        actor = ctx.actor
+        if actor and actor.actor_id:
+            return scoped_identity(self, ctx, f"{actor.actor_type}_{actor.actor_id}")
+        raise DifyConfigError(
+            "user-id-source=sender requires a trusted Host actor identity",
+            code="dify.identity_unavailable",
+        )
+
+    def _get_external_conversation_id(self, ctx: RunnerContext, user: str | None = None) -> str:
+        """Get the Dify conversation ID for this provider user.
+
+        Priority:
+        1. ctx.state.conversation["external.conversation_ids"][owner(user)]
+        2. ctx.state.conversation["external.conversation_id"] for state written
+           before per-user ids existed (no per-user map yet)
+        3. Empty string (start new conversation)
+        """
+        conversation_ids = ctx.state.conversation.get(CONVERSATION_IDS_KEY)
+        if user is not None and isinstance(conversation_ids, dict):
+            external_conv_id = conversation_ids.get(_conversation_owner(user))
+            return external_conv_id if _is_uuid_string(external_conv_id) else ""
+
+        external_conv_id = ctx.state.conversation.get(LEGACY_CONVERSATION_ID_KEY)
+        if _is_uuid_string(external_conv_id):
+            return external_conv_id
+
+        # Host conversation ids are LangBot-local and are not guaranteed to be
+        # Dify UUIDs. Passing them to Dify makes first-turn Debug Chat fail.
+        return ""
+
+    def _conversation_state_updates(self, ctx: RunnerContext, user: str, conversation_id: str) -> list[RunnerResult]:
+        """State updates that remember conversation_id for this provider user only."""
+        current = ctx.state.conversation.get(CONVERSATION_IDS_KEY)
+        conversation_ids = dict(current) if isinstance(current, dict) else {}
+        owner = _conversation_owner(user)
+        conversation_ids.pop(owner, None)
+        conversation_ids[owner] = conversation_id
+        while len(conversation_ids) > MAX_CONVERSATION_IDS:
+            conversation_ids.pop(next(iter(conversation_ids)))
+        return [
+            RunnerResult.state_updated(ctx.run_id, CONVERSATION_IDS_KEY, conversation_ids, scope="conversation"),
+            RunnerResult.state_updated(ctx.run_id, LEGACY_CONVERSATION_ID_KEY, conversation_id, scope="conversation"),
+        ]
+
+    async def _chat_message_events(
+        self,
+        client: AsyncDifyClient,
+        inputs: dict[str, typing.Any],
+        query: str,
+        user: str,
+        conversation_id: str,
+        files: list[dict[str, typing.Any]],
+    ) -> typing.AsyncGenerator[dict[str, typing.Any], None]:
+        """Stream chat-messages, starting a new conversation if the stored one is gone.
+
+        Dify answers 404 "Conversation Not Exists" when the conversation was
+        deleted or belongs to another end user. Retrying once with an empty id
+        is safe because the request failed before any event was produced.
+        """
+        started = False
+        try:
+            async for event in client.chat_messages(
+                inputs=inputs, query=query, user=user, conversation_id=conversation_id, files=files
+            ):
+                started = True
+                yield event
+            return
+        except DifyAPIError as e:
+            if started or not conversation_id or not _is_conversation_not_found(e):
+                raise
+        logger.warning("Stored Dify conversation is unavailable for this user; starting a new conversation")
+        async for event in client.chat_messages(inputs=inputs, query=query, user=user, conversation_id="", files=files):
+            yield event
+
+    def _get_or_create_state_id(
+        self,
+        ctx: RunnerContext,
+        key: str,
+        prefix: str,
+    ) -> tuple[str, bool]:
+        """Return a runner-owned external id stored under conversation state."""
+        state_value = ctx.state.conversation.get(key)
+        if state_value:
+            return str(state_value), False
+        return f"{prefix}_{uuid.uuid4().hex}", True
+
+    def _get_dify_inputs(self, ctx: RunnerContext) -> dict[str, typing.Any]:
+        """Get inputs for Dify API from adapter params.
+
+        Does NOT modify adapter params.
+        """
+        return _get_adapter_params(ctx)
+
+    async def _create_asset_gateway_registration(
+        self,
+        ctx: RunnerContext,
+        config: dict[str, typing.Any],
+    ):
+        return await register_assets(self, self.get_run_api(ctx), ctx, config)
+
+    async def _prepare_dify_inputs(
+        self,
+        ctx: RunnerContext,
+        config: dict[str, typing.Any],
+    ):
+        inputs = self._get_dify_inputs(ctx)
+        if not config["langbot_assets_enabled"]:
+            return None, inputs
+
+        registration = await self._create_asset_gateway_registration(ctx, config)
+        inputs = dict(inputs)
+        inputs[config["asset_gateway_input_name"]] = registration.token
+        return registration, inputs
+
+    async def _read_host_input_files(self, ctx: RunnerContext) -> list[tuple[str, bytes, str | None]]:
+        """Read every input attachment by ref from a Host that supports it."""
+        files: list[tuple[str, bytes, str | None]] = []
+        for attachment in ctx.input.attachments or []:
+            try:
+                data = await ctx.read_input_attachment(attachment)
+            except Exception as e:
+                # The text still marks the attachment; one unreadable file must not fail the run.
+                logger.warning(f"Skipping input attachment {_attachment_get(attachment, 'ref')}: {e}")
+                continue
+            if data is None or not data.data:
+                continue
+            files.append((_ref_file_name(attachment, data.name, data.mime_type), data.data, data.mime_type))
+        return files
+
+    async def _read_legacy_input_files(
+        self,
+        ctx: RunnerContext,
+        client: AsyncDifyClient,
+    ) -> list[tuple[str, bytes, str | None]]:
+        """Resolve attachments from inline content, URLs and contents on older Hosts."""
+        # Older Hosts strip image payloads already inlined in contents and keep only the ref.
+        attachments = [
+            attachment
+            for attachment in ctx.input.attachments or []
+            if _attachment_get(attachment, "content") or _attachment_get(attachment, "url")
+        ]
+        payloads = [
+            _attachment_get(attachment, "content") or _attachment_get(attachment, "url") for attachment in attachments
+        ]
+        attachments.extend(
+            attachment
+            for attachment in _attachments_from_contents(ctx.input.contents)
+            if (attachment.get("content") or attachment.get("url")) not in payloads
+        )
+
+        files: list[tuple[str, bytes, str | None]] = []
+        for attachment in attachments:
+            try:
+                file_bytes = _decode_content(_attachment_get(attachment, "content"))
+                downloaded_type = None
+                if file_bytes is None and _attachment_get(attachment, "url"):
+                    file_bytes, downloaded_type = await client.download_file(_attachment_get(attachment, "url"))
+            except DifyAPIError as e:
+                if e.code == "dify.input_error":
+                    raise
+                raise DifyAPIError(
+                    f"Failed to upload input attachment {_attachment_get(attachment, 'name', 'file')}: {e.message}",
+                    code="dify.input_error",
+                ) from None
+            except Exception as e:
+                raise DifyAPIError(
+                    f"Failed to upload input attachment {_attachment_get(attachment, 'name', 'file')}: {e}",
+                    code="dify.input_error",
+                ) from None
+            if not file_bytes:
+                raise DifyAPIError(
+                    f"Input attachment {_attachment_get(attachment, 'name', 'file')} has no uploadable content",
+                    code="dify.input_error",
+                )
+            content_type = (
+                _attachment_get(attachment, "content_type")
+                or _attachment_get(attachment, "mime_type")
+                or downloaded_type
+            )
+            files.append((_attachment_get(attachment, "name") or "file", file_bytes, content_type))
+        return files
+
+    async def _upload_input_files(
+        self,
+        ctx: RunnerContext,
+        client: AsyncDifyClient,
+        user: str,
+    ) -> list[dict[str, typing.Any]]:
+        """Upload files from input attachments to Dify.
+
+        Returns list of Dify file references.
+        """
+        if _host_reads_attachments(ctx):
+            files = await self._read_host_input_files(ctx)
+        else:
+            files = await self._read_legacy_input_files(ctx, client)
+
+        uploaded_files: list[dict[str, typing.Any]] = []
+        for file_name, file_bytes, content_type in files:
+            content_type = content_type or "application/octet-stream"
+            if not os.path.splitext(file_name)[1]:
+                # Dify derives the image format from the file extension and rejects an empty one.
+                file_name += mimetypes.guess_extension(content_type) or ""
+
+            # Determine Dify file type from content type
+            if content_type.startswith("image/"):
+                file_type = "image"
+            elif content_type.startswith("audio/"):
+                file_type = "audio"
+            elif content_type.startswith("video/"):
+                file_type = "video"
+            else:
+                file_type = "document"
+
+            try:
+                result = await client.upload_file(file_name, file_bytes, content_type, user)
+            except DifyAPIError as e:
+                raise DifyAPIError(
+                    f"Failed to upload input attachment {file_name}: {e.message}",
+                    code="dify.input_error",
+                ) from None
+            except Exception as e:
+                raise DifyAPIError(
+                    f"Failed to upload input attachment {file_name}: {e}",
+                    code="dify.input_error",
+                ) from None
+            file_id = result.get("id")
+            if not file_id:
+                raise DifyAPIError(
+                    f"Dify file upload response missing file id for {file_name}",
+                    code="dify.input_error",
+                )
+            uploaded_files.append(
+                {
+                    "type": file_type,
+                    "transfer_method": "local_file",
+                    "upload_file_id": file_id,
+                }
+            )
+
+        return uploaded_files
+
+    def _get_input_text(self, ctx: RunnerContext, base_prompt: str) -> str:
+        """Get text input, fallback to base_prompt if empty."""
+        text = ctx.input.to_text()
+        if not text:
+            return base_prompt
+        return text
+
+    @staticmethod
+    def _request_from_continuation(continuation: dict[str, typing.Any]) -> InteractionRequest:
+        fields = [InteractionField.model_validate(item) for item in continuation.get("current_fields") or []]
+        actions = [InteractionAction.model_validate(item) for item in continuation.get("interaction_actions") or []]
+        if fields:
+            actions = []
+        kind = (
+            "confirmation" if actions and not fields else "choice" if fields and fields[0].type == "select" else "form"
+        )
+        description = continuation.get("description")
+        fallback_text = str(continuation.get("fallback_text") or "Human input is required.")
+        return InteractionRequest(
+            interaction_id=str(continuation["interaction_id"]),
+            kind=kind,
+            title=str(continuation.get("title") or "Human input required"),
+            description=description,
+            fields=fields,
+            actions=actions,
+            fallback_text=fallback_text,
+        )
+
+    def _build_interaction_request(
+        self,
+        reason: dict[str, typing.Any],
+        workflow_run_id: str,
+        user: str,
+    ) -> tuple[InteractionRequest, dict[str, typing.Any]]:
+        form_token = str(_mapping_value(reason, "form_token", "formToken") or "").strip()
+        if not form_token or not workflow_run_id:
+            raise DifyAPIError(
+                "Dify human-input event is missing continuation identifiers",
+                code="dify.response_invalid",
+            )
+
+        interaction_id = f"dify-{uuid.uuid4().hex}"
+        fields: list[InteractionField] = []
+        field_map: dict[str, str] = {}
+        resolved_defaults = _mapping_value(reason, "resolved_default_values", "resolvedDefaultValues")
+        default_inputs = dict(resolved_defaults) if isinstance(resolved_defaults, dict) else {}
+        reason_inputs = _mapping_value(reason, "inputs", "fields")
+        raw_fields = reason_inputs if isinstance(reason_inputs, list) else []
+        for index, raw_field in enumerate(raw_fields):
+            if not isinstance(raw_field, dict):
+                continue
+            provider_name = _form_field_name(raw_field)
+            if not provider_name:
+                continue
+            field_id = f"field_{index + 1}"
+            field_map[field_id] = provider_name
+            provider_type = _protocol_name(_mapping_value(raw_field, "type") or "text")
+            field_type = {
+                "paragraph": "textarea",
+                "textarea": "textarea",
+                "select": "select",
+                "number": "number",
+                "checkbox": "boolean",
+                "boolean": "boolean",
+                "file": "file",
+                "file_list": "file",
+            }.get(provider_type, "text")
+            option_values = _form_field_options(raw_field) if field_type == "select" else []
+            if field_type == "select" and not option_values:
+                field_type = "text"
+            default = default_inputs.get(provider_name, _form_field_default(raw_field))
+            if default not in (None, ""):
+                default_inputs[provider_name] = default
+            fields.append(
+                InteractionField(
+                    id=field_id,
+                    label=str(_mapping_value(raw_field, "label", "title") or provider_name),
+                    type=field_type,
+                    required=_to_bool(_mapping_value(raw_field, "required", "is_required", "isRequired"), True),
+                    options=[InteractionOption(value=value, label=value) for value in option_values],
+                    placeholder=_mapping_value(raw_field, "placeholder"),
+                    default=default,
+                )
+            )
+
+        actions: list[InteractionAction] = []
+        action_map: dict[str, str] = {}
+        reason_actions = _mapping_value(reason, "actions", "user_actions", "userActions")
+        raw_actions = reason_actions if isinstance(reason_actions, list) else []
+        for index, raw_action in enumerate(raw_actions):
+            if not isinstance(raw_action, dict):
+                continue
+            provider_action_id = str(_mapping_value(raw_action, "id", "action_id", "actionId") or "").strip()
+            if not provider_action_id:
+                continue
+            action_id = f"action_{index + 1}"
+            action_map[action_id] = provider_action_id
+            actions.append(
+                InteractionAction(
+                    id=action_id,
+                    label=str(_mapping_value(raw_action, "title", "label", "text") or provider_action_id),
+                )
+            )
+        if not actions:
+            action_map["continue"] = ""
+            actions.append(InteractionAction(id="continue", label="Continue", style="primary"))
+
+        node_title = str(_mapping_value(reason, "node_title", "nodeTitle", "title") or "Human input required")
+        form_content = str(_mapping_value(reason, "form_content", "formContent", "content") or "")
+        provider_names = [field_map[field.id] for field in fields if field.id in field_map]
+        provider_descriptions, action_description = _form_step_descriptions(form_content, provider_names)
+        field_descriptions = {
+            field_id: provider_descriptions[provider_name]
+            for field_id, provider_name in field_map.items()
+            if provider_name in provider_descriptions
+        }
+        description = _strip_form_placeholders(form_content)
+        fallback_lines = [f"[Human Input Required] {node_title}"]
+        if description:
+            fallback_lines.extend(["", description])
+        for field in fields:
+            if field.options:
+                choices = ", ".join(option.label for option in field.options)
+                fallback_lines.append(f"{field.label}: {choices}")
+            else:
+                fallback_lines.append(f"{field.label}: required input")
+        if actions:
+            fallback_lines.append("Actions: " + ", ".join(action.label for action in actions))
+
+        continuation = {
+            "version": 1,
+            "interaction_id": interaction_id,
+            "form_token": form_token,
+            "workflow_run_id": workflow_run_id,
+            "user": user,
+            "field_map": field_map,
+            "action_map": action_map,
+            "default_inputs": default_inputs,
+            "title": node_title,
+            "description": description or None,
+            "field_descriptions": field_descriptions,
+            "action_description": action_description,
+            "fallback_text": "\n".join(fallback_lines),
+            "phase": "action",
+            "current_fields": [field.model_dump(mode="json") for field in fields],
+            "remaining_fields": [],
+            "interaction_actions": [action.model_dump(mode="json") for action in actions],
+        }
+        if fields and len(actions) > 1:
+            continuation["current_fields"].append(
+                InteractionField(
+                    id="_dify_action",
+                    label="Action",
+                    type="select",
+                    required=True,
+                    options=[InteractionOption(value=action.id, label=action.label) for action in actions],
+                ).model_dump(mode="json")
+            )
+        request = self._request_from_continuation(continuation)
+        return request, continuation
+
+    @staticmethod
+    async def _ask_fields_one_by_one(
+        ctx: RunnerContext,
+        continuation: dict[str, typing.Any],
+    ) -> InteractionSubmission:
+        """Collect a multi-field Dify form through single-field interactions."""
+        base_id = str(continuation["interaction_id"])
+        title = str(continuation.get("title") or "Human input required")
+        description = continuation.get("description") or None
+        field_descriptions = continuation.get("field_descriptions") or {}
+        values: dict[str, typing.Any] = {}
+        fields = [InteractionField.model_validate(item) for item in continuation.get("current_fields") or []]
+        for index, field in enumerate(fields, start=1):
+            if field.id == "_dify_action":
+                step_description = continuation.get("action_description") or description
+                step = InteractionRequest(
+                    interaction_id=f"{base_id}-action",
+                    kind="confirmation",
+                    title=title,
+                    description=step_description,
+                    actions=[InteractionAction(id=option.value, label=option.label) for option in field.options],
+                    fallback_text="\n".join(filter(None, [f"[Human Input Required] {title}", step_description])),
+                )
+            else:
+                step_description = field_descriptions.get(field.id) or description
+                step = InteractionRequest(
+                    interaction_id=f"{base_id}-{index}",
+                    kind="choice" if field.type == "select" else "form",
+                    title=title,
+                    description=step_description,
+                    fields=[field],
+                    actions=[],
+                    fallback_text="\n".join(filter(None, [f"[Human Input Required] {title}", step_description])),
+                )
+            result = await ctx.request_interaction(step, timeout=3600, on_unsupported="degrade")
+            if result.status != "submitted" or result.submission is None:
+                raise DifyAPIError(f"Dify human input {result.status}", code="dify.interaction_expired")
+            if field.id == "_dify_action":
+                values["_dify_action"] = result.submission.action_id
+            elif field.id in result.submission.values:
+                values[field.id] = result.submission.values[field.id]
+        return InteractionSubmission(interaction_id=base_id, values=values)
+
+    async def _wait_and_resume_workflow(
+        self,
+        ctx: RunnerContext,
+        client: AsyncDifyClient,
+        event: dict[str, typing.Any],
+        user: str,
+        remove_think: bool,
+    ) -> typing.AsyncGenerator[RunnerResult, None]:
+        reason = _human_input_reason(event)
+        if reason is None:
+            raise DifyAPIError("Dify paused without a supported human-input reason", code="dify.response_invalid")
+        request, continuation = self._build_interaction_request(reason, _workflow_run_id(event), user)
+        try:
+            result = await ctx.request_interaction(request, timeout=3600, on_unsupported="degrade")
+        except InteractionNotSupportedError:
+            # Most platforms render at most one field per card, and text-only
+            # platforms never split a multi-field form themselves. Ask each
+            # field (and then the action) as its own interaction instead.
+            if len(request.fields) <= 1:
+                raise
+            submission = await self._ask_fields_one_by_one(ctx, continuation)
+        else:
+            if result.status != "submitted" or result.submission is None:
+                raise DifyAPIError(f"Dify human input {result.status}", code="dify.interaction_expired")
+            submission = result.submission
+        async for item in self._resume_workflow_once(
+            ctx,
+            client,
+            submission,
+            remove_think,
+            continuation=continuation,
+        ):
+            yield item
+
+    async def run(self, ctx: RunnerContext) -> typing.AsyncGenerator[RunnerResult, None]:
+        """Run the Dify agent.
+
+        Streams RunnerResult.message_delta chunks and final run_completed.
+        """
+        try:
+            config = self._validate_config(ctx)
+        except DifyConfigError as e:
+            yield RunnerResult.run_failed(
+                ctx.run_id,
+                error=e.message,
+                code=e.code,
+            )
+            return
+
+        client = AsyncDifyClient(
+            api_key=config["api_key"],
+            base_url=config["base_url"],
+            timeout=config["timeout"],
+            max_stream_bytes=config["stream_budget_bytes"],
+        )
+
+        user = self._get_user_tag(ctx)
+        input_text = self._get_input_text(ctx, config["base_prompt"])
+        remove_think = config["remove_think"]
+
+        asset_registration = None
+        try:
+            # Upload files if present. Multimodal inputs must not silently
+            # degrade to text-only when the provider upload path fails.
+            files = await self._upload_input_files(ctx, client, user)
+
+            # Get inputs from params (read-only, do not modify), optionally adding
+            # the run-scoped LangBot asset token expected by Dify MCP tools.
+            asset_registration, inputs = await self._prepare_dify_inputs(ctx, config)
+
+            # Get conversation_id from state (not from config!)
+            conversation_id = self._get_external_conversation_id(ctx, user)
+
+            app_type = config["app_type"]
+
+            if app_type == "workflow":
+                # Workflow mode - uses different endpoint
+                async for result in self._run_workflow(ctx, client, inputs, input_text, user, files, remove_think):
+                    yield result
+            else:
+                # Chat or Agent mode - uses chat-messages endpoint
+                async for result in self._run_chat_or_agent(
+                    ctx, client, inputs, input_text, user, conversation_id, files, app_type, remove_think
+                ):
+                    yield result
+        except DifyAPIError as e:
+            yield RunnerResult.run_failed(
+                ctx.run_id,
+                error=e.message,
+                code=e.code,
+            )
+            return
+        except Exception as e:
+            logger.exception(f"Dify runner unexpected error: {e}")
+            yield RunnerResult.run_failed(
+                ctx.run_id,
+                error=f"Dify runner error: {e}",
+                code="dify.unexpected_error",
+            )
+            return
+        finally:
+            if asset_registration is not None:
+                await asset_registration.stop()
+
+    async def _run_chat_or_agent(
+        self,
+        ctx: RunnerContext,
+        client: AsyncDifyClient,
+        inputs: dict[str, typing.Any],
+        input_text: str,
+        user: str,
+        conversation_id: str,
+        files: list[dict[str, typing.Any]],
+        app_type: str,
+        remove_think: bool,
+    ) -> typing.AsyncGenerator[RunnerResult, None]:
+        """Run chat or agent mode.
+
+        Streams message_delta chunks and handles agent-specific events.
+        """
+        pending_content = ""
+        mode = "basic"  # basic or workflow mode in chat
+        message_count = 0
+        received_message = False
+        has_response = False
+        final_conversation_id = conversation_id
+        usage: dict[str, typing.Any] | None = None
+        workflow_run_id = ""
+
+        async for event in self._chat_message_events(client, inputs, input_text, user, conversation_id, files):
+            event_type = event.get("event", "")
+            logger.debug(f"Dify {app_type} event: {event_type}")
+            usage = _usage_from_payload(event) or usage
+
+            if event_type in {
+                "workflow_started",
+                "node_started",
+                "node_finished",
+                "workflow_finished",
+                "workflow_paused",
+                "human_input_required",
+            }:
+                mode = "workflow"
+            if event_type == "workflow_started":
+                workflow_run_id = _workflow_run_id(event, workflow_run_id)
+
+            if event_type == "error":
+                raise DifyAPIError(
+                    f"Dify API error: {event.get('message', 'Unknown error')}",
+                    code="dify.api_error",
+                )
+
+            # Track conversation_id for stateful session
+            if event.get("conversation_id"):
+                final_conversation_id = event["conversation_id"]
+
+            # Handle different event types based on app_type and mode
+            if mode == "workflow" and event_type == "node_finished":
+                if event.get("data", {}).get("node_type") == "answer":
+                    answer = extract_text_from_output(event.get("data", {}).get("outputs", {}).get("answer"))
+                    pending_content = answer
+                    content, _ = process_thinking_content(answer, remove_think)
+                    if content:
+                        has_response = True
+                        yield RunnerResult.message_delta(ctx.run_id, MessageChunk(role="assistant", content=content))
+
+            elif mode == "workflow" and event_type in {"workflow_paused", "human_input_required"}:
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                workflow_run_id = _workflow_run_id(event, workflow_run_id)
+                if workflow_run_id and not _workflow_run_id(event):
+                    event = dict(event)
+                    event["data"] = {**data, "workflow_run_id": workflow_run_id}
+                if pending_content:
+                    content, _ = process_thinking_content(pending_content, remove_think)
+                    if content:
+                        yield RunnerResult.message_delta(
+                            ctx.run_id,
+                            MessageChunk(role="assistant", content=content, is_final=True),
+                        )
+                if final_conversation_id:
+                    for result in self._conversation_state_updates(ctx, user, final_conversation_id):
+                        yield result
+                async for result in self._wait_and_resume_workflow(ctx, client, event, user, remove_think):
+                    yield result
+                return
+
+            elif event_type == "message" or event_type == "agent_message":
+                if event_type == "message" and not received_message:
+                    pending_content = ""
+                    message_count = 0
+                    received_message = True
+                elif event_type == "agent_message" and received_message:
+                    continue
+                # Accumulate text chunks
+                answer = event.get("answer", "")
+                # Dify deployments send either deltas or cumulative snapshots.
+                if pending_content and len(answer) > len(pending_content) and answer.startswith(pending_content):
+                    pending_content = answer
+                else:
+                    pending_content += answer
+                message_count += 1
+                if message_count % 8 == 0:
+                    content, _ = process_thinking_content(pending_content, remove_think)
+                    if content:
+                        has_response = True
+                        yield RunnerResult.message_delta(
+                            ctx.run_id, MessageChunk(role="assistant", content=content, is_final=False)
+                        )
+
+            elif event_type == "message_end":
+                # Final message for chat mode
+                if pending_content:
+                    content, _ = process_thinking_content(pending_content, remove_think)
+                    has_response = True
+                    yield RunnerResult.message_delta(
+                        ctx.run_id, MessageChunk(role="assistant", content=content, is_final=True)
+                    )
+                pending_content = ""
+
+            elif event_type == "agent_thought" and app_type == "agent":
+                # Agent thought events - handle tool calls
+                tool = event.get("tool", "")
+                observation = event.get("observation", "")
+
+                # Skip tool result observations
+                if not tool or observation:
+                    continue
+
+                # Yield accumulated content before tool call
+                if pending_content:
+                    content, _ = process_thinking_content(pending_content, remove_think)
+                    if content:
+                        has_response = True
+                        yield RunnerResult.message_delta(ctx.run_id, MessageChunk(role="assistant", content=content))
+                    pending_content = ""
+
+                # Report tool call as message_delta with tool_calls
+                if tool:
+                    yield RunnerResult.message_delta(
+                        ctx.run_id,
+                        MessageChunk(
+                            role="assistant",
+                            content="",
+                            tool_calls=[
+                                {
+                                    "id": event.get("id", str(uuid.uuid4())),
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool,
+                                        "arguments": json.dumps({}),
+                                    },
+                                }
+                            ],
+                        ),
+                    )
+
+            elif event_type == "message_file":
+                # Handle image/file output from agent
+                if event.get("type") == "image" and event.get("belongs_to") == "assistant":
+                    image_url = event.get("url", "")
+                    if image_url:
+                        # Handle relative URLs
+                        if not image_url.startswith("http"):
+                            base_url = client.base_url
+                            if base_url.endswith("/v1"):
+                                base_url = base_url[:-3]
+                            image_url = base_url + image_url
+
+                        has_response = True
+                        yield RunnerResult.message_delta(
+                            ctx.run_id,
+                            MessageChunk(
+                                role="assistant",
+                                content=[{"type": "image_url", "image_url": {"url": image_url}}],
+                            ),
+                        )
+
+            elif event_type == "workflow_finished":
+                mode = "workflow"
+                data = event.get("data", {})
+                if data.get("error"):
+                    raise DifyAPIError(f"Dify workflow error: {data['error']}", code="dify.api_error")
+                if not has_response and not pending_content:
+                    wf_output = extract_workflow_outputs(data.get("outputs"))
+                    if wf_output:
+                        pending_content = wf_output
+
+        # Handle any remaining pending content
+        if pending_content:
+            content, _ = process_thinking_content(pending_content, remove_think)
+            if content:
+                has_response = True
+                yield RunnerResult.message_delta(
+                    ctx.run_id, MessageChunk(role="assistant", content=content, is_final=True)
+                )
+
+        if not has_response:
+            raise DifyAPIError(
+                "Dify API returned no response",
+                code="dify.api_error",
+            )
+
+        # Update state with conversation_id for next run (scoped state)
+        if final_conversation_id:
+            for result in self._conversation_state_updates(ctx, user, final_conversation_id):
+                yield result
+
+        yield RunnerResult.run_completed(ctx.run_id, usage=usage)
+
+    async def _run_workflow(
+        self,
+        ctx: RunnerContext,
+        client: AsyncDifyClient,
+        inputs: dict[str, typing.Any],
+        input_text: str,
+        user: str,
+        files: list[dict[str, typing.Any]],
+        remove_think: bool,
+    ) -> typing.AsyncGenerator[RunnerResult, None]:
+        """Run workflow mode.
+
+        Streams message_delta chunks and handles workflow-specific events.
+
+        Workflow legacy inputs are derived from context:
+        - langbot_user_message_text: input_text
+        - langbot_session_id: ctx.conversation.session_id or ctx.run_id
+        - langbot_conversation_id: from state or ctx.conversation
+        - langbot_msg_create_time: adapter params msg_create_time
+        """
+        # Derive Dify workflow compatibility variables from runner-owned state,
+        # not LangBot's conversation/session ids.
+        session_id, session_created = self._get_or_create_state_id(
+            ctx,
+            "external.workflow_session_id",
+            "dify_session",
+        )
+        external_conv_id, conversation_created = self._get_or_create_state_id(
+            ctx,
+            "external.workflow_conversation_id",
+            "dify_conversation",
+        )
+
+        msg_create_time = inputs.get("msg_create_time")
+
+        workflow_inputs = {
+            "langbot_user_message_text": input_text,
+            "langbot_session_id": session_id,
+            "langbot_conversation_id": external_conv_id,
+        }
+        if msg_create_time:
+            workflow_inputs["langbot_msg_create_time"] = msg_create_time
+
+        # Merge with user params (user params take precedence)
+        workflow_inputs.update(inputs)
+
+        pending_content = ""
+        has_response = False
+        ignored_events = ["workflow_started"]
+        usage: dict[str, typing.Any] | None = None
+        workflow_run_id = ""
+
+        async for event in client.workflow_run(
+            inputs=workflow_inputs,
+            user=user,
+            files=files,
+        ):
+            event_type = event.get("event", "")
+            logger.debug(f"Dify workflow event: {event_type}")
+            usage = _usage_from_payload(event) or usage
+
+            if event_type == "workflow_started":
+                workflow_run_id = _workflow_run_id(event, workflow_run_id)
+
+            if event_type == "error":
+                raise DifyAPIError(
+                    f"Dify workflow error: {event.get('message', 'Unknown error')}",
+                    code="dify.api_error",
+                )
+
+            if event_type in ignored_events:
+                continue
+
+            if event_type == "node_started":
+                data = event.get("data", {})
+                node_type = data.get("node_type", "")
+                if node_type in ["start", "end"]:
+                    continue
+
+                # Node progress is telemetry, not user-visible message content.
+                yield RunnerResult.tool_call_started(
+                    ctx.run_id,
+                    tool_call_id=str(data.get("node_id") or uuid.uuid4()),
+                    tool_name=str(data.get("title") or node_type),
+                    parameters={},
+                )
+
+            elif event_type == "text_chunk":
+                # Streaming text output from workflow
+                text = event.get("data", {}).get("text", "")
+                pending_content += text
+
+            elif event_type == "node_finished":
+                data = event.get("data", {})
+                if data.get("node_type") == "answer":
+                    answer = extract_text_from_output(data.get("outputs", {}).get("answer"))
+                    if answer:
+                        content, _ = process_thinking_content(answer, remove_think)
+                        has_response = True
+                        yield RunnerResult.message_delta(
+                            ctx.run_id,
+                            MessageChunk(role="assistant", content=content, is_final=True),
+                        )
+
+            elif event_type in {"workflow_paused", "human_input_required"}:
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                workflow_run_id = _workflow_run_id(event, workflow_run_id)
+                if workflow_run_id and not _workflow_run_id(event):
+                    event = dict(event)
+                    event["data"] = {**data, "workflow_run_id": workflow_run_id}
+                if pending_content:
+                    content, _ = process_thinking_content(pending_content, remove_think)
+                    if content:
+                        yield RunnerResult.message_delta(
+                            ctx.run_id,
+                            MessageChunk(role="assistant", content=content, is_final=True),
+                        )
+                if session_created:
+                    yield RunnerResult.state_updated(
+                        ctx.run_id,
+                        "external.workflow_session_id",
+                        session_id,
+                        scope="conversation",
+                    )
+                if conversation_created:
+                    yield RunnerResult.state_updated(
+                        ctx.run_id,
+                        "external.workflow_conversation_id",
+                        external_conv_id,
+                        scope="conversation",
+                    )
+                async for result in self._wait_and_resume_workflow(ctx, client, event, user, remove_think):
+                    yield result
+                return
+
+            elif event_type == "workflow_finished":
+                data = event.get("data", {})
+                if data.get("error"):
+                    raise DifyAPIError(f"Dify workflow error: {data['error']}", code="dify.api_error")
+
+                # Get final output
+                summary = extract_workflow_outputs(data.get("outputs", {}))
+                if summary:
+                    content, _ = process_thinking_content(summary, remove_think)
+                    has_response = True
+                    yield RunnerResult.message_delta(
+                        ctx.run_id, MessageChunk(role="assistant", content=content, is_final=True)
+                    )
+
+        # Handle remaining pending content
+        if pending_content and not has_response:
+            content, _ = process_thinking_content(pending_content, remove_think)
+            if content:
+                has_response = True
+                yield RunnerResult.message_delta(
+                    ctx.run_id, MessageChunk(role="assistant", content=content, is_final=True)
+                )
+
+        if not has_response:
+            raise DifyAPIError(
+                "Dify workflow returned no response",
+                code="dify.api_error",
+            )
+
+        if session_created:
+            yield RunnerResult.state_updated(
+                ctx.run_id,
+                "external.workflow_session_id",
+                session_id,
+                scope="conversation",
+            )
+        if conversation_created:
+            yield RunnerResult.state_updated(
+                ctx.run_id,
+                "external.workflow_conversation_id",
+                external_conv_id,
+                scope="conversation",
+            )
+
+        yield RunnerResult.run_completed(ctx.run_id, usage=usage)
+
+    async def _resume_workflow_once(
+        self,
+        ctx: RunnerContext,
+        client: AsyncDifyClient,
+        submission: typing.Any,
+        remove_think: bool,
+        continuation: dict[str, typing.Any],
+    ) -> typing.AsyncGenerator[RunnerResult, None]:
+        field_map = continuation.get("field_map") if isinstance(continuation.get("field_map"), dict) else {}
+        action_map = continuation.get("action_map") if isinstance(continuation.get("action_map"), dict) else {}
+        inputs = dict(continuation.get("default_inputs") or {})
+        for field_id, value in submission.values.items():
+            provider_name = field_map.get(field_id)
+            if provider_name:
+                inputs[str(provider_name)] = value
+        action_id = submission.action_id or submission.values.get("_dify_action") or ""
+        if not action_id and len(action_map) == 1:
+            action_id = next(iter(action_map))
+        if action_id not in action_map:
+            raise DifyAPIError(
+                "Dify human-input action is missing or invalid",
+                code="dify.interaction_invalid",
+            )
+        action = action_map[action_id]
+        pending_content = ""
+        streamed_content = ""
+        text_event_count = 0
+        has_response = False
+        final_response = False
+        terminal = False
+        usage: dict[str, typing.Any] | None = None
+        async for event in client.workflow_submit(
+            form_token=str(continuation["form_token"]),
+            workflow_run_id=str(continuation["workflow_run_id"]),
+            inputs=inputs,
+            user=str(continuation["user"]),
+            action=str(action),
+        ):
+            event_type = event.get("event", "")
+            usage = _usage_from_payload(event) or usage
+            if event_type == "error":
+                raise DifyAPIError(
+                    f"Dify workflow error: {event.get('message', 'Unknown error')}",
+                    code="dify.api_error",
+                )
+            if event_type in {"message", "agent_message", "text_chunk"}:
+                chunk = (
+                    str(event.get("answer") or "")
+                    if event_type != "text_chunk"
+                    else str(event.get("data", {}).get("text") or "")
+                )
+                if event_type != "text_chunk" and pending_content and chunk.startswith(pending_content):
+                    next_content = chunk
+                else:
+                    next_content = pending_content + chunk
+                if len(next_content) > 1024 * 1024:
+                    raise DifyAPIError("Dify response exceeds the runtime limit", code="dify.response_limit")
+                pending_content = next_content
+                text_event_count += 1
+                if text_event_count % 8 == 0:
+                    content, _ = process_thinking_content(pending_content, remove_think)
+                    if content and content != streamed_content:
+                        streamed_content = content
+                        has_response = True
+                        yield RunnerResult.message_delta(
+                            ctx.run_id,
+                            MessageChunk(role="assistant", content=content, is_final=False),
+                        )
+            elif event_type == "node_finished":
+                data = event.get("data", {})
+                if data.get("node_type") == "answer":
+                    answer = extract_text_from_output(data.get("outputs", {}).get("answer"))
+                    if answer:
+                        content, _ = process_thinking_content(answer, remove_think)
+                        final_response = bool(content)
+                        if content and content != streamed_content:
+                            has_response = True
+                            streamed_content = content
+                            yield RunnerResult.message_delta(
+                                ctx.run_id,
+                                MessageChunk(role="assistant", content=content, is_final=True),
+                            )
+            elif event_type in {"workflow_paused", "human_input_required"}:
+                if pending_content:
+                    content, _ = process_thinking_content(pending_content, remove_think)
+                    if content and content != streamed_content:
+                        has_response = True
+                        streamed_content = content
+                        yield RunnerResult.message_delta(
+                            ctx.run_id,
+                            MessageChunk(role="assistant", content=content, is_final=True),
+                        )
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                if not _workflow_run_id(event):
+                    event = dict(event)
+                    event["data"] = {
+                        **data,
+                        "workflow_run_id": str(continuation["workflow_run_id"]),
+                    }
+                async for result in self._wait_and_resume_workflow(
+                    ctx,
+                    client,
+                    event,
+                    str(continuation["user"]),
+                    remove_think,
+                ):
+                    yield result
+                return
+            elif event_type == "workflow_finished":
+                data = event.get("data", {})
+                if data.get("error"):
+                    raise DifyAPIError(f"Dify workflow error: {data['error']}", code="dify.api_error")
+                summary = extract_workflow_outputs(data.get("outputs", {}))
+                if summary:
+                    content, _ = process_thinking_content(summary, remove_think)
+                    final_response = bool(content)
+                    if content and content != streamed_content:
+                        has_response = True
+                        streamed_content = content
+                        yield RunnerResult.message_delta(
+                            ctx.run_id,
+                            MessageChunk(role="assistant", content=content, is_final=True),
+                        )
+                terminal = True
+
+        if not terminal:
+            raise DifyAPIError(
+                "Dify workflow resume ended before a terminal event",
+                code="dify.response_invalid",
+            )
+        if pending_content and not final_response:
+            content, _ = process_thinking_content(pending_content, remove_think)
+            if content and content != streamed_content:
+                has_response = True
+                yield RunnerResult.message_delta(
+                    ctx.run_id,
+                    MessageChunk(role="assistant", content=content, is_final=True),
+                )
+        if not has_response:
+            raise DifyAPIError(
+                "Dify workflow returned no response after human input",
+                code="dify.api_error",
+            )
+        yield RunnerResult.run_completed(ctx.run_id, usage=usage)

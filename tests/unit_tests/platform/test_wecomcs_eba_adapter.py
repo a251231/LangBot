@@ -200,7 +200,7 @@ async def test_wecomcs_event_converter_maps_media_and_unknown_messages():
     assert isinstance(file_event.message_chain[1], platform_message.File)
     assert isinstance(voice_event.message_chain[1], platform_message.Voice)
     assert isinstance(unknown_event, platform_events.PlatformSpecificEvent)
-    assert unknown_event.action == 'wecomcs.event'
+    assert unknown_event.action == 'wecomcs.unknown'
 
 
 @pytest.mark.asyncio
@@ -258,3 +258,43 @@ async def test_wecomcs_send_reply_and_platform_api_use_underlying_client():
 
     assert token_status == {'valid': True}
     assert customer_info['nickname'] == 'Alice'
+
+
+@pytest.mark.asyncio
+async def test_wecomcs_send_message_resolves_bare_external_userid_from_inbound_message():
+    """Regression for #3021: pipeline/HumanTakeover targets carry only external_userid."""
+    adapter = make_adapter()
+    adapter.bot.list_kf_accounts = AsyncMock(return_value=[{'open_kfid': 'kf-a'}, {'open_kfid': 'kf-b'}])
+    await adapter._handle_native_event(wecomcs_event(open_kfid='kf-b'))
+
+    message = platform_message.MessageChain([platform_message.Plain(text='human reply')])
+    await adapter.send_message('person', 'external-1', message)
+
+    open_kfid, external_userid, _, content = adapter.bot.send_text_msg.await_args.args
+    assert (open_kfid, external_userid, content) == ('kf-b', 'external-1', 'human reply')
+    adapter.bot.list_kf_accounts.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wecomcs_send_message_bare_target_falls_back_to_single_account():
+    adapter = make_adapter()
+    adapter.bot.list_kf_accounts = AsyncMock(return_value=[{'open_kfid': 'kf-only', 'name': 'Support'}])
+
+    message = platform_message.MessageChain([platform_message.Plain(text='hi')])
+    await adapter.send_message('person', 'external-9', message)
+
+    open_kfid, external_userid, _, _ = adapter.bot.send_text_msg.await_args.args
+    assert (open_kfid, external_userid) == ('kf-only', 'external-9')
+
+
+@pytest.mark.asyncio
+async def test_wecomcs_send_message_bare_target_is_rejected_when_ambiguous():
+    adapter = make_adapter()
+    adapter.bot.list_kf_accounts = AsyncMock(return_value=[{'open_kfid': 'kf-a'}, {'open_kfid': 'kf-b'}])
+    message = platform_message.MessageChain([platform_message.Plain(text='hi')])
+
+    with pytest.raises(ValueError, match='cannot infer open_kfid'):
+        await adapter.send_message('person', 'external-9', message)
+    with pytest.raises(ValueError, match='external_userid\\|open_kfid'):
+        await adapter.send_message('person', 'external-9|', message)
+    adapter.bot.send_text_msg.assert_not_awaited()

@@ -203,7 +203,8 @@ test('bot guide starts on the detail page after adapter-only creation', async ({
   const adapterCard = page.locator('[data-slot="card"]').filter({
     has: page.getByText('Adapter Configuration', { exact: true }),
   });
-  await expect(adapterCard.getByRole('switch')).toBeChecked();
+  await expect(adapterCard.getByRole('switch')).toHaveCount(0);
+  await expect(page.getByRole('radio', { name: /^Webhook/ })).toBeChecked();
   await guide.getByRole('button', { name: 'Next' }).click();
 
   await expect(
@@ -318,7 +319,7 @@ test('bot adapter gallery keeps categories and fits desktop and mobile', async (
     )
     .toBe(true);
 
-  await gallery.getByRole('button', { name: /Legacy adapters/ }).click();
+  await gallery.getByRole('button', { name: /^Legacy adapters \d+$/ }).click();
   await expect(
     gallery.getByRole('button', { name: /Legacy Adapter/ }),
   ).toBeVisible();
@@ -473,10 +474,10 @@ test('pipeline guide follows its configuration sections, debug, history and bot 
     .elementHandle();
   await guide.getByRole('button', { name: 'Next', exact: true }).click();
   await expect(
-    page.locator('[data-guide="pipeline-section-ai"]'),
+    page.locator('[data-guide="pipeline-section-speech"]'),
   ).toHaveAttribute('data-state', 'active');
   await expect(
-    guide.getByRole('heading', { name: 'Configure AI capabilities' }),
+    guide.getByRole('heading', { name: 'Configure speech capabilities' }),
   ).toBeVisible();
   await guide.getByRole('button', { name: 'Previous', exact: true }).click();
   await expect(
@@ -486,6 +487,7 @@ test('pipeline guide follows its configuration sections, debug, history and bot 
     true,
   );
   for (const title of [
+    'Configure speech capabilities',
     'Configure AI capabilities',
     'Adjust replies',
     'Set safety controls',
@@ -641,11 +643,11 @@ for (const available of [true, false]) {
       guide.getByRole('heading', { name: 'Review execution results' }),
     ).toBeVisible();
     await expect(
-      page.locator('[data-guide="event-processor-form-tab-logs"]'),
+      page.getByRole('tab', { name: 'Run logs', exact: true }),
     ).toHaveAttribute('data-state', 'active');
     await guide.getByRole('button', { name: 'Previous', exact: true }).click();
     await expect(
-      page.locator('[data-guide="event-processor-form-tab-config"]'),
+      page.getByRole('tab', { name: 'Configure & debug', exact: true }),
     ).toHaveAttribute('data-state', 'active');
     await guide.getByRole('button', { name: 'Next', exact: true }).click();
     if (available) {
@@ -655,7 +657,7 @@ for (const available of [true, false]) {
       ).toBeVisible();
       await expect(guide).toContainText('no per-event routing needed');
       await expect(
-        page.locator('[data-guide="event-processor-form-tab-config"]'),
+        page.getByRole('tab', { name: 'Configure & debug', exact: true }),
       ).toHaveAttribute('data-state', 'active');
     }
     await guide.getByRole('button', { name: 'Finish', exact: true }).click();

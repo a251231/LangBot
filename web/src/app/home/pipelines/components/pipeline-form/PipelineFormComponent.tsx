@@ -1,3 +1,4 @@
+import { useSnapshotDirty } from '@/app/infra/hooks/useSnapshotDirty';
 import GuidedTour, {
   type GuidedTourStep,
 } from '@/app/home/components/guided-tour/GuidedTour';
@@ -16,6 +17,7 @@ import {
   useState,
 } from 'react';
 import { httpClient } from '@/app/infra/http/HttpClient';
+import { systemInfo } from '@/app/infra/http';
 import { GetPipelineResponseData, Pipeline } from '@/app/infra/entities/api';
 import {
   PipelineConfigTab,
@@ -25,7 +27,7 @@ import DynamicFormComponent from '@/app/home/components/dynamic-form/DynamicForm
 import { getDefaultValues } from '@/app/home/components/dynamic-form/DynamicFormItemConfig';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useForm } from 'react-hook-form';
+import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Input } from '@/components/ui/input';
@@ -59,6 +61,7 @@ import {
   Info,
   Brain,
   Zap,
+  Mic,
   Shield,
   FileOutput,
   Puzzle,
@@ -115,6 +118,7 @@ interface PipelineFormComponentProps {
   onDirtyChange?: (dirty: boolean) => void;
   onSavingChange?: (saving: boolean) => void;
   onLegacyPipeline?: (pipeline: Pipeline) => void;
+  onSensitiveToolsChange?: (tools: string[]) => void;
   guideEnabled?: boolean;
   debugGuideEnabled?: boolean;
   monitoringGuideEnabled?: boolean;
@@ -147,6 +151,7 @@ const PipelineFormComponent = forwardRef<
     onDirtyChange,
     onSavingChange,
     onLegacyPipeline,
+    onSensitiveToolsChange,
   },
   ref,
 ) {
@@ -169,6 +174,7 @@ const PipelineFormComponent = forwardRef<
         }),
         ai: z.record(z.string(), z.any()),
         trigger: z.record(z.string(), z.any()),
+        speech: z.record(z.string(), z.any()).optional(),
         safety: z.record(z.string(), z.any()),
         output: z.record(z.string(), z.any()),
       })
@@ -180,6 +186,7 @@ const PipelineFormComponent = forwardRef<
         }),
         ai: z.record(z.string(), z.any()).optional(),
         trigger: z.record(z.string(), z.any()).optional(),
+        speech: z.record(z.string(), z.any()).optional(),
         safety: z.record(z.string(), z.any()).optional(),
         output: z.record(z.string(), z.any()).optional(),
       });
@@ -190,6 +197,7 @@ const PipelineFormComponent = forwardRef<
     basic: Info,
     ai: Brain,
     trigger: Zap,
+    speech: Mic,
     safety: Shield,
     output: FileOutput,
     extensions: Puzzle,
@@ -211,6 +219,11 @@ const PipelineFormComponent = forwardRef<
           label: t('pipelines.triggerConditions'),
           name: 'trigger',
           icon: SECTION_ICONS.trigger,
+        },
+        {
+          label: t('pipelines.speechProcessing'),
+          name: 'speech',
+          icon: SECTION_ICONS.speech,
         },
         {
           label: t('pipelines.safetyControls'),
@@ -242,6 +255,7 @@ const PipelineFormComponent = forwardRef<
   const guideSteps = useMemo<GuidedTourStep[]>(() => {
     const sections = [
       'trigger',
+      'speech',
       'ai',
       'output',
       'safety',
@@ -285,7 +299,7 @@ const PipelineFormComponent = forwardRef<
       },
     ];
   }, [t, debugGuideEnabled, monitoringGuideEnabled]);
-  const primarySectionNames = ['trigger', 'ai', 'output'];
+  const primarySectionNames = ['trigger', 'speech', 'ai', 'output'];
   const primarySections = primarySectionNames
     .map((name) => formLabelList.find((section) => section.name === name))
     .filter((section): section is SectionItem => Boolean(section));
@@ -300,6 +314,8 @@ const PipelineFormComponent = forwardRef<
   const [aiConfigTabSchema, setAIConfigTabSchema] =
     useState<PipelineConfigTab>();
   const [triggerConfigTabSchema, setTriggerConfigTabSchema] =
+    useState<PipelineConfigTab>();
+  const [speechConfigTabSchema, setSpeechConfigTabSchema] =
     useState<PipelineConfigTab>();
   const [safetyConfigTabSchema, setSafetyConfigTabSchema] =
     useState<PipelineConfigTab>();
@@ -324,12 +340,24 @@ const PipelineFormComponent = forwardRef<
       output: {},
     },
   });
+  useWatch({
+    control: form.control,
+    compute: (values) => [
+      values.ai?.runner?.id,
+      values.output?.misc?.['remove-think'],
+    ],
+  });
   const runnerInstallScope = `pipeline:${pipelineId || 'new'}`;
   const applyInstalledRunner = useCallback((installed: InstalledRunner) => {
     setAIConfigTabSchema(installed.configTab);
   }, []);
   const dynamicFormSystemContext = useMemo(
-    () => ({ pipeline_id: pipelineId }),
+    () => ({
+      pipeline_id: pipelineId,
+      prompt_library_kind: 'messaging',
+      // Cloud-only settings (e.g. the daily quota notice) use show_if on this.
+      is_cloud: systemInfo.edition === 'cloud',
+    }),
     [pipelineId],
   );
 
@@ -337,15 +365,11 @@ const PipelineFormComponent = forwardRef<
   const savedSnapshotRef = useRef<string>('');
   // Track which dynamic form stages have completed their initial mount emission.
   const initializedStagesRef = useRef<Set<string>>(new Set());
-  const watchedValues = form.watch();
-  const hasUnsavedChanges = (() => {
-    if (!isEditMode || !savedSnapshotRef.current) return false;
-    return JSON.stringify(watchedValues) !== savedSnapshotRef.current;
-  })();
-  // Keep a ref so that non-reactive callbacks (handleDynamicFormEmit) can
-  // read the latest dirty state without stale closures.
-  const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
-  hasUnsavedChangesRef.current = hasUnsavedChanges;
+  const {
+    isDirty: hasUnsavedChanges,
+    dirtyRef: hasUnsavedChangesRef,
+    refreshDirty,
+  } = useSnapshotDirty(form, savedSnapshotRef, isEditMode);
 
   // Notify parent when dirty state changes
   useEffect(() => {
@@ -367,6 +391,8 @@ const PipelineFormComponent = forwardRef<
             setAIConfigTabSchema(config);
           } else if (config.name === 'trigger') {
             setTriggerConfigTabSchema(config);
+          } else if (config.name === 'speech') {
+            setSpeechConfigTabSchema(config);
           } else if (config.name === 'safety') {
             setSafetyConfigTabSchema(config);
           } else if (config.name === 'output') {
@@ -400,11 +426,13 @@ const PipelineFormComponent = forwardRef<
             },
             ai: resp.pipeline.config.ai,
             trigger: resp.pipeline.config.trigger,
+            speech: resp.pipeline.config.speech,
             safety: resp.pipeline.config.safety,
             output: resp.pipeline.config.output,
           };
           form.reset(loadedValues);
           savedSnapshotRef.current = JSON.stringify(loadedValues);
+          refreshDirty();
           initializedStagesRef.current.clear();
           setPipelineLoaded(true);
         })
@@ -415,7 +443,14 @@ const PipelineFormComponent = forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [form, isEditMode, pipelineId, loadAttempt, onLegacyPipeline]);
+  }, [
+    form,
+    isEditMode,
+    pipelineId,
+    loadAttempt,
+    onLegacyPipeline,
+    refreshDirty,
+  ]);
 
   useEffect(() => {
     if (
@@ -516,6 +551,7 @@ const PipelineFormComponent = forwardRef<
     const realConfig = {
       ai: values.ai,
       trigger: values.trigger,
+      speech: values.speech,
       safety: values.safety,
       output: values.output,
     };
@@ -538,6 +574,7 @@ const PipelineFormComponent = forwardRef<
     try {
       await httpClient.updatePipeline(pipelineId || '', pipeline);
       savedSnapshotRef.current = submittedSnapshot;
+      refreshDirty();
       onFinish();
       toast.success(t('pipelines.saveSuccess'));
       return true;
@@ -572,6 +609,7 @@ const PipelineFormComponent = forwardRef<
           emoji: values.emoji || '⚙️',
         };
         savedSnapshotRef.current = JSON.stringify(snapshot);
+        refreshDirty();
       }
     },
     async save() {
@@ -595,6 +633,7 @@ const PipelineFormComponent = forwardRef<
     stageName: string,
     values: object,
   ) {
+    const wasDirty = hasUnsavedChangesRef.current;
     const stageKey = `${String(formName)}.${stageName}`;
     const isFirstEmission =
       !initializedStagesRef.current.has(stageKey) &&
@@ -665,8 +704,9 @@ const PipelineFormComponent = forwardRef<
       // runner), the snapshot must remain at the last-saved state so that
       // hasUnsavedChanges stays true.
       const currentSnapshot = JSON.stringify(form.getValues());
-      if (savedSnapshotRef.current === '' || !hasUnsavedChangesRef.current) {
+      if (savedSnapshotRef.current === '' || !wasDirty) {
         savedSnapshotRef.current = currentSnapshot;
+        refreshDirty();
       }
     }
   }
@@ -698,7 +738,7 @@ const PipelineFormComponent = forwardRef<
   ) {
     // Special handling for AI config section
     if (formName === 'ai') {
-      const runnerConfig = (form.watch('ai.runner') as any) || {};
+      const runnerConfig = (form.getValues('ai.runner') as any) || {};
       const currentRunner = runnerConfig.id;
 
       // If this is the runner selector stage, render it directly
@@ -707,6 +747,9 @@ const PipelineFormComponent = forwardRef<
           <Card key={stage.name}>
             <CardHeader>
               <CardTitle>{extractI18nObject(stage.label)}</CardTitle>
+              <CardDescription>
+                {t('pipelines.extensions.runnerScopeHint')}
+              </CardDescription>
               {stage.description && (
                 <CardDescription>
                   {extractI18nObject(stage.description)}
@@ -717,7 +760,7 @@ const PipelineFormComponent = forwardRef<
               <DynamicFormComponent
                 itemConfigList={stage.config}
                 initialValues={
-                  (form.watch(formName) as Record<string, unknown>)?.[
+                  (form.getValues(formName) as Record<string, unknown>)?.[
                     stage.name
                   ] || {}
                 }
@@ -752,7 +795,7 @@ const PipelineFormComponent = forwardRef<
       const isPluginRunner =
         currentRunner && currentRunner.startsWith('plugin:');
       if (isPluginRunner) {
-        const runnerConfigs = (form.watch('ai.runner_config') as any) || {};
+        const runnerConfigs = (form.getValues('ai.runner_config') as any) || {};
         const stageInitialValues = runnerConfigs[stage.name] || {};
         return (
           <Card key={stage.name}>
@@ -784,7 +827,7 @@ const PipelineFormComponent = forwardRef<
         ? PersistedRunnerForm
         : DynamicFormComponent;
     const stageInitialValues: Record<string, any> =
-      (form.watch(formName) as Record<string, any>)?.[stage.name] || {};
+      (form.getValues(formName) as Record<string, any>)?.[stage.name] || {};
 
     return (
       <Card key={stage.name}>
@@ -883,7 +926,7 @@ const PipelineFormComponent = forwardRef<
                 <nav className="mb-4 shrink-0 space-y-2 border-b pb-4">
                   <Tabs value={activeSection} onValueChange={setActiveSection}>
                     <div className="overflow-x-auto">
-                      <TabsList className="grid min-w-[34rem] w-full grid-cols-3">
+                      <TabsList className="grid min-w-[34rem] w-full grid-cols-4">
                         {primarySections.map((section) => {
                           const Icon = section.icon;
                           return (
@@ -1092,6 +1135,14 @@ const PipelineFormComponent = forwardRef<
                       </div>
                     )}
 
+                    {activeSection === 'speech' && speechConfigTabSchema && (
+                      <div className="space-y-6">
+                        {speechConfigTabSchema.stages.map((stage) =>
+                          renderDynamicForms(stage, 'speech'),
+                        )}
+                      </div>
+                    )}
+
                     {activeSection === 'safety' && safetyConfigTabSchema && (
                       <div className="space-y-6">
                         {safetyConfigTabSchema.stages.map((stage) =>
@@ -1109,7 +1160,10 @@ const PipelineFormComponent = forwardRef<
                     )}
 
                     {activeSection === 'extensions' && pipelineId && (
-                      <PipelineExtension pipelineId={pipelineId} />
+                      <PipelineExtension
+                        pipelineId={pipelineId}
+                        onSensitiveToolsChange={onSensitiveToolsChange}
+                      />
                     )}
                   </>
                 )}

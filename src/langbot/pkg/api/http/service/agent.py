@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from ....i18n import t
+
+from contextlib import aclosing
+
 import datetime
 import copy
 import fnmatch
@@ -32,12 +36,18 @@ from ....agent.runner.host_models import (
 from ....agent.runner.resource_policy import ResourcePolicyProjector
 from ....agent.runner.platform_tools import (
     PLATFORM_TOOL_DEFINITIONS,
+    default_agent_platform_tools,
     platform_tool_catalog,
     resolve_agent_platform_tool_names,
     validate_debug_mock_options,
 )
 from ....entity.persistence import agent as persistence_agent
+from ....storage.artifacts import ArtifactError
 from ....workspace.errors import WorkspaceNotFoundError
+from ...application.contracts import ApplicationAPIException
+from ...application.errors import error_from_exception
+from ...application.tool_grants import get_workspace_operations_catalog, validate_operation_preferences
+from ...application.plugin_permissions import workspace_operation_grants
 from ..context import ExecutionContext, RequestContext
 from .tenant import TenantContext, require_workspace_uuid, scope_statement
 
@@ -45,7 +55,7 @@ from .tenant import TenantContext, require_workspace_uuid, scope_statement
 AGENT_KIND_AGENT = 'agent'
 AGENT_KIND_PIPELINE = 'pipeline'
 AGENT_KIND_EVENT_PROCESSOR = 'event_processor'
-PIPELINE_EVENT_PATTERNS = ['message.*']
+PIPELINE_EVENT_PATTERNS = ['message.received']
 AGENT_DEFAULT_EVENT_PATTERNS = ['*']
 
 
@@ -75,19 +85,22 @@ class AgentService:
         event_processors = []
         registry = getattr(self.ap, 'runner_registry', None)
         if registry is not None:
-            event_processors = [
-                item.model_dump(mode='json')
-                for item in await registry.list_runners(
-                    context,
-                    usage='event',
-                    use_cache=False,
-                )
-            ]
+            for item in await registry.list_runners(
+                context,
+                usage='event',
+                use_cache=False,
+            ):
+                dumped = item.model_dump(mode='json')
+                event_processors.append(dumped)
+        ws_catalog = get_workspace_operations_catalog(self.ap, context)
         return {
             'event_processors': event_processors,
             'runner_config': ai_metadata,
             'platform_tools': platform_tool_catalog(),
             'host_tools': host_tools,
+            'workspace_operations': ws_catalog['workspace_operations'],
+            'workspace_operation_grants': await workspace_operation_grants(self.ap, context),
+            'domains': ws_catalog['domains'],
             'kinds': [
                 {
                     'name': AGENT_KIND_AGENT,
@@ -176,6 +189,32 @@ class AgentService:
         if not runner_id:
             raise ValueError('Agent has no configured runner')
 
+        artifact_ids = payload.get('artifact_ids', [])
+        if (
+            not isinstance(artifact_ids, list)
+            or len(artifact_ids) > 20
+            or any(not isinstance(value, str) or not value for value in artifact_ids)
+            or len(set(artifact_ids)) != len(artifact_ids)
+        ):
+            raise ValueError('artifact_ids must contain at most 20 distinct Artifact IDs')
+        artifacts = []
+        for artifact_id in artifact_ids:
+            # Check the authenticated caller, never the synthetic event actor.
+            try:
+                metadata = await self.ap.artifact_service.get(context, artifact_id)
+            except (FileNotFoundError, ArtifactError) as exc:
+                raise ApplicationAPIException(error_from_exception(exc, operation_id='artifact.get')) from exc
+            artifacts.append(
+                {
+                    'ref': artifact_id,
+                    'type': 'image' if metadata['mime_type'].startswith('image/') else 'file',
+                    'source': 'artifact',
+                    'name': metadata['name'],
+                    'mime_type': metadata['mime_type'],
+                    'size': metadata['size'],
+                }
+            )
+
         conversation_id = str(payload.get('conversation_id') or f'debug:{agent_uuid}').strip()
         if not conversation_id or len(conversation_id) > 256:
             raise ValueError('Invalid debug conversation_id')
@@ -228,8 +267,12 @@ class AgentService:
                     'text': text or event_type,
                     'contents': [
                         {'type': 'text', 'text': text or event_type},
+                        *(
+                            {'type': 'text', 'text': f'[attachment {item["ref"]}: {item["type"]} {item["name"]}]'}
+                            for item in artifacts
+                        ),
                     ],
-                    'attachments': [],
+                    'attachments': artifacts,
                 }
             ),
             delivery=DeliveryContext(
@@ -291,6 +334,7 @@ class AgentService:
                 allowed_platform_tool_names=resolve_agent_platform_tool_names(config, event_type),
                 allowed_host_tool_names=config.get('allowed_tools'),
                 override_runner_tools='allowed_tools' in config,
+                allowed_workspace_operations=config.get('allowed_workspace_operations'),
             ),
             state_policy=StatePolicy(
                 state_scopes=['conversation', 'actor', 'subject', 'runner'],
@@ -312,13 +356,14 @@ class AgentService:
         # prompt before advertising the Host prompt API. Keep explicit [] intact.
         descriptor = await self.ap.runner_registry.get(execution_context, runner_id)
         prompt_config = extract_prompt_config(descriptor, runner_config, [])
-        execution_query = build_execution_query(event, [])
+        execution_query = build_execution_query(event, [], execution_context)
+        if artifact_ids:
+            object.__setattr__(execution_query, '_input_artifact_context', context)
+            object.__setattr__(execution_query, '_input_artifact_ids', frozenset(artifact_ids))
         execution_query.prompt = provider_prompt.Prompt(
             name='default',
             messages=[provider_message.Message(**message) for message in copy.deepcopy(prompt_config)],
         )
-        for field_name in ('instance_uuid', 'workspace_uuid', 'placement_generation', 'query_uuid'):
-            object.__setattr__(execution_query, field_name, getattr(execution_context, field_name))
         project_mcp_resource_config(execution_query, runner_config)
 
         output_items: list[dict[str, typing.Any]] = []
@@ -348,25 +393,45 @@ class AgentService:
                 execution_events.append(visible_result)
 
         final_text = ''
-        async for output in self.ap.agent_run_orchestrator.run(
-            event,
-            binding,
-            adapter_context={
-                '_query': execution_query,
-                '_execution_context': execution_context,
-                '_result_observer': observe_result,
-            },
+        # A debug run has no platform event: the synthetic event envelope is the
+        # execution's inbound boundary, so the chain is opened here with the real
+        # event id and marked as a debug WebUI/API execution. The Runner inside
+        # then joins this chain instead of becoming a trace origin of its own.
+        from ....telemetry.execution import ingress as execution_ingress
+
+        principal_type = str(getattr(getattr(context, 'principal', None), 'principal_type', '') or '')
+        origin = 'api' if principal_type == 'api_key' else 'webui'
+        with execution_ingress(
+            self.ap,
+            'completed',
+            execution_context,
+            event_id,
+            debug=True,
+            origin=origin,
+            synthetic_event=event_type,
         ):
-            output_text = self._provider_output_to_text(output)
-            if output_text:
-                final_text = output_text
-            output_items.append(
-                {
-                    'kind': output.__class__.__name__,
-                    'role': str(getattr(output, 'role', '') or ''),
-                    'text': output_text,
-                }
-            )
+            async with aclosing(
+                self.ap.agent_run_orchestrator.run(
+                    event,
+                    binding,
+                    adapter_context={
+                        '_query': execution_query,
+                        '_execution_context': execution_context,
+                        '_result_observer': observe_result,
+                    },
+                )
+            ) as owned_stream:
+                async for output in owned_stream:
+                    output_text = self._provider_output_to_text(output)
+                    if output_text:
+                        final_text = output_text
+                    output_items.append(
+                        {
+                            'kind': output.__class__.__name__,
+                            'role': str(getattr(output, 'role', '') or ''),
+                            'text': output_text,
+                        }
+                    )
 
         return {
             'event_id': event_id,
@@ -410,11 +475,11 @@ class AgentService:
             pipeline_uuid = await self.ap.pipeline_service.create_pipeline(
                 context,
                 {
-                    'name': agent_data.get('name') or 'New Pipeline',
+                    'name': agent_data.get('name') or t('New Pipeline'),
                     'description': agent_data.get('description') or '',
                     'emoji': agent_data.get('emoji') or '⚙️',
-                    'config': {},
                 },
+                runner_id=agent_data.get('runner_id'),
             )
             return {'uuid': pipeline_uuid, 'kind': AGENT_KIND_PIPELINE}
 
@@ -427,12 +492,24 @@ class AgentService:
             config = agent_data['config'] if 'config' in agent_data else await self._get_default_agent_config(context)
             config, runner_id, _ = RunnerConfigResolver.resolve_agent_config(config)
             await self._validate_runner_for_agent(context, runner_id)
+            if runner_id:
+                descriptor = await self.ap.runner_registry.get(context, runner_id)
+                config['runner_config'][runner_id] = await self.ap.llm_model_service.apply_default_model(
+                    context,
+                    descriptor.config_schema,
+                    config['runner_config'][runner_id],
+                )
             patterns = agent_data.get('supported_event_patterns', AGENT_DEFAULT_EVENT_PATTERNS)
+            if isinstance(config, dict) and 'allowed_platform_tools' not in config:
+                config['allowed_platform_tools'] = default_agent_platform_tools()
+        if isinstance(config, dict) and 'allowed_workspace_operations' in config:
+            new_ops = config['allowed_workspace_operations']
+            config['allowed_workspace_operations'] = validate_operation_preferences(self.ap, context, [], new_ops)
         new_uuid = str(uuid.uuid4())
         values = {
             'workspace_uuid': workspace_uuid,
             'uuid': new_uuid,
-            'name': agent_data.get('name') or 'New Agent',
+            'name': agent_data.get('name') or t('New Agent'),
             'description': agent_data.get('description') or '',
             'emoji': agent_data.get('emoji') or ('🧩' if kind == AGENT_KIND_EVENT_PROCESSOR else '🤖'),
             'kind': kind,
@@ -452,6 +529,9 @@ class AgentService:
             await self.ap.pipeline_service.update_pipeline(context, agent_uuid, agent_data)
             return
 
+        old_config = existing_agent.config if isinstance(existing_agent.config, dict) else {}
+        old_ops = old_config.get('allowed_workspace_operations', [])
+
         update_data = {
             field: agent_data[field]
             for field in ('name', 'description', 'emoji', 'config', 'supported_event_patterns')
@@ -470,6 +550,17 @@ class AgentService:
         update_data['component_ref'] = runner_id
         if existing_agent.kind == AGENT_KIND_AGENT:
             await self._validate_runner_for_agent(context, runner_id)
+
+        if 'config' in update_data and isinstance(update_data['config'], dict):
+            new_config = update_data['config']
+            if 'allowed_workspace_operations' in new_config:
+                new_ops = new_config['allowed_workspace_operations']
+                new_config['allowed_workspace_operations'] = validate_operation_preferences(
+                    self.ap, context, old_ops, new_ops
+                )
+            else:
+                new_config['allowed_workspace_operations'] = old_ops
+
         result = await self.ap.persistence_mgr.execute_async(
             scope_statement(
                 sqlalchemy.update(persistence_agent.Agent)
@@ -485,6 +576,7 @@ class AgentService:
     async def delete_agent(self, context: TenantContext, agent_uuid: str) -> None:
         existing_agent = await self._get_agent_row(context, agent_uuid)
         if existing_agent is not None:
+            await self.ap.bot_service.require_processor_unbound(context, agent_uuid)
             result = await self.ap.persistence_mgr.execute_async(
                 scope_statement(
                     sqlalchemy.delete(persistence_agent.Agent).where(persistence_agent.Agent.uuid == agent_uuid),
@@ -494,6 +586,9 @@ class AgentService:
             )
             if getattr(result, 'rowcount', None) == 0:
                 raise WorkspaceNotFoundError('Agent not found')
+            publication = getattr(self.ap, 'artifact_publication_service', None)
+            if publication is not None:
+                await publication.remove_producer(context, existing_agent.kind, agent_uuid)
             return
 
         pipeline = await self.ap.pipeline_service.get_pipeline(context, agent_uuid)
@@ -509,6 +604,7 @@ class AgentService:
 
     async def _prepare_event_processor(self, context, data, existing=None):
         """Resolve an installed component and keep its capability declaration authoritative."""
+        draft = existing is None and 'config' not in data and 'parameters' not in data
         config = copy.deepcopy(data.get('config', existing.config if existing is not None else {}))
         if not isinstance(config, dict):
             raise ValueError('Processor configuration must be an object')
@@ -537,13 +633,19 @@ class AgentService:
             parameters = runner_config.get(component_ref)
         if parameters is None:
             parameters = self.ap.pipeline_service._get_default_values_from_schema(descriptor.config_schema)
+        if draft:
+            parameters = await self.ap.llm_model_service.apply_default_model(
+                context, descriptor.config_schema, parameters
+            )
         if not isinstance(parameters, dict):
             raise ValueError('Processor parameters must be an object')
         for field in descriptor.config_schema:
-            if field.get('required') and parameters.get(field['name']) in (None, ''):
+            if not draft and field.get('required') and parameters.get(field['name']) in (None, ''):
                 raise ValueError(f'Required processor parameter: {field["name"]}')
         config['runner_config'] = {component_ref: parameters}
-        return config, component_ref, descriptor.supported_event_patterns
+        # Component-only creation keeps defaults for the detail form, but does
+        # not subscribe to events until configuration is saved and validated.
+        return config, component_ref, [] if draft else descriptor.supported_event_patterns
 
     async def get_processor_runs(self, context, processor_id, *, before_id=None):
         """Read only this Workspace's Agent or plugin processor runs."""

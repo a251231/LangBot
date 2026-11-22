@@ -1,25 +1,30 @@
 # 上游同步与 Fork 兼容规则
 
-本仓库以 `langbot-app/LangBot` 的 `master` 为上游。2026-10-01 同步基点为 `41820cd1`（上游版本 `4.11.0-beta.3`），本 Fork 的发布版本为 `4.11.0`，Plugin SDK 为 `0.7.6`。运行链路和权限边界以 `ARCHITECTURE.md` 为准。
+本仓库以 `langbot-app/LangBot` 的 `master` 为上游。2026-11-22 同步基点为 `9603b543`（上游版本 `4.11.9` 及后续 `master` 提交），Plugin SDK 已随上游并入仓库 `sdk/` 目录，版本为 `0.7.26`。运行链路和权限边界以 `ARCHITECTURE.md` 为准。
 
 ## 当前兼容行为
 
-- SQLite 独立查询保留有限次数的锁重试；工作区事务保持上游的事务所有权和回滚规则。
-- 手动清理会话使用上游的工作区会话索引和单调时钟；执行中的会话继续保留。
-- 插件配置保存后按工作区读回校验，HTTP 响应返回脱敏配置，前端据此确认保存并清理未使用附件。
-- 飞书主动消息保留目标类型映射和租户凭据，同时支持上游的 Markdown 表格消息。历史撤回事件桥接通过当前消息事件绑定取得 pipeline，并传递完整工作区执行上下文。
-- 微信消息去重、群提及解析和飞书监控显示名继续保留。微信同步信封中的 `AddMsgs` 逐条提交到主事件循环，沿用有界回调和停止清理机制；消息入口保留部署中的文本筛选规则。`auto_accept_friend` 默认关闭，开启后按好友申请携带的群上下文调用 `AgreeAdd`，并检查业务返回码，避免重复接受。
-- 监控会话更新沿用上游的用户 ID 归一化规则：数字 ID 转为字符串，字符串 ID 保持原值，兼容 PostgreSQL 严格参数类型。
-- Docker 保留中文字体；镜像发布到 Fork 配置的 Docker 用户仓库。预发布版本创建为 GitHub prerelease，避免触发稳定版镜像标签发布。
-- 仓库插件及打包 workflow 继续保留；插件包通过 CI artifact 和仓库 `dist` 分发，GitHub Release 仅提供 LangBot 前端包及 fnOS 安装包。插件 workflow 不监听 Release 发布事件，也不向 Release 上传插件附件。主工作区开发中的插件内容独立于本次同步。
-- CLA 签名 workflow 只在上游仓库运行；Fork 的合并检查不向上游 CLA 仓库写入签名。
-- 本 Fork 的稳定版 GitHub Release 标记为 Latest，发布版本镜像和 `latest` 标签；`master` 标签继续跟随主分支构建。界面查询本仓库 Release，优先提示稳定版；Compose 中 Watchtower 跟踪容器当前使用的镜像标签。
-- PyPI 发布 workflow 只在上游仓库运行；本 Fork 通过 GitHub Release 和自己的 Docker 仓库分发。
+- **WeChatFerry 适配器**：保留 [wechatferry.py](../src/langbot/pkg/platform/sources/wechatferry.py) 及其配置模板与单测（含 Helper V4-V7 内联 Base64 图片、发送者/群名解析、64MiB WS 帧与异步分发）。
+- **WeChatPad 增强**：保留消息去重、群提及解析、同步信封 `AddMsgs` 逐条提交到主事件循环、部署文本筛选规则以及默认关闭的 `auto_accept_friend` 好友申请处理与单测。
+- **纯插件部署模式 (`system.plugin_only`)**：保留未认领消息静默、跳过 Agent 路由以及无模型/纯插件 Pipeline 的配置迁移支持（详见 [plugin-only-deployment.zh-CN.md](plugin-only-deployment.zh-CN.md)）。
+- **飞书增强与监控显示名**：
+  - 飞书主动消息保留目标类型映射与租户凭据，同时支持上游的 Markdown 表格消息与媒体发送。
+  - 历史撤回事件 `MessageRecalled` 桥接继续通过当前消息事件绑定取得 pipeline，并传递完整工作区执行上下文。
+  - 监控会话与消息采用上游 `SessionSummaryWriter` 与 `extract_sender_name` 统一写入 `user_name`；当消息无发送者名称时回退至群名，CSV 导出与前端类型保留 `user_name`。
+- **核心稳定性加固**：
+  - SQLite 连接配置（WAL、`busy_timeout=30000`、`journal_size_limit`、`auto_vacuum=INCREMENTAL`）与 `telemetry/platform.py` 的 `object.__setattr__` 修复已由上游原生吸收，直接采用上游实现。
+  - `persistence/mgr.py` 独立查询继续保留有限次数的 SQLite 锁重试；工作区事务保持上游事务所有权与回滚规则。
+  - 手动清理闲置会话继续保留在 `sessionmgr.py` 与 `system.py`，执行中会话不被清理。
+  - 插件配置保存后按工作区读回校验，HTTP 响应返回脱敏配置，前端 `PluginForm` 据此确认保存并清理未使用附件；保留 `N8nAuthFormComponent` 与 `MCPForm` 表单校验修复。
+- **插件目录回归上游 Monorepo**：原 Fork 内置的 3 个飞书自研插件（`feishu_ai_analysis_plugin`、`feishu_keyword_report_plugin`、`feishu_process_bitable_plugin`）及 `build-plugins.yml` 已拆分至独立仓库并从本仓库移除；`plugins/` 目录完全对齐上游官方插件 Monorepo。
+- **Fork Docker、CI 与发布定制**：
+  - Docker 镜像在采用上游多阶段构建的基础上保留中文字体（`fontconfig`、`fonts-noto-cjk`）。
+  - Docker 镜像发布至 Fork 配置的 `${{ secrets.DOCKER_USERNAME }}/langbot` 仓库（包含上游新增的 `seekdb`/`milvus`/`valkey` extra 变体）；`docker/docker-compose.yaml` 中 `langbot`、`langbot_plugin_runtime`、`langbot_box` 均指向 `a251231/langbot:master` 并启用 Watchtower 跟踪。
+  - 前端版本更新检查指向本 Fork 仓库 `a251231/LangBot` 的 GitHub Releases。
+  - CLA 签名与 PyPI 发布 workflow 仅在 `langbot-app/LangBot` 上游仓库运行。
 
 ## 数据库升级
 
-`0034_merge_fork_rag_repair` 汇合上游 `0033_operation_traceability` 和 Fork 历史 `0009_merge_rag_mcp_heads`，使 Alembic 保持单一 head。该节点只连接迁移历史，不额外修改业务表结构。
-
-已有数据库中的历史长版本号通过 `alembic_runner.py` 的别名表归一化。升级继续沿上游迁移链执行；SQLite 迁移使用上游提供的备份与恢复机制。升级运行实例前备份数据库和配置，并先验证自有插件与新 SDK 的实际运行兼容性。
-
-历史 RAG 修复只处理工作区迁移前的 schema；已具备 `workspace_uuid` 的知识库由上游迁移负责，避免历史分支重放时修改已经迁移的数据和元数据。降级到上游分支父节点时，Fork 的历史修复 head 继续保留，重新升级后再汇入单一 head。
+- `0057_merge_fork_upstream_heads` 汇合上游最新节点 `0056_daily_usage_quota_warning` 与 Fork 历史修复分支头 `0035_monitoring_tool_workspace`（其父节点为 `0034_merge_fork_rag_repair`），使 Alembic 保持单一 head，不额外修改业务表结构。
+- 已有数据库中的历史长版本号通过 `alembic_runner.py` 的别名表归一化，已部署的旧 Fork 实例可直接无缝升级至最新 schema。
+- 升级运行实例前请先备份数据库和配置，并验证独立仓库维护的自研插件与 SDK `0.7.26` 的实际运行兼容性。

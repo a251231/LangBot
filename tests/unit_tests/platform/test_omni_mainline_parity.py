@@ -39,7 +39,13 @@ def chain(text):
 def test_omni_config_contains_mainline_options_and_help(name):
     legacy = yaml.safe_load((PLATFORM / 'sources' / f'{name}.yaml').read_text())['spec']
     omni = yaml.safe_load((PLATFORM / 'adapters' / name / 'manifest.yaml').read_text())['spec']
-    assert {c['name'] for c in legacy['config']} <= {c['name'] for c in omni['config']}
+    retired = {'lark': {'bot_name'}, 'aiocqhttp': {'host', 'port'}}.get(name, set())
+    if name == 'aiocqhttp':
+        # The new adapter uses the Core HTTP port or an outbound WS URL.
+        fields = {c['name'] for c in omni['config']}
+        assert {'connection_mode', 'ws_url'} <= fields
+        assert not {'host', 'port'} & fields
+    assert {c['name'] for c in legacy['config']} - retired <= {c['name'] for c in omni['config']}
     assert omni['help_links'] == legacy['help_links']
 
 
@@ -216,9 +222,9 @@ async def test_wecombot_reply_uploads_media_instead_of_placeholder(kind, stream)
         reply_text=AsyncMock(),
         push_stream_chunk=AsyncMock(return_value=True),
         upload_media=AsyncMock(return_value={'media_id': 'media'}),
-        reply_image=AsyncMock(),
-        reply_voice=AsyncMock(),
-        reply_file=AsyncMock(),
+        reply_image=AsyncMock(return_value={'errcode': 0}),
+        reply_voice=AsyncMock(return_value={'errcode': 0}),
+        reply_file=AsyncMock(return_value={'errcode': 0}),
     )
     adapter = WecomBotAdapter.model_construct(config={}, bot=bot)
     event = WecomBotEvent({'message_id': 'message', 'req_id': 'request'})
@@ -396,3 +402,10 @@ async def test_telegram_inbound_image_does_not_expose_token_url(monkeypatch):
     image = next(p for p in converted if isinstance(p, pm.Image))
     assert image.base64 and not image.url
     assert 'SECRET' not in image.model_dump_json()
+
+
+@pytest.mark.parametrize('name', OMNI_NAMES)
+def test_sources_superseded_by_eba_adapter_are_marked_legacy(name):
+    source = PLATFORM / 'sources' / f'{name}.yaml'
+    if source.exists():
+        assert yaml.safe_load(source.read_text(encoding='utf-8'))['spec'].get('legacy') is True

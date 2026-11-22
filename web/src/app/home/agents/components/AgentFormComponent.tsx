@@ -1,3 +1,4 @@
+import { useSnapshotDirty } from '@/app/infra/hooks/useSnapshotDirty';
 import EntityLoadState from '@/components/EntityLoadState';
 import {
   forwardRef,
@@ -9,7 +10,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useForm } from 'react-hook-form';
+import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useTranslation } from 'react-i18next';
@@ -20,7 +21,9 @@ import {
   Agent,
   AgentPlatformTool,
   ApiRespPluginSystemStatus,
+  DomainMeta,
   PluginTool,
+  WorkspaceOperationItem,
 } from '@/app/infra/entities/api';
 import {
   PipelineConfigStage,
@@ -43,12 +46,25 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Form, FormField, FormItem, FormMessage } from '@/components/ui/form';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import AgentEventPatternPicker from './AgentEventPatternPicker';
 import RunnerSelect from './RunnerSelect';
 import GuidedTour, {
   GuidedTourStep,
 } from '@/app/home/components/guided-tour/GuidedTour';
 import AgentApiToolPicker from './AgentApiToolPicker';
+import WorkspaceOperationsPicker from '@/app/home/components/workspace-operations/WorkspaceOperationsPicker';
+import { collectSensitiveTools } from '@/app/home/components/sensitive-tools/SensitiveToolsWarning';
+import { operationsForRunner } from '@/app/home/components/workspace-operations/runner-operation-grants';
 
 const OTHER_TOOL_SCOPES = [
   'platform',
@@ -57,6 +73,9 @@ const OTHER_TOOL_SCOPES = [
   'plugin',
   'skill',
 ] as const;
+
+// Prompt fields in Agent configuration search the Agent prompt library (LANG-439).
+const AGENT_FORM_SYSTEM_CONTEXT = { prompt_library_kind: 'agent' };
 
 export interface RunnerStatus {
   label: string;
@@ -73,6 +92,7 @@ interface AgentFormComponentProps {
   onRunnerStatusChange?: (status: RunnerStatus) => void;
   onSupportedEventPatternsChange?: (patterns: string[]) => void;
   onPlatformToolsChange?: (tools: AgentPlatformTool[]) => void;
+  onSensitiveToolsChange?: (tools: string[]) => void;
   guideEnabled?: boolean;
   debugGuideEnabled?: boolean;
 }
@@ -129,6 +149,7 @@ function AgentFormComponent(
     onRunnerStatusChange,
     onSupportedEventPatternsChange,
     onPlatformToolsChange,
+    onSensitiveToolsChange,
     guideEnabled = true,
     debugGuideEnabled = false,
   }: AgentFormComponentProps,
@@ -146,6 +167,16 @@ function AgentFormComponent(
   const [hostTools, setHostTools] = useState<PluginTool[]>([]);
   const [hostToolCatalogAvailable, setHostToolCatalogAvailable] =
     useState(true);
+  const [workspaceOperations, setWorkspaceOperations] = useState<
+    WorkspaceOperationItem[]
+  >([]);
+  const [domains, setDomains] = useState<DomainMeta[]>([]);
+  const [operationGrants, setOperationGrants] = useState<
+    Record<string, string[]>
+  >({});
+  const [dangerousModalOpen, setDangerousModalOpen] = useState(false);
+  const pendingSaveValuesRef = useRef<FormValues | null>(null);
+  const pendingResolveRef = useRef<((value: boolean) => void) | null>(null);
   const [pluginSystemStatus, setPluginSystemStatus] =
     useState<ApiRespPluginSystemStatus | null>(null);
   const [pluginStatusLoading, setPluginStatusLoading] = useState(true);
@@ -157,7 +188,6 @@ function AgentFormComponent(
   const [activeSection, setActiveSection] =
     useState<AgentConfigSection>('runner');
   const isSavingRef = useRef(false);
-  const hasUnsavedChangesRef = useRef(false);
   const loadedHostToolPolicyRef = useRef<string[] | undefined>(undefined);
 
   const formSchema = z.object({
@@ -171,6 +201,7 @@ function AgentFormComponent(
     supported_event_patterns: z.array(z.string()),
     allowed_platform_tools: z.array(z.string()),
     allowed_tools: z.array(z.string()),
+    allowed_workspace_operations: z.array(z.string()),
   });
   type FormValues = z.infer<typeof formSchema>;
 
@@ -187,6 +218,7 @@ function AgentFormComponent(
       supported_event_patterns: ['*'],
       allowed_platform_tools: [],
       allowed_tools: [],
+      allowed_workspace_operations: [],
     },
   });
   const runnerInstallScope = `agent:${agentId}`;
@@ -197,21 +229,48 @@ function AgentFormComponent(
 
   const savedSnapshotRef = useRef('');
   const initializedStagesRef = useRef<Set<string>>(new Set());
-  const watchedValues = form.watch();
-  const hasUnsavedChanges = (() => {
-    if (!savedSnapshotRef.current) return false;
-    return JSON.stringify(watchedValues) !== savedSnapshotRef.current;
-  })();
-  hasUnsavedChangesRef.current = hasUnsavedChanges;
+  const {
+    isDirty: hasUnsavedChanges,
+    dirtyRef: hasUnsavedChangesRef,
+    refreshDirty,
+  } = useSnapshotDirty(form, savedSnapshotRef);
 
   useEffect(() => {
     onDirtyChange?.(hasUnsavedChanges);
   }, [hasUnsavedChanges, onDirtyChange]);
 
-  const supportedEventPatterns = form.watch('supported_event_patterns');
+  const supportedEventPatterns = useWatch({
+    control: form.control,
+    name: 'supported_event_patterns',
+  });
   useEffect(() => {
     onSupportedEventPatternsChange?.(supportedEventPatterns);
   }, [onSupportedEventPatternsChange, supportedEventPatterns]);
+
+  const selectedPlatformTools = useWatch({
+    control: form.control,
+    name: 'allowed_platform_tools',
+  });
+  const selectedWorkspaceOperations = useWatch({
+    control: form.control,
+    name: 'allowed_workspace_operations',
+  });
+  useEffect(() => {
+    onSensitiveToolsChange?.(
+      collectSensitiveTools(
+        platformTools,
+        selectedPlatformTools ?? [],
+        workspaceOperations,
+        selectedWorkspaceOperations ?? [],
+      ),
+    );
+  }, [
+    onSensitiveToolsChange,
+    platformTools,
+    selectedPlatformTools,
+    workspaceOperations,
+    selectedWorkspaceOperations,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -235,6 +294,9 @@ function AgentFormComponent(
           : [];
         setHostToolCatalogAvailable(hasHostToolCatalog);
         setHostTools(availableHostTools);
+        setWorkspaceOperations(metadata.workspace_operations || []);
+        setOperationGrants(metadata.workspace_operation_grants || {});
+        setDomains(metadata.domains || []);
         const agent = resp.agent;
         const config = (agent.config ?? {}) as Record<string, any>;
         const configuredHostTools = Array.isArray(config.allowed_tools)
@@ -246,6 +308,13 @@ function AgentFormComponent(
           config.allowed_platform_tools,
         )
           ? config.allowed_platform_tools.filter(
+              (name): name is string => typeof name === 'string',
+            )
+          : [];
+        const configuredWorkspaceOperations = Array.isArray(
+          config.allowed_workspace_operations,
+        )
+          ? config.allowed_workspace_operations.filter(
               (name): name is string => typeof name === 'string',
             )
           : [];
@@ -276,9 +345,11 @@ function AgentFormComponent(
           }),
           allowed_tools:
             configuredHostTools ?? availableHostTools.map((tool) => tool.name),
+          allowed_workspace_operations: configuredWorkspaceOperations,
         };
         form.reset(loadedValues);
         savedSnapshotRef.current = JSON.stringify(loadedValues);
+        refreshDirty();
         initializedStagesRef.current.clear();
         setInitialDataLoaded(true);
       })
@@ -290,7 +361,7 @@ function AgentFormComponent(
     return () => {
       cancelled = true;
     };
-  }, [agentId, form, t, loadAttempt]);
+  }, [agentId, form, t, loadAttempt, refreshDirty]);
 
   useEffect(() => {
     if (!initialDataLoaded || !readPendingRunnerInstall(runnerInstallScope)) {
@@ -340,7 +411,11 @@ function AgentFormComponent(
     void loadPluginSystemStatus();
   }, [loadPluginSystemStatus]);
 
-  const currentRunner = (form.watch('runner') as Record<string, any>)?.id;
+  const currentRunner = useWatch({
+    control: form.control,
+    name: 'runner',
+    compute: (runner) => runner?.id,
+  });
   const runnerOptions = useMemo(() => {
     const runnerStage = runnerConfigSchema?.stages.find(
       (stage) => stage.name === 'runner',
@@ -352,30 +427,49 @@ function AgentFormComponent(
   const selectedRunnerOption = runnerOptions.find(
     (option) => option.name === currentRunner,
   );
+  const selectableWorkspaceOperations = operationsForRunner(
+    workspaceOperations,
+    currentRunner,
+    operationGrants,
+  );
   const runnerSelectorStage = runnerConfigSchema?.stages.find(
     (stage) => stage.name === 'runner',
   );
   const activeRunnerStage = runnerConfigSchema?.stages.find(
     (stage) => stage.name === currentRunner,
   );
-  const runnerConfigValues = form.watch('runner_config') as Record<
+  const runnerConfigValues = form.getValues('runner_config') as Record<
     string,
     Record<string, unknown>
   >;
-  const activeRunnerValues = useMemo(
-    () => runnerConfigValues?.[currentRunner] ?? {},
-    [currentRunner, runnerConfigValues],
+  useWatch({
+    control: form.control,
+    compute: (values) =>
+      (activeRunnerStage?.config ?? [])
+        .filter(
+          (field) =>
+            field.required &&
+            isRunnerFieldVisible(
+              field,
+              values.runner_config?.[currentRunner] ?? {},
+            ) &&
+            isRequiredRunnerValueMissing(
+              values.runner_config?.[currentRunner]?.[field.name],
+            ),
+        )
+        .map((field) => field.name)
+        .join('\n'),
+  });
+  const activeRunnerValues = runnerConfigValues?.[currentRunner] ?? {};
+  const missingRunnerFields = (activeRunnerStage?.config ?? []).filter(
+    (field) =>
+      field.required &&
+      isRunnerFieldVisible(field, activeRunnerValues) &&
+      isRequiredRunnerValueMissing(activeRunnerValues[field.name]),
   );
-  const missingRunnerFields = useMemo(
-    () =>
-      (activeRunnerStage?.config ?? []).filter(
-        (field) =>
-          field.required &&
-          isRunnerFieldVisible(field, activeRunnerValues) &&
-          isRequiredRunnerValueMissing(activeRunnerValues[field.name]),
-      ),
-    [activeRunnerStage, activeRunnerValues],
-  );
+  const missingRunnerFieldNames = missingRunnerFields
+    .map((field) => extractI18nObject(field.label))
+    .join(', ');
   const primarySections: Array<{
     name: AgentConfigSection;
     label: string;
@@ -448,9 +542,7 @@ function AgentFormComponent(
       return {
         label: t('agents.runnerConfigIncomplete'),
         description: t('agents.runnerConfigIncompleteDescription', {
-          fields: missingRunnerFields
-            .map((field) => extractI18nObject(field.label))
-            .join(', '),
+          fields: missingRunnerFieldNames,
         }),
         tone: 'warning',
       };
@@ -471,7 +563,8 @@ function AgentFormComponent(
     pluginStatusLoading,
     pluginSystemStatus,
     runnerOptions.length,
-    missingRunnerFields,
+    missingRunnerFieldNames,
+    missingRunnerFields.length,
     selectedRunnerOption,
     t,
   ]);
@@ -520,11 +613,12 @@ function AgentFormComponent(
     onRunnerStatusChange?.(runnerStatus);
   }, [onRunnerStatusChange, runnerStatus]);
 
-  function updateSnapshotIfInitial(stageKey: string) {
+  function updateSnapshotIfInitial(stageKey: string, wasDirty: boolean) {
     if (!initializedStagesRef.current.has(stageKey)) {
       initializedStagesRef.current.add(stageKey);
-      if (!hasUnsavedChanges) {
+      if (!wasDirty) {
         savedSnapshotRef.current = JSON.stringify(form.getValues());
+        refreshDirty();
       }
     }
   }
@@ -534,9 +628,10 @@ function AgentFormComponent(
     stageName: string,
     values: object,
   ) {
+    const wasDirty = hasUnsavedChangesRef.current;
     if (formName === 'runner') {
       form.setValue('runner', values, { shouldDirty: true });
-      updateSnapshotIfInitial(`runner.${stageName}`);
+      updateSnapshotIfInitial(`runner.${stageName}`, wasDirty);
       return;
     }
 
@@ -550,7 +645,7 @@ function AgentFormComponent(
       },
       { shouldDirty: true },
     );
-    updateSnapshotIfInitial(`runner_config.${stageName}`);
+    updateSnapshotIfInitial(`runner_config.${stageName}`, wasDirty);
   }
 
   function renderDynamicStage(stage: PipelineConfigStage) {
@@ -558,8 +653,8 @@ function AgentFormComponent(
     if (!isRunnerSelector && stage.name !== currentRunner) return null;
 
     const initialValues = isRunnerSelector
-      ? (form.watch('runner') as Record<string, unknown>) || {}
-      : ((form.watch('runner_config') as Record<string, any>) || {})[
+      ? (form.getValues('runner') as Record<string, unknown>) || {}
+      : ((form.getValues('runner_config') as Record<string, any>) || {})[
           stage.name
         ] || {};
 
@@ -580,6 +675,7 @@ function AgentFormComponent(
           <DynamicFormComponent
             itemConfigList={stage.config}
             initialValues={initialValues}
+            systemContext={AGENT_FORM_SYSTEM_CONTEXT}
             renderItem={
               isRunnerSelector
                 ? ({ config, field }) =>
@@ -617,6 +713,7 @@ function AgentFormComponent(
         runner,
         runner_config: values.runner_config ?? {},
         allowed_platform_tools: values.allowed_platform_tools,
+        allowed_workspace_operations: values.allowed_workspace_operations,
       };
       if (hostToolCatalogAvailable) {
         config.allowed_tools = values.allowed_tools;
@@ -640,6 +737,7 @@ function AgentFormComponent(
           loadedHostToolPolicyRef.current = [...values.allowed_tools];
         }
         savedSnapshotRef.current = submittedSnapshot;
+        refreshDirty();
         onFinish(agent);
         toast.success(t('agents.saveSuccess'));
         return true;
@@ -655,11 +753,71 @@ function AgentFormComponent(
         onSavingChange?.(false);
       }
     },
-    [agentId, hostToolCatalogAvailable, onFinish, onSavingChange, t],
+    [
+      agentId,
+      hostToolCatalogAvailable,
+      onFinish,
+      onSavingChange,
+      refreshDirty,
+      t,
+    ],
+  );
+
+  const confirmAndSave = useCallback(
+    (values: FormValues): Promise<boolean> => {
+      const ungrantableOps = values.allowed_workspace_operations.filter(
+        (opId) => {
+          const op = selectableWorkspaceOperations.find(
+            (item) => item.id === opId,
+          );
+          return op && op.grantable === false;
+        },
+      );
+
+      let effectiveValues = values;
+      if (ungrantableOps.length > 0) {
+        const filteredOps = values.allowed_workspace_operations.filter(
+          (opId) => {
+            const op = selectableWorkspaceOperations.find(
+              (item) => item.id === opId,
+            );
+            return !op || op.grantable !== false;
+          },
+        );
+        toast.warning(
+          t('workspaceOperations.ungrantableRemoved', {
+            count: ungrantableOps.length,
+          }),
+        );
+        effectiveValues = {
+          ...values,
+          allowed_workspace_operations: filteredOps,
+        };
+        form.setValue('allowed_workspace_operations', filteredOps, {
+          shouldDirty: true,
+        });
+      }
+
+      const hasDangerous = effectiveValues.allowed_workspace_operations.some(
+        (opId) => {
+          const op = workspaceOperations.find((item) => item.id === opId);
+          return op?.risk === 'dangerous';
+        },
+      );
+      if (hasDangerous) {
+        return new Promise<boolean>((resolve) => {
+          pendingSaveValuesRef.current = effectiveValues;
+          pendingResolveRef.current = resolve;
+          setDangerousModalOpen(true);
+        });
+      }
+      return saveValues(effectiveValues);
+    },
+    [form, saveValues, t, workspaceOperations, selectableWorkspaceOperations],
   );
 
   function handleSubmit(values: FormValues) {
-    void saveValues(values);
+    void confirmAndSave(values);
   }
 
   useImperativeHandle(
@@ -682,6 +840,7 @@ function AgentFormComponent(
             emoji: values.emoji || '🤖',
           };
           savedSnapshotRef.current = JSON.stringify(snapshot);
+          refreshDirty();
         }
       },
       async save() {
@@ -690,10 +849,17 @@ function AgentFormComponent(
         if (isSavingRef.current) return false;
         const valid = await form.trigger();
         if (!valid) return false;
-        return (await saveValues(form.getValues())) ?? false;
+        return (await confirmAndSave(form.getValues())) ?? false;
       },
     }),
-    [form, initialDataLoaded, loadFailed, saveValues],
+    [
+      confirmAndSave,
+      form,
+      initialDataLoaded,
+      loadFailed,
+      hasUnsavedChangesRef,
+      refreshDirty,
+    ],
   );
 
   if (loadFailed)
@@ -848,6 +1014,40 @@ function AgentFormComponent(
                               }
                               hostCatalogAvailable={hostToolCatalogAvailable}
                               scopes={OTHER_TOOL_SCOPES}
+                              workspaceTools={{
+                                count: workspaceOperations.length,
+                                selectedCount: form.watch(
+                                  'allowed_workspace_operations',
+                                ).length,
+                                content: (
+                                  <FormField
+                                    control={form.control}
+                                    name="allowed_workspace_operations"
+                                    render={({ field }) => (
+                                      <FormItem>
+                                        <WorkspaceOperationsPicker
+                                          operations={
+                                            selectableWorkspaceOperations
+                                          }
+                                          domains={domains}
+                                          value={field.value}
+                                          onChange={(next) =>
+                                            form.setValue(
+                                              'allowed_workspace_operations',
+                                              next,
+                                              {
+                                                shouldDirty: true,
+                                                shouldValidate: true,
+                                              },
+                                            )
+                                          }
+                                        />
+                                        <FormMessage />
+                                      </FormItem>
+                                    )}
+                                  />
+                                ),
+                              }}
                             />
                             <FormMessage />
                           </FormItem>
@@ -865,6 +1065,48 @@ function AgentFormComponent(
             steps={runnerGuideSteps}
             testId="runner-setup-guide"
           />
+          <AlertDialog
+            open={dangerousModalOpen}
+            onOpenChange={setDangerousModalOpen}
+          >
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  {t('workspaceOperations.dangerousConfirmTitle')}
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  {t('workspaceOperations.dangerousConfirmDescription')}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel
+                  onClick={() => {
+                    setDangerousModalOpen(false);
+                    pendingResolveRef.current?.(false);
+                    pendingSaveValuesRef.current = null;
+                    pendingResolveRef.current = null;
+                  }}
+                >
+                  {t('workspaceOperations.dangerousConfirmCancel')}
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={async () => {
+                    setDangerousModalOpen(false);
+                    if (pendingSaveValuesRef.current) {
+                      const vals = pendingSaveValuesRef.current;
+                      pendingSaveValuesRef.current = null;
+                      const resolve = pendingResolveRef.current;
+                      pendingResolveRef.current = null;
+                      const success = await saveValues(vals);
+                      resolve?.(success);
+                    }
+                  }}
+                >
+                  {t('workspaceOperations.dangerousConfirmAction')}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </form>
       </Form>
     </div>

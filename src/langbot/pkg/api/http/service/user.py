@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ....i18n import t
+
 import sqlalchemy
 import argon2
 import jwt
@@ -31,7 +33,9 @@ from ....entity.persistence.workspace import MembershipRole, MembershipStatus, W
 from ....utils import constants
 from ....entity.errors import account as account_errors
 from ....workspace.collaboration import normalize_email
+from ....workspace.errors import WorkspaceNotFoundError
 from ....utils import bounded_executor
+from ....workspace.space_dedicated import SpaceDedicatedMembers, SpaceMembershipLookupError
 
 if typing.TYPE_CHECKING:
     from ....core.app import Application
@@ -43,6 +47,10 @@ _SPACE_OAUTH_STATE_HEAP_MAX_MULTIPLIER = 4
 _PASSKEY_CHALLENGE_MAX_ENTRIES = 4096
 _PASSKEY_CHALLENGE_HEAP_COMPACT_FLOOR = 64
 _PASSKEY_CHALLENGE_HEAP_MAX_MULTIPLIER = 4
+
+
+# Marks a Space membership lookup that could not be answered.
+_DEDICATED_ROLE_UNKNOWN = object()
 
 
 class AccountExistsLoginRequiredError(ValueError):
@@ -253,10 +261,23 @@ class UserService:
         access = accesses[0]
         if access.membership.role != MembershipRole.OWNER.value:
             return
-        await self.ap.provider_service.update_space_model_provider_api_keys(
-            access.workspace.uuid,
-            api_key,
-        )
+        # A missing compatibility provider row is a model-routing problem, not an
+        # authentication one. Letting provider_service raise here aborted the whole
+        # Space OAuth callback after the Account had already been created, so the
+        # user logged in "successfully" but received 404 on every retry.
+        try:
+            await self.ap.provider_service.update_space_model_provider_api_keys(
+                access.workspace.uuid,
+                api_key,
+            )
+        except WorkspaceNotFoundError:
+            logger = getattr(self.ap, 'logger', None)
+            if logger is not None:
+                logger.warning(
+                    'Space model provider row is missing for workspace %s; '
+                    'skipping credential refresh so login can proceed',
+                    access.workspace.uuid,
+                )
 
     async def is_initialized(self) -> bool:
         account = await self._identity_scalar(
@@ -423,12 +444,12 @@ class UserService:
 
         user_obj = await self.get_user_by_email(user_email)
         if user_obj is None:
-            raise ValueError('用户不存在')
+            raise ValueError(t('Resource not found'))
         self._require_active_account(user_obj)
 
         # Check if this user has a local password set
         if not user_obj.password:
-            raise ValueError('请使用 LangBot 账号登录')
+            raise ValueError(t('Please sign in with your LangBot Account'))
 
         await self._verify_password(user_obj.password, password)
 
@@ -703,7 +724,16 @@ class UserService:
             # Check if user with this Space UUID already exists
             existing_user = await self.get_user_by_space_account_uuid(space_account_uuid)
 
+            dedicated = self._space_dedicated_members()
             if existing_user:
+                # A Space-managed member of a dedicated instance must still be
+                # a member on Space; the owner and local accounts are untouched.
+                if dedicated is not None:
+                    role = await self._lookup_dedicated_role(dedicated, access_token)
+                    if role is not _DEDICATED_ROLE_UNKNOWN and not await dedicated.reconcile_account(
+                        existing_user, role
+                    ):
+                        raise account_errors.SpaceDedicatedMemberRequiredError()
                 # Update existing user's tokens
                 await self._identity_execute(
                     sqlalchemy.update(user.User)
@@ -732,7 +762,25 @@ class UserService:
             # Check if system is already initialized
             is_initialized = await self.is_initialized()
             if is_initialized:
-                raise account_errors.SpaceAccountNotRegisteredError()
+                if dedicated is None:
+                    raise account_errors.SpaceAccountNotRegisteredError()
+                # Dedicated Cloud instance: only accounts Space reports as
+                # invited members may join, with the role Space assigned.
+                role = await self._lookup_dedicated_role(dedicated, access_token)
+                if role is _DEDICATED_ROLE_UNKNOWN or role is None:
+                    raise account_errors.SpaceDedicatedMemberRequiredError()
+                created_member = await dedicated.create_member_account(
+                    space_account_uuid=space_account_uuid,
+                    email=email,
+                    role=role,
+                    token_values={
+                        'space_access_token': access_token,
+                        'space_refresh_token': refresh_token,
+                        'space_api_key': api_key,
+                        'space_access_token_expires_at': expires_at,
+                    },
+                )
+                return await self.get_user_by_uuid(created_member.uuid)
 
             # Create new Space user (first time initialization)
             if hasattr(self.ap.persistence_mgr, 'get_db_engine') and hasattr(self.ap, 'workspace_service'):
@@ -774,7 +822,27 @@ class UserService:
             created_user = await self.get_user_by_space_account_uuid(space_account_uuid)
             if created_user is not None:
                 await self._update_space_provider_for_account(created_user, api_key)
+            if dedicated is not None:
+                # Lets Space know this instance supports members (owner login).
+                await self._lookup_dedicated_role(dedicated, access_token)
             return created_user
+
+    def _space_dedicated_members(self) -> SpaceDedicatedMembers | None:
+        """Return the dedicated-member helper only on dedicated Cloud instances."""
+        dedicated = getattr(self, '_space_dedicated', None)
+        if dedicated is None:
+            dedicated = SpaceDedicatedMembers(self.ap)
+            self._space_dedicated = dedicated
+        if not dedicated.enabled() or not hasattr(self.ap.persistence_mgr, 'get_db_engine'):
+            return None
+        return dedicated
+
+    async def _lookup_dedicated_role(self, dedicated: SpaceDedicatedMembers, access_token: str) -> typing.Any:
+        try:
+            return await dedicated.lookup_role(access_token)
+        except SpaceMembershipLookupError:
+            self.ap.logger.warning('Space dedicated membership lookup failed; keeping current access')
+            return _DEDICATED_ROLE_UNKNOWN
 
     async def _update_projected_space_user(
         self,
@@ -913,6 +981,7 @@ class UserService:
 
     async def bind_space_account(self, user_email: str, code: str, *, redirect_uri: str = '') -> user.User:
         """Bind Space account to existing local account"""
+        self._require_local_directory()
         local_account = await self.get_user_by_email(user_email)
         if local_account is None:
             raise ValueError('User not found')
@@ -957,19 +1026,20 @@ class UserService:
 
         if not space_account_uuid or not space_email:
             raise ValueError('Invalid Space user info')
-        if normalize_email(space_email) != normalize_email(user_email):
+        if normalize_email(space_email) != normalize_email(user_email) and not await self._can_replace_local_email(
+            local_account
+        ):
             raise account_errors.AccountEmailMismatchError()
 
         # Check if this Space account is already bound to another user
         existing_space_user = await self.get_user_by_space_account_uuid(space_account_uuid)
-        if existing_space_user and existing_space_user.normalized_email != normalize_email(user_email):
+        if existing_space_user and existing_space_user.uuid != local_account.uuid:
             raise ValueError('This LangBot Account is already bound to another user')
 
         # Update local account to Space account
-        normalized_email = normalize_email(user_email)
         await self._identity_execute(
             sqlalchemy.update(user.User)
-            .where(user.User.normalized_email == normalized_email)
+            .where(user.User.uuid == local_account.uuid)
             .values(
                 user=normalize_email(space_email),  # Update email to Space email
                 normalized_email=normalize_email(space_email),
@@ -980,13 +1050,32 @@ class UserService:
                 space_api_key=api_key,
                 space_access_token_expires_at=expires_at,
             ),
-            f'email:{normalized_email}',
+            f'uuid:{local_account.uuid}',
         )
 
         # Update Space model provider API keys
         await self._update_space_provider_for_account(local_account, api_key)
 
-        return await self.get_user_by_email(space_email)
+        return await self.get_user_by_uuid(local_account.uuid)
+
+    async def _can_replace_local_email(self, account: user.User) -> bool:
+        """Allow only the sole, unbound OSS local Account to adopt its Space email."""
+        workspace_service = getattr(self.ap, 'workspace_service', None)
+        if (
+            workspace_service is None
+            or workspace_service.policy.multi_workspace_enabled
+            or account.source != user.AccountSource.LOCAL.value
+            or account.account_type != 'local'
+            or account.space_account_uuid is not None
+        ):
+            return False
+        # Invited members must retain the email check. The explicit bind flow
+        # already proves ownership of both accounts in a single-account instance.
+        other_account = await self._identity_scalar(
+            sqlalchemy.select(user.User).where(user.User.uuid != account.uuid).limit(1),
+            f'instance:{self._jwt_identity()[1]}',
+        )
+        return other_account is None
 
     def _prune_passkey_challenges(self, now: float) -> None:
         while self._passkey_challenge_expiry_heap:

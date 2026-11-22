@@ -62,7 +62,6 @@ async def main(loop: asyncio.AbstractEventLoop):
         import signal
 
         def signal_handler(sig, frame):
-            print('[Signal] Program exit.')
             runtime_loop.call_soon_threadsafe(shutdown_requested.set)
 
         signal.signal(signal.SIGINT, signal_handler)
@@ -87,6 +86,7 @@ async def main(loop: asyncio.AbstractEventLoop):
             raise run_result
     except Exception:
         traceback.print_exc()
+        raise
     finally:
         if app_inst is not None:
             await app_inst.shutdown()
